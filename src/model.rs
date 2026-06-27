@@ -100,3 +100,10 @@ fn download(url: &str, dest: &Path) -> Res<()> {
     fs::rename(&part, dest)?;
     Ok(())
 }
+
+pub fn check_presence(cache: &Path, quant: &str) -> (PathBuf, bool, PathBuf, bool) {
+    let model_name = format!("Unlimited-OCR-{quant}.gguf");
+    let model = cache.join(&model_name);
+    let mmproj = cache.join(MMPROJ);
+    (model.clone(), model.is_file(), mmproj.clone(), mmproj.is_file())
+}

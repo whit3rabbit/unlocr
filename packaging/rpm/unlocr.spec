@@ -34,12 +34,16 @@ install -Dm0755 %{_sourcedir}/unlocr %{buildroot}%{_bindir}/unlocr
 %post
 if ! command -v llama-server >/dev/null 2>&1; then
   echo "unlocr: llama-server not found on PATH."
-  echo "      Install llama.cpp (build >= b8530): https://github.com/ggml-org/llama.cpp"
+  echo "      Install llama.cpp (build >= b8530) via one of these options:"
+  echo "        - Homebrew: brew install llama.cpp"
+  echo "        - Conda-forge: conda install -c conda-forge llama-cpp"
+  echo "        - Nix: nix profile install nixpkgs#llama-cpp"
+  echo "        - Build from source: see https://github.com/ggml-org/llama.cpp/blob/master/docs/install.md"
 fi
 
 %files
 %{_bindir}/unlocr
 
 %changelog
-* Sat Jun 27 2026 unlocr maintainers <noreply@example.com> - 0.1.0-1
-- Initial package.
+* Sat Jun 27 2026 unlocr maintainers <noreply@example.com> - %{version}-%{release}
+- Package built for version %{version}.

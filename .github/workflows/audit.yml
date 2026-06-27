@@ -1,0 +1,32 @@
+name: security-audit
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * 0' # weekly on Sundays
+
+jobs:
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4f366e64bc61985d572415ff039a7379854d97a2 # stable
+        with:
+          toolchain: stable
+          
+      - name: Install tools
+        run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall -y cargo-audit cargo-deny
+          
+      - name: Run cargo audit
+        run: cargo audit
+        
+      - name: Run cargo deny
+        run: cargo deny check

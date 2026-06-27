@@ -42,7 +42,11 @@ cat > "$ROOT/DEBIAN/postinst" <<'EOF'
 set -e
 if ! command -v llama-server >/dev/null 2>&1; then
   echo "unlocr: llama-server not found on PATH."
-  echo "      Install llama.cpp (build >= b8530): https://github.com/ggml-org/llama.cpp"
+  echo "      Install llama.cpp (build >= b8530) via one of these options:"
+  echo "        - Homebrew: brew install llama.cpp"
+  echo "        - Conda-forge: conda install -c conda-forge llama-cpp"
+  echo "        - Nix: nix profile install nixpkgs#llama-cpp"
+  echo "        - Build from source: see https://github.com/ggml-org/llama.cpp/blob/master/docs/install.md"
 fi
 exit 0
 EOF

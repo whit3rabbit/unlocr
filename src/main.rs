@@ -17,8 +17,11 @@ pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
 #[derive(Parser, Debug)]
 #[command(name = "unlocr", version, about = "OCR PDFs to markdown via Unlimited-OCR + llama.cpp")]
 struct Args {
+    /// Subcommand to execute (e.g. doctor, preflight)
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// Input PDF file(s)
-    #[arg(required = true)]
     inputs: Vec<PathBuf>,
 
     /// Output directory for the .md files (default: current dir)
@@ -64,6 +67,38 @@ struct Args {
     keep_images: bool,
 }
 
+#[derive(clap::Subcommand, Debug)]
+enum Commands {
+    /// Validate system dependencies, model files, RAM, and disk space
+    Doctor {
+        /// Path to llama-server (default: PATH / Homebrew)
+        #[arg(long)]
+        llama_bin: Option<PathBuf>,
+
+        /// Model cache directory (default: per-OS cache dir)
+        #[arg(long)]
+        model_dir: Option<PathBuf>,
+
+        /// Exact quant tag (matches Unlimited-OCR-<QUANT>.gguf), e.g. Q8_0, Q4_K_M.
+        #[arg(long, default_value = "Q8_0")]
+        quant: String,
+    },
+    /// Alias for doctor
+    Preflight {
+        /// Path to llama-server (default: PATH / Homebrew)
+        #[arg(long)]
+        llama_bin: Option<PathBuf>,
+
+        /// Model cache directory (default: per-OS cache dir)
+        #[arg(long)]
+        model_dir: Option<PathBuf>,
+
+        /// Exact quant tag (matches Unlimited-OCR-<QUANT>.gguf), e.g. Q8_0, Q4_K_M.
+        #[arg(long, default_value = "Q8_0")]
+        quant: String,
+    },
+}
+
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum Quality {
     /// BF16 (5.47GB), highest fidelity
@@ -96,6 +131,19 @@ fn main() -> ExitCode {
 
 fn run() -> Res<()> {
     let args = Args::parse();
+
+    if let Some(cmd) = args.command {
+        match cmd {
+            Commands::Doctor { llama_bin, model_dir, quant } | Commands::Preflight { llama_bin, model_dir, quant } => {
+                preflight::run_doctor(llama_bin.as_deref(), model_dir, &quant)?;
+            }
+        }
+        return Ok(());
+    }
+
+    if args.inputs.is_empty() {
+        return Err("No input PDF files specified. Run: unlocr --help for usage.".into());
+    }
 
     // 1. Preflight: locate external binaries and validate the llama.cpp build.
     let tools = preflight::check(args.llama_bin.as_deref())?;

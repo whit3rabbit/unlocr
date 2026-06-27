@@ -29,10 +29,35 @@ brew install llama.cpp poppler
 > hints in the tool are macOS-specific for now and the non-macOS paths are
 > unverified.
 
+## Install
+
+Prebuilt binaries for each release are attached to the
+[GitHub Releases](../../releases) page (macOS arm64/x64, Linux x64 musl, Windows
+x64). Download, extract, put `unlocr` on your `PATH`.
+
+Build and install from source instead:
+
+```bash
+./install.sh                 # macOS/Linux: build + install to /usr/local/bin + dep check
+PREFIX=$HOME/.local ./install.sh
+```
+
+Windows: `powershell -ExecutionPolicy Bypass -File packaging\windows\install.ps1`.
+Distro packages (.deb/.rpm): see [packaging/README.md](packaging/README.md).
+
+## Uninstall
+
+```bash
+./uninstall.sh               # removes the binary AND the model cache (see below)
+```
+
+Windows: `powershell -ExecutionPolicy Bypass -File packaging\windows\uninstall.ps1`.
+Neither touches llama.cpp or poppler. (`make uninstall` and removing a .deb/.rpm
+delete the binary only, never the cache.)
+
 ## Build
 
 ```bash
-cd unlocr
 cargo build --release
 # binary: target/release/unlocr  (~1.4 MB)
 ```
@@ -63,6 +88,21 @@ unlocr report.pdf --out ./out --quality best
 # -> ./out/report.md, page-delimited with <!-- page N --> markers
 ```
 
+## Cache location
+
+GGUFs are downloaded from Hugging Face on first run and cached. The set is large
+(BF16 alone ~5.5G; all three quants + projector up to ~8G), so know where it goes:
+
+| OS | Default path |
+|----|--------------|
+| macOS | `~/Library/Caches/unlocr` |
+| Linux | `$XDG_CACHE_HOME/unlocr`, else `~/.cache/unlocr` |
+| Windows | `%LOCALAPPDATA%\unlocr` |
+
+`$XDG_CACHE_HOME` (if set) wins on every OS. Override entirely with `--model-dir P`.
+To reclaim the space, run `./uninstall.sh` (or `uninstall.ps1` on Windows), or
+just delete the directory above.
+
 ## Benchmark (unofficial)
 
 > Single run, one machine, one document. Not a rigorous benchmark, just a rough
@@ -86,11 +126,8 @@ references) ran 1-3 min each and pulled the average up. `--max-tokens` (default
 4096) bounds that worst case. Smaller quants (`--quality good`/`less`) trade some
 fidelity for speed and a smaller download.
 
-Model cache location (override with `--model-dir`):
-
-- macOS: `~/Library/Caches/unlocr`
-- Linux: `$XDG_CACHE_HOME/unlocr` or `~/.cache/unlocr`
-- Windows: `%LOCALAPPDATA%\unlocr`
+See [Cache location](#cache-location) for where the GGUFs land and how to
+reclaim the space.
 
 ## How it works
 

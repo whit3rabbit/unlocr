@@ -10,7 +10,7 @@ NAME=unlocr
 PREFIX=${PREFIX:-/usr/local}
 BINDIR="$PREFIX/bin"
 ROOT=$(cd "$(dirname "$0")" && pwd)
-SRC="$ROOT/unlocr"
+SRC="$ROOT"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -18,7 +18,7 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 command -v cargo >/dev/null 2>&1 || die "cargo not found. Install Rust: https://rustup.rs"
 
 say "Building $NAME (release)..."
-cargo build --release --manifest-path "$SRC/Cargo.toml"
+cargo build --release --locked --manifest-path "$SRC/Cargo.toml"
 BIN="$SRC/target/release/$NAME"
 [ -x "$BIN" ] || die "build produced no binary at $BIN"
 
@@ -41,14 +41,50 @@ check() {
     say "  MISSING: $1 -- $2"
   fi
 }
+
+llama_hint() {
+  has_brew=0; has_port=0; has_conda=0; has_nix=0
+  command -v brew >/dev/null 2>&1 && has_brew=1
+  command -v port >/dev/null 2>&1 && has_port=1
+  (command -v conda >/dev/null 2>&1 || command -v mamba >/dev/null 2>&1 || command -v pixi >/dev/null 2>&1) && has_conda=1
+  command -v nix >/dev/null 2>&1 && has_nix=1
+
+  case "$(uname -s)" in
+    Darwin)
+      options=""
+      [ $has_brew -eq 1 ] && options="$options\n    - Homebrew: brew install llama.cpp"
+      [ $has_port -eq 1 ] && options="$options\n    - MacPorts: sudo port install llama.cpp"
+      [ $has_conda -eq 1 ] && options="$options\n    - Conda-forge: conda install -c conda-forge llama-cpp"
+      [ $has_nix -eq 1 ] && options="$options\n    - Nix: nix profile install nixpkgs#llama-cpp"
+      if [ -z "$options" ]; then
+        options="\n    - Homebrew (Recommended): brew install llama.cpp\n    - Conda-forge: conda install -c conda-forge llama-cpp\n    - MacPorts: sudo port install llama.cpp\n    - Nix: nix profile install nixpkgs#llama-cpp"
+      fi
+      printf "install llama.cpp >= b8530:%b" "$options"
+      ;;
+    Linux)
+      options=""
+      [ $has_brew -eq 1 ] && options="$options\n    - Homebrew: brew install llama.cpp"
+      [ $has_conda -eq 1 ] && options="$options\n    - Conda-forge: conda install -c conda-forge llama-cpp"
+      [ $has_nix -eq 1 ] && options="$options\n    - Nix: nix profile install nixpkgs#llama-cpp"
+      if [ -z "$options" ]; then
+        options="\n    - Homebrew: brew install llama.cpp\n    - Conda-forge: conda install -c conda-forge llama-cpp\n    - Nix: nix profile install nixpkgs#llama-cpp\n    - Build from source: see https://github.com/ggml-org/llama.cpp/blob/master/docs/install.md"
+      fi
+      printf "install llama.cpp >= b8530:%b" "$options"
+      ;;
+    *)
+      printf "install llama.cpp >= b8530 (see https://github.com/ggml-org/llama.cpp/blob/master/docs/install.md)"
+      ;;
+  esac
+}
+
 say "Runtime dependencies:"
 case "$(uname -s)" in
   Darwin) check pdftoppm "brew install poppler"
-          check llama-server "brew install llama.cpp" ;;
+          check llama-server "$(llama_hint)" ;;
   Linux)  check pdftoppm "apt install poppler-utils  /  dnf install poppler-utils"
-          check llama-server "build llama.cpp >= b8530: https://github.com/ggml-org/llama.cpp" ;;
+          check llama-server "$(llama_hint)" ;;
   *)      check pdftoppm "install poppler"
-          check llama-server "install llama.cpp >= b8530" ;;
+          check llama-server "$(llama_hint)" ;;
 esac
 
 case ":$PATH:" in

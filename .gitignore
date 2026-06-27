@@ -1,5 +1,5 @@
 # Rust build
-/unlocr/target/
+/target/
 
 # macOS
 .DS_Store

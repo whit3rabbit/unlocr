@@ -4,12 +4,12 @@ Rust CLI: OCR PDFs to markdown via the Unlimited-OCR (DeepSeek-OCR) model + llam
 Thin wrapper. Full usage/benchmarks in README.md.
 
 ## Layout
-- Cargo workspace lives in `unlocr/`, NOT repo root. Source: `unlocr/src/`.
+- Cargo workspace lives in repo root. Source: `src/`.
 - Packaging (deb/rpm/installers) at repo root + `packaging/`.
-- Repo, product, binary, and crate are all named `unlocr`. Cargo crate dir is `unlocr/`.
+- Repo, product, binary, and crate are all named `unlocr`.
 
 ## Commands (from repo root)
-- `make build` / `make test`      # cargo, targets unlocr/Cargo.toml
+- `make build` / `make test`      # cargo, targets Cargo.toml
 - `make install`                  # to $PREFIX/bin (default /usr/local; honors DESTDIR)
 - `make deb`                      # dist/*.deb   (needs dpkg-deb)
 - `make rpm`                      # dist/*.rpm   (needs rpmbuild)

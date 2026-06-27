@@ -1,0 +1,90 @@
+name: release
+
+# Tag-driven release. Push a tag like v0.1.0 (use ./release.sh) and this builds
+# a native binary on each OS runner and attaches them to the GitHub Release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      # musl static link needs the musl C toolchain.
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install cargo-auditable
+        run: cargo install cargo-auditable
+
+      - name: Build
+        run: cargo auditable build --release --locked --target ${{ matrix.target }} --manifest-path Cargo.toml
+
+      # Package: tar.gz on unix, zip on windows. Name carries version + triple.
+      - name: Package (unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          name="unlocr-${ver}-${{ matrix.target }}"
+          tar -C "target/${{ matrix.target }}/release" -czf "${name}.tar.gz" unlocr
+          sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          echo "ASSET=${name}.tar.gz" >> "$GITHUB_ENV"
+          echo "CHECKSUM=${name}.tar.gz.sha256" >> "$GITHUB_ENV"
+
+      - name: Package (windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}".TrimStart("v")
+          $name = "unlocr-$ver-${{ matrix.target }}"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/unlocr.exe" -DestinationPath "$name.zip"
+          $hash = (Get-FileHash -Path "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -FilePath "$name.zip.sha256" -Encoding ascii
+          "ASSET=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CHECKSUM=$name.zip.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389c2ea8520d75b0fb28e162effe14936d8d # v0.24.0
+        with:
+          path: ${{ env.ASSET }}
+          format: spdx-json
+          output-file: ${{ env.ASSET }}.spdx.json
+
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@897ed5eab6ed058a474202017ada7f40bfa52940 # v1.0.0
+        with:
+          subject-path: ${{ env.ASSET }}
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@e81a343c137e1a3d3c265e317075c381c63fa5c9 # v2.0.1
+        with:
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.CHECKSUM }}
+            ${{ env.ASSET }}.spdx.json

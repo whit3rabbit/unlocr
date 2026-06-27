@@ -22,6 +22,7 @@ make uninstall
 make deb        # -> dist/unlocr_<version>_<arch>.deb   (needs dpkg-deb)
 make rpm        # -> dist/unlocr-<version>-1.<arch>.rpm  (needs rpmbuild)
 make dist       # -> dist/unlocr-<version>-<os>-<arch>.tar.gz
+make release    # tag v<version> + push -> triggers the release workflow
 make clean
 ```
 
@@ -31,6 +32,32 @@ make clean
   Override target: `PREFIX=$HOME/.local ./install.sh`.
 - Windows: `powershell -ExecutionPolicy Bypass -File packaging\windows\install.ps1`
   (builds, installs to `%LOCALAPPDATA%\Programs\unlocr`, adds to PATH, pulls deps via scoop).
+
+## Uninstall
+
+- macOS / Linux: `./uninstall.sh` removes the binary **and** the model cache
+  (`PREFIX=...` to match a non-default install).
+- Windows: `packaging\windows\uninstall.ps1` removes the binary, strips PATH, and
+  deletes the cache.
+- `make uninstall` and removing a `.deb`/`.rpm` delete the **binary only** by
+  design: package removal must never destroy user data (the multi-GB model cache).
+
+## Releasing
+
+`./release.sh` (or `make release`) tags `v<version>` from `Cargo.toml` and
+pushes it. The push triggers `.github/workflows/release.yml`, which builds a
+native binary on each runner and attaches them to the GitHub Release:
+
+| Target | Runner | Artifact |
+|--------|--------|----------|
+| aarch64-apple-darwin | macos-14 | `unlocr-<ver>-aarch64-apple-darwin.tar.gz` |
+| x86_64-apple-darwin | macos-15-intel | `unlocr-<ver>-x86_64-apple-darwin.tar.gz` |
+| x86_64-unknown-linux-musl | ubuntu-latest | `unlocr-<ver>-x86_64-unknown-linux-musl.tar.gz` |
+| x86_64-pc-windows-msvc | windows-latest | `unlocr-<ver>-x86_64-pc-windows-msvc.zip` |
+
+Linux uses musl for a static binary (the deps are rustls-only, no system
+OpenSSL), so it runs on any glibc/musl distro. To cut a release: bump `version` in
+`Cargo.toml`, commit, push, then `make release`.
 
 ## apt/yum repo distribution
 
