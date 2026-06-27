@@ -1,0 +1,20 @@
+[package]
+name = "unlocr"
+version = "0.1.0"
+edition = "2021"
+description = "OCR PDFs to markdown via Unlimited-OCR (DeepSeek-OCR) + llama.cpp"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+ureq = { version = "2", features = ["json"] }   # pin 2.x: rustls default, no system OpenSSL
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+tempfile = "3"
+
+[profile.release]
+opt-level = "z"   # small binary; this is a thin wrapper, not the hot path
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

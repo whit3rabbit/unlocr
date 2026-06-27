@@ -1,0 +1,20 @@
+# Rust build
+/unlocr/target/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# PDFs and OCR test inputs/outputs
+*.pdf
+*.ps
+
+# Model weights / downloads (never commit GGUFs)
+*.gguf
+*.imatrix
+*.part
+
+.syntext/
+.synrepo/
