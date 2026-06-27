@@ -42,7 +42,27 @@ fn base_cache_dir() -> Res<PathBuf> {
     }
 }
 
+/// Reject quant tags that could escape the cache dir or manipulate the download
+/// URL. `PathBuf::join` does NOT normalize `..`, so `--quant ../../evil` would
+/// make `cache.join(name)` (and the `.part` create + `fs::rename`) write outside
+/// the cache, and the same string lands unescaped in the Hugging Face URL.
+/// Real GGUF quant tags are short alnum + `_.-` (e.g. "Q8_0", "BF16"). Reached
+/// from the CLI `--quant` flag, so the check sits at the start of `ensure`.
+fn validate_quant(quant: &str) -> Res<()> {
+    let charset_ok = !quant.is_empty()
+        && quant
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'));
+    // `.` is allowed (e.g. tag forms), so reject `..` explicitly: it passes the
+    // charset check but is a path-traversal component.
+    if !charset_ok || quant.contains("..") {
+        return Err(format!("invalid quant {quant:?}: allowed characters are [A-Za-z0-9_.-]").into());
+    }
+    Ok(())
+}
+
 pub fn ensure(cache: &Path, quant: &str) -> Res<ModelFiles> {
+    validate_quant(quant)?;
     let model_name = format!("Unlimited-OCR-{quant}.gguf");
     let model = cache.join(&model_name);
     let mmproj = cache.join(MMPROJ);
@@ -106,4 +126,40 @@ pub fn check_presence(cache: &Path, quant: &str) -> (PathBuf, bool, PathBuf, boo
     let model = cache.join(&model_name);
     let mmproj = cache.join(MMPROJ);
     (model.clone(), model.is_file(), mmproj.clone(), mmproj.is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure, validate_quant};
+
+    #[test]
+    fn validate_quant_blocks_traversal() {
+        for ok in ["Q8_0", "BF16", "Q4_K_M", "F16.test"] {
+            assert!(validate_quant(ok).is_ok(), "{ok} should be accepted");
+        }
+        for bad in [
+            "",
+            "..",
+            "Q8_0/../../evil",
+            "../../../../etc/passwd",
+            "Q8_0/sub",
+            "Q8_0\\sub",
+            "a b",
+            "x'; rm -rf /; echo '",
+        ] {
+            assert!(validate_quant(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn ensure_rejects_traversal_quant() {
+        // The write path (ensure -> ensure_file -> File::create / fs::rename)
+        // must refuse a traversing quant before touching the filesystem.
+        let tmp = tempfile::tempdir().unwrap();
+        let err = match ensure(tmp.path(), "Q8_0/../../evil") {
+            Ok(_) => panic!("traversing quant should be rejected"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("invalid quant"), "got: {err}");
+    }
 }

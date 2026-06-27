@@ -174,12 +174,19 @@ fn get_total_ram_bytes() -> Option<u64> {
 
 fn get_free_disk_space_bytes(path: &Path) -> Option<u64> {
     if cfg!(target_os = "windows") {
+        // Pass the path through an env var, not string interpolation, so
+        // PowerShell never parses it as code. `path` is user-controlled
+        // (--model-dir, or the LOCALAPPDATA/XDG_CACHE_HOME/HOME cache-dir env
+        // vars); a value containing a single quote would otherwise terminate the
+        // -Command string literal and inject arbitrary PowerShell. -LiteralPath
+        // also stops wildcard/glob interpretation of the path.
         let out = Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
-                &format!("(Get-Item '{}').Volume.Free", path.display()),
+                "(Get-Item -LiteralPath $env:UNLOCR_DISK_PATH).Volume.Free",
             ])
+            .env("UNLOCR_DISK_PATH", path)
             .output()
             .ok()?;
         let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -364,7 +371,12 @@ fn locate(bin: &str) -> Option<PathBuf> {
     None
 }
 
-fn build_number(llama_server: &Path) -> Option<u64> {
+/// Parse the build number out of llama-server's `--version` output. Returns None
+/// when llama-server is missing, unreadable, or its version line cannot be parsed
+/// (commit hashes are skipped). Pub so the Tauri host can surface the build number
+/// in its preflight report without re-implementing the parse. Additive: existing
+/// callers (`check`, `run_doctor`) are unchanged.
+pub fn build_number(llama_server: &Path) -> Option<u64> {
     let out = Command::new(llama_server).arg("--version").output().ok()?;
     // llama.cpp prints the version line to stderr.
     let text = String::from_utf8_lossy(&out.stderr);
