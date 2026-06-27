@@ -4,6 +4,23 @@ version = "0.1.0"
 edition = "2021"
 description = "OCR PDFs to markdown via Unlimited-OCR (DeepSeek-OCR) + llama.cpp"
 
+# Library target so the OCR backend (model/ocr/pdf/preflight/server + the clap-free
+# run_ocr_job / OcrOptions API in lib.rs) is callable from the Tauri host crate and
+# from tests without going through the CLI. Additive: the bin target (main.rs) and
+# its release profile are untouched, and main.rs still owns Args/clap parsing.
+[lib]
+name = "unlocr"
+path = "src/lib.rs"
+
+# Workspace root so `cargo build` at the repo root compiles both the CLI and the
+# Tauri gui crate. The unlocr package is the implicit root member; gui is added
+# explicitly. Additive only: the unlocr package and its release profile are
+# untouched. This makes the board's "workspace cargo build stays green" gate
+# actually cover the gui crate.
+[workspace]
+resolver = "2"
+members = ["gui/src-tauri"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 ureq = { version = "2", features = ["json"] }   # pin 2.x: rustls default, no system OpenSSL
@@ -11,6 +28,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 tempfile = "3"
+glob = "0.3"   # in-binary glob expansion (PowerShell does not glob unquoted args)
 
 [profile.release]
 opt-level = "z"   # small binary; this is a thin wrapper, not the hot path

@@ -1498,6 +1498,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "unlocr",
 ]
 
 [[package]]
@@ -4140,7 +4141,6 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
- "glob",
  "serde",
  "serde_json",
  "tempfile",

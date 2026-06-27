@@ -42,8 +42,13 @@ fn base_cache_dir() -> Res<PathBuf> {
     }
 }
 
+/// GGUF filename for a quant tag, e.g. "Q8_0" -> "Unlimited-OCR-Q8_0.gguf".
+fn model_filename(quant: &str) -> String {
+    format!("Unlimited-OCR-{quant}.gguf")
+}
+
 pub fn ensure(cache: &Path, quant: &str) -> Res<ModelFiles> {
-    let model_name = format!("Unlimited-OCR-{quant}.gguf");
+    let model_name = model_filename(quant);
     let model = cache.join(&model_name);
     let mmproj = cache.join(MMPROJ);
 
@@ -102,8 +107,27 @@ fn download(url: &str, dest: &Path) -> Res<()> {
 }
 
 pub fn check_presence(cache: &Path, quant: &str) -> (PathBuf, bool, PathBuf, bool) {
-    let model_name = format!("Unlimited-OCR-{quant}.gguf");
-    let model = cache.join(&model_name);
+    let model = cache.join(model_filename(quant));
     let mmproj = cache.join(MMPROJ);
     (model.clone(), model.is_file(), mmproj.clone(), mmproj.is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cache_dir, model_filename};
+
+    #[test]
+    fn filename_format() {
+        assert_eq!(model_filename("Q8_0"), "Unlimited-OCR-Q8_0.gguf");
+        assert_eq!(model_filename("BF16"), "Unlimited-OCR-BF16.gguf");
+    }
+
+    #[test]
+    fn cache_dir_override_used_and_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("nested/cache");
+        let got = cache_dir(Some(target.clone())).unwrap();
+        assert_eq!(got, target);
+        assert!(target.is_dir()); // create_dir_all ran
+    }
 }

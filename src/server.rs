@@ -158,10 +158,37 @@ impl Server {
             .timeout(Duration::from_secs(600))
             .send_json(body)?
             .into_json()?;
-        resp["choices"][0]["message"]["content"]
-            .as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| format!("unexpected response shape: {resp}").into())
+        parse_completion(&resp)
+    }
+}
+
+/// Pull the assistant message text out of an OpenAI-style chat completion.
+/// Split out so it can be tested without a live server.
+fn parse_completion(resp: &serde_json::Value) -> Res<String> {
+    resp["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("unexpected response shape: {resp}").into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_completion;
+    use serde_json::json;
+
+    #[test]
+    fn parses_content() {
+        let resp = json!({ "choices": [{ "message": { "content": "# hi" } }] });
+        assert_eq!(parse_completion(&resp).unwrap(), "# hi");
+    }
+
+    #[test]
+    fn rejects_bad_shape() {
+        assert!(parse_completion(&json!({})).is_err());
+        assert!(parse_completion(&json!({ "choices": [] })).is_err());
+        // content present but wrong type
+        let bad = json!({ "choices": [{ "message": { "content": 42 } }] });
+        assert!(parse_completion(&bad).is_err());
     }
 }
 

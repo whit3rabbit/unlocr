@@ -1,0 +1,32 @@
+[package]
+name = "gui"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# NOTE: no `unlocr` path dep here yet. The root `unlocr` crate is still a pure
+# binary at this point (the library extraction is EH-0002; the command wiring is
+# EH-0003). Adding the path dep before EH-0002 would force edits to src/, which
+# this card's scope forbids. The commands in src/lib.rs are stubs accordingly.
+
+# Release profile lives at the workspace root (repo-root Cargo.toml) since this
+# crate is now a workspace member; per-member [profile.release] is ignored and
+# warned by Cargo. The gui crate inherits the workspace root profile.

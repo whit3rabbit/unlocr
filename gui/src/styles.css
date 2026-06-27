@@ -1,0 +1,106 @@
+/* Ferrum OCR shell frame. Placeholder palette approximating the mockup's dark
+ * amber/violet UI; the real port lands in a later card. */
+:root {
+  --bg: #14110f;
+  --panel: #1c1815;
+  --panel-2: #221d19;
+  --dim: #8a807a;
+  --amber: #ffb454;
+  --violet: #b39ddb;
+  --green: #7fd1a6;
+  --line: #2a2420;
+
+  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 22px;
+  color: #e8e2dc;
+  background-color: var(--bg);
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+/* Frame: header bar across the top, body = sidebar + single pane. */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.app__header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+
+.app__brand {
+  font-weight: 600;
+  font-size: 16px;
+  color: var(--amber);
+  letter-spacing: 0.2px;
+}
+
+.app__header-meta {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.app__body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.app__sidebar {
+  flex: 0 0 180px;
+  background: var(--panel-2);
+  border-right: 1px solid var(--line);
+  padding: 12px 0;
+  overflow-y: auto;
+}
+
+.app__sidebar ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.app__sidebar li {
+  padding: 8px 16px;
+  color: var(--dim);
+  cursor: default;
+  border-left: 2px solid transparent;
+}
+
+.app__sidebar li.is-active {
+  color: var(--amber);
+  background: rgba(255, 180, 84, 0.06);
+  border-left-color: var(--amber);
+}
+
+.app__pane {
+  flex: 1 1 auto;
+  padding: 24px;
+  overflow: auto;
+}
+
+.app__placeholder {
+  color: var(--dim);
+  margin: 0;
+}

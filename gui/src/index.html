@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ferrum OCR</title>
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body>
+    <!-- Ferrum OCR shell frame: header bar + empty sidebar + single pane.
+         Placeholder only; the real port of the mockup is a later card. -->
+    <div class="app">
+      <header class="app__header">
+        <div class="app__brand">Ferrum OCR</div>
+        <div class="app__header-meta">unlocr &middot; DeepSeek-OCR + llama.cpp</div>
+      </header>
+
+      <div class="app__body">
+        <nav class="app__sidebar" aria-label="Views">
+          <ul>
+            <li class="is-active" data-route="workspace">Workspace</li>
+            <li data-route="library">Library</li>
+            <li data-route="board">Board</li>
+            <li data-route="review">Review</li>
+            <li data-route="settings">Settings</li>
+          </ul>
+        </nav>
+
+        <main class="app__pane" id="pane">
+          <p class="app__placeholder">Shell ready. Views are wired in later cards.</p>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>
