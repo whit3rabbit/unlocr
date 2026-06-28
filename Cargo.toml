@@ -3,9 +3,14 @@ name = "unlocr"
 version = "0.1.0"
 edition = "2021"
 description = "OCR PDFs to markdown via Unlimited-OCR (DeepSeek-OCR) + llama.cpp"
-# Distributed as binaries / system packages, not on crates.io. Also lets
-# cargo-deny's `private.ignore` skip license-checking this (license-less) crate.
-publish = false
+license = "MIT"
+repository = "https://github.com/whit3rabbit/unlocr"
+readme = "README.md"
+keywords = ["ocr", "pdf", "llama", "deepseek", "markdown"]
+categories = ["command-line-utilities", "text-processing"]
+# MIT covers this code only. The downloaded model weights (Unlimited-OCR /
+# DeepSeek-OCR GGUF) carry their own license; see the HF model card in README.
+# The gui crate stays publish = false; only this root crate goes to crates.io.
 
 # Library target so the OCR backend (model/ocr/pdf/preflight/server + the clap-free
 # run_ocr_job / OcrOptions API in lib.rs) is callable from the Tauri host crate and

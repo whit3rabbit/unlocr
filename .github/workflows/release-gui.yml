@@ -1,0 +1,65 @@
+name: release-gui
+
+# Tag-driven GUI release. Builds the Tauri desktop bundles (dmg / msi / appimage /
+# deb) on each OS and attaches them to the SAME GitHub Release as the CLI binaries
+# (release.yml). Frontend is static (gui/src), so there is no npm build step.
+#
+# Unsigned: no Apple signing secrets are set, so the macOS .app is not notarized.
+# See README "Unsigned macOS app" for the Gatekeeper workaround.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    name: ${{ matrix.target || matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14          # Apple silicon
+            target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+          - os: macos-15-intel    # Intel
+            target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+          - os: ubuntu-latest      # appimage + deb
+            args: ''
+          - os: windows-latest     # msi + nsis
+            args: ''
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS target
+        if: startsWith(matrix.os, 'macos')
+        run: rustup target add ${{ matrix.target }}
+
+      # Tauri's Linux runtime + bundler deps (webkit, appindicator, rsvg, patchelf).
+      - name: Install Linux deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev libssl-dev build-essential file wget curl
+
+      # TODO: pin tauri-action to a commit SHA (matching this repo's pinning style)
+      # once a known-good release is chosen; dependabot can then bump it.
+      - name: Build + upload bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: gui/src-tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: unlocr ${{ github.ref_name }}
+          releaseDraft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          args: ${{ matrix.args }}

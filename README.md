@@ -14,7 +14,31 @@ Face on first run and cached.
   "mtmd: Add DeepSeekOCR Support", merged 2026-03-25). Older builds cannot load
   the model.
 - **poppler** (provides `pdftoppm`).
-- Rust toolchain to build.
+- Rust toolchain (only needed to build from source / `cargo install`).
+
+### System requirements by model
+
+The default path runs a **quantized GGUF** on `llama.cpp` (CPU, or GPU with a
+CUDA/Metal/Vulkan `llama-server` build). Optionally you can run the **full,
+unquantized** DeepSeek-OCR model on a GPU via **vLLM** (see
+[Run the full model on GPU](#run-the-full-model-on-gpu-vllm)).
+
+| Mode | Variant | Download | Memory | Engine |
+|------|---------|----------|--------|--------|
+| GGUF (default) | `Q4_K_M` (`--quality less`) | 1.82 GB | ~4 GB RAM | llama.cpp |
+| GGUF | `Q8_0` (`--quality good`, default) | 2.91 GB | ~6 GB RAM | llama.cpp |
+| GGUF | `BF16` (`--quality best`) | 5.47 GB | ~8 GB RAM | llama.cpp |
+| Full model (GPU) | [`deepseek-ai/DeepSeek-OCR`](https://huggingface.co/deepseek-ai/DeepSeek-OCR) | ~6.7 GB | **16 GB VRAM min, 24 GB+ recommended** | vLLM |
+
+GGUF memory figures are rough working-set estimates (model + projector + KV
+cache); a GGUF build of `llama-server` with GPU offload uses VRAM in place of
+RAM. The full-model VRAM figures and supported GPUs (L4 / A100 / H100) are from
+the [DeepSeek-OCR model card](https://huggingface.co/deepseek-ai/DeepSeek-OCR).
+
+> **License:** the `unlocr` code is MIT (see [LICENSE](LICENSE)). The model weights
+> it downloads ([Unlimited-OCR](https://huggingface.co/sahilchachra/Unlimited-OCR-GGUF),
+> DeepSeek-OCR architecture) carry their **own** license; see the model card. MIT
+> covers this tool, not the weights.
 
 ### macOS
 
@@ -31,11 +55,37 @@ brew install llama.cpp poppler
 
 ## Install
 
-Prebuilt binaries for each release are attached to the
-[GitHub Releases](../../releases) page (macOS arm64/x64, Linux x64 musl, Windows
-x64). Download, extract, put `unlocr` on your `PATH`.
+There are two products: the **CLI** (`unlocr`) and a **desktop GUI** app. Most
+users want the GUI; the CLI is for scripting and batch jobs.
 
-Build and install from source instead:
+### Homebrew (macOS / Linux)
+
+```bash
+brew install whit3rabbit/tap/unlocr          # CLI
+brew install --cask whit3rabbit/tap/unlocr   # GUI app (macOS)
+```
+
+The formula installs `poppler` as a dependency and recommends `brew install llama.cpp`.
+
+### cargo (CLI)
+
+```bash
+cargo install unlocr
+```
+
+### GitHub Releases
+
+Each release attaches **CLI** binaries (macOS arm64/x64, Linux x64 musl, Windows
+x64; download, extract, put `unlocr` on your `PATH`) and **GUI** installers
+(`.dmg`, `.msi`, `.AppImage`, `.deb`) on the
+[Releases](../../releases) page.
+
+> **Unsigned macOS GUI:** the `.app`/`.dmg` are not signed or notarized yet. If
+> macOS blocks the app on first launch, run
+> `xattr -dr com.apple.quarantine "/Applications/unlocr.app"` or right-click the
+> app and choose Open. (The Homebrew cask handles this for you.)
+
+### From source
 
 ```bash
 ./install.sh                 # macOS/Linux: build + install to /usr/local/bin + dep check
@@ -84,6 +134,10 @@ unlocr <input.pdf> [more.pdf ...] [options]
 | `--model-dir P`   | per-OS cache                                      | Where GGUFs are stored |
 | `--port N`        | `0` (auto)                                        | llama-server port |
 | `--keep-images`   | off                                              | Keep the intermediate page PNGs |
+| `--gpu`           | off                                              | Run the full DeepSeek-OCR model on a local vLLM server (see [below](#run-the-full-model-on-gpu-vllm)). Shortcut for `--endpoint http://localhost:8000 --endpoint-model deepseek-ai/DeepSeek-OCR` |
+| `--endpoint URL`  | (local spawn)                                     | OCR against a remote OpenAI-compatible server (vLLM/SGLang/remote llama.cpp) instead of spawning a local one. Skips the GGUF download |
+| `--endpoint-key K`| `UNLOCR_API_KEY`                                  | Bearer token for `--endpoint` (prefer the env var to keep it out of the process list) |
+| `--endpoint-model M` | (none)                                         | Model name sent in the request body; required by vLLM / litellm gateways |
 
 ### Example
 
@@ -150,8 +204,8 @@ reclaim the space.
 
 On Apple Silicon you can run inference on the MLX engine instead of llama.cpp.
 unlocr does not bundle MLX: it talks to LM Studio's local OpenAI-compatible
-server, which uses MLX (`mlx-vlm`) under the hood. **This path is GUI-only** (the
-CLI has no remote-endpoint flag yet).
+server, which uses MLX (`mlx-vlm`) under the hood. The GUI has a one-click
+**LM Studio (MLX)** preset; the CLI reaches it with `--endpoint http://localhost:1234`.
 
 1. Install LM Studio (>= 0.3.4, which ships the MLX engine).
 2. Download an MLX DeepSeek-OCR build, e.g. `mlx-community/DeepSeek-OCR-8bit`
@@ -164,6 +218,46 @@ CLI has no remote-endpoint flag yet).
 
 Leave the default `<|grounding|>Convert the document to markdown.` prompt: it is
 the grounding format DeepSeek-OCR expects.
+
+## Run the full model on GPU (vLLM)
+
+The GGUF path runs on `llama.cpp`. To run the **full, unquantized** DeepSeek-OCR
+model on a GPU (16 GB+ VRAM, see [requirements](#system-requirements-by-model)),
+serve it with **vLLM** and point unlocr at that server. unlocr does not bundle
+vLLM or a Python/CUDA runtime; it only sends OpenAI `/v1/chat/completions`
+requests, so any vLLM serving DeepSeek-OCR works.
+
+1. Install vLLM (the dev build; stock 0.11 does not yet support DeepSeek-OCR):
+
+   ```bash
+   pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+   ```
+
+2. Serve the model (vLLM downloads the ~6.7 GB weights on first run):
+
+   ```bash
+   vllm serve deepseek-ai/DeepSeek-OCR \
+     --no-enable-prefix-caching \
+     --mm-processor-cache-gb 0 \
+     --logits-processors vllm.model_executor.models.deepseek_ocr:NGramPerReqLogitsProcessor
+   ```
+
+3. Run unlocr against it. The `--gpu` shortcut fills in the local vLLM URL and the
+   model name:
+
+   ```bash
+   unlocr report.pdf --gpu
+   # equivalent to:
+   unlocr report.pdf --endpoint http://localhost:8000 --endpoint-model deepseek-ai/DeepSeek-OCR
+   ```
+
+   In the GUI, pick the **GPU full model (vLLM · DeepSeek-OCR)** engine preset,
+   then Load and Run.
+
+**No GPU? Use Google Colab.** The [`colab/unlocr-deepseek-ocr-gpu.ipynb`](colab/unlocr-deepseek-ocr-gpu.ipynb)
+notebook installs the prerequisites, serves the model, and runs the unlocr binary
+end to end on a free/cheap Colab GPU (T4/L4/A100). Open it in Colab, pick a GPU
+runtime, and run the cells.
 
 ## Limitations
 

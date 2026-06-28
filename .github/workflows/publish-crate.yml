@@ -1,0 +1,27 @@
+name: publish-crate
+
+# Tag-driven crates.io publish of the root `unlocr` CLI crate. The gui member
+# keeps `publish = false`, so only the CLI is published. Needs a CARGO_REGISTRY_TOKEN
+# repo secret (crates.io > Account Settings > API Tokens).
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Sanity-check metadata before the irreversible publish.
+      - name: Verify package
+        run: cargo publish --dry-run --locked --manifest-path Cargo.toml
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked --manifest-path Cargo.toml

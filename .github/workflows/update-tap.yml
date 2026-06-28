@@ -1,0 +1,78 @@
+name: update-tap
+
+# Renders the Homebrew formula + cask from a release's assets and pushes them to
+# the tap repo (whit3rabbit/homebrew-tap). Manual trigger on purpose: the CLI
+# (release.yml) and GUI (release-gui.yml) bundles land on the release across many
+# matrix jobs, so run this once a release is fully populated to avoid a race.
+#
+# Requires repo secret HOMEBREW_TAP_TOKEN: a PAT with write access to the tap repo.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish to the tap (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout templates
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Render formula + cask
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          ver="${TAG#v}"
+          mkdir -p dl out
+
+          # All 5 assets must exist on the release before rendering.
+          tgz_arm="unlocr-${ver}-aarch64-apple-darwin.tar.gz"
+          tgz_intel="unlocr-${ver}-x86_64-apple-darwin.tar.gz"
+          tgz_linux="unlocr-${ver}-x86_64-unknown-linux-musl.tar.gz"
+          dmg_arm="unlocr_${ver}_aarch64.dmg"
+          dmg_intel="unlocr_${ver}_x64.dmg"
+          for f in "$tgz_arm" "$tgz_intel" "$tgz_linux" "$dmg_arm" "$dmg_intel"; do
+            gh release download "$TAG" -R whit3rabbit/unlocr -p "$f" -D dl
+          done
+
+          sha() { sha256sum "dl/$1" | cut -d' ' -f1; }
+
+          sed -e "s/@@VERSION@@/${ver}/g" \
+              -e "s/@@SHA_ARM_TGZ@@/$(sha "$tgz_arm")/g" \
+              -e "s/@@SHA_INTEL_TGZ@@/$(sha "$tgz_intel")/g" \
+              -e "s/@@SHA_LINUX_TGZ@@/$(sha "$tgz_linux")/g" \
+              packaging/homebrew/unlocr.rb > out/unlocr.rb
+
+          sed -e "s/@@VERSION@@/${ver}/g" \
+              -e "s/@@SHA_ARM_DMG@@/$(sha "$dmg_arm")/g" \
+              -e "s/@@SHA_INTEL_DMG@@/$(sha "$dmg_intel")/g" \
+              packaging/homebrew/unlocr-cask.rb > out/unlocr.rb.cask
+
+      - name: Checkout tap
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: whit3rabbit/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Commit + push
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p tap/Formula tap/Casks
+          cp out/unlocr.rb tap/Formula/unlocr.rb
+          cp out/unlocr.rb.cask tap/Casks/unlocr.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/unlocr.rb Casks/unlocr.rb
+          git commit -m "unlocr ${TAG}" || { echo "no changes"; exit 0; }
+          git push
