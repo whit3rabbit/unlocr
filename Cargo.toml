@@ -3,6 +3,27 @@ name = "unlocr"
 version = "0.1.0"
 edition = "2021"
 description = "OCR PDFs to markdown via Unlimited-OCR (DeepSeek-OCR) + llama.cpp"
+# Distributed as binaries / system packages, not on crates.io. Also lets
+# cargo-deny's `private.ignore` skip license-checking this (license-less) crate.
+publish = false
+
+# Library target so the OCR backend (model/ocr/pdf/preflight/server + the clap-free
+# run_ocr_job / OcrOptions API in lib.rs) is callable from the Tauri host crate and
+# from tests without going through the CLI. Additive: the bin target (main.rs) and
+# its release profile are untouched, and main.rs still owns Args/clap parsing.
+[lib]
+name = "unlocr"
+path = "src/lib.rs"
+
+# Workspace root. NOTE: with a root package plus `[workspace]` and no
+# `default-members`, a bare `cargo build`/`cargo test` at the repo root builds the
+# root package (the CLI) ONLY, not the members. The Tauri gui crate compiles only
+# under `cargo build --workspace` or from inside `gui/src-tauri`. (Release CI relies
+# on this: `cargo build --manifest-path Cargo.toml` builds just the CLI, so the
+# musl runner never has to pull in Tauri's system deps.)
+[workspace]
+resolver = "2"
+members = ["gui/src-tauri"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -11,6 +32,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 tempfile = "3"
+glob = "0.3"   # in-binary glob expansion (PowerShell does not glob unquoted args)
 
 [profile.release]
 opt-level = "z"   # small binary; this is a thin wrapper, not the hot path

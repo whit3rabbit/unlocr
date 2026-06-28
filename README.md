@@ -146,3 +146,6 @@ reclaim the space.
 
 - Ctrl-C (SIGINT) does not run cleanup, so it may orphan `llama-server`.
 - Free-port selection has a small race; pass `--port` to pin it.
+- The spawned `llama-server` binds `127.0.0.1` with no authentication. On a
+  shared multi-user machine, any local user can reach the port while a run is in
+  progress. Single-user desktop use is the intended case.

@@ -1,13 +1,24 @@
+# cargo-deny config. Schema targets cargo-deny 0.19 (pinned in
+# .github/workflows/audit.yml). The pre-0.16 keys `[advisories]
+# vulnerability/unmaintained=<severity>/unsound/notice` and `[licenses]
+# unlicensed` were removed and now emit hard errors, so they are gone here.
+
 [advisories]
-db-path = "~/.cargo-deny/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-vulnerability = "deny"
-unmaintained = "warn"
-unsound = "warn"
-notice = "warn"
+# Security vulnerabilities always fail the check (no per-class severity knob in
+# the new schema). `unmaintained = "workspace"` only flags unmaintained crates we
+# depend on directly, not deep transitive ones, so the audit does not break on a
+# dependency-of-a-dependency going unmaintained.
+unmaintained = "workspace"
+ignore = []
 
 [licenses]
-unlicensed = "deny"
+# High confidence before inferring a license from text.
+confidence-threshold = 0.93
+# Don't license-check the workspace's own crates: unlocr has no declared license
+# and is distributed as binaries / system packages, not published to crates.io.
+# This only skips OUR crates, not dependencies.
+private = { ignore = true }
 allow = [
     "MIT",
     "Apache-2.0",
@@ -16,6 +27,8 @@ allow = [
     "CC0-1.0",
     "ISC",
     "Unlicense",
+    "Unicode-3.0", # unicode-ident and friends; permissive, in cargo-deny's default allow set
+    "CDLA-Permissive-2.0", # webpki-roots (Mozilla CA bundle, via ureq's rustls TLS)
 ]
 
 [bans]

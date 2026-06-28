@@ -1,0 +1,41 @@
+[package]
+name = "unlocr-gui"
+version = "0.1.0"
+description = "Tauri GUI for unlocr"
+authors = ["whit3rabbit"]
+edition = "2021"
+# App crate, never published to crates.io. Lets cargo-deny's `private.ignore`
+# skip license-checking it.
+publish = false
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `protocol-asset` compiles in the asset protocol + `asset_protocol_scope()` so
+# the preview pane can load cached page PNGs via `convertFileSrc`.
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+# Native file picker for the Import button. Ships an init IIFE, so with
+# `withGlobalTauri: true` the JS API is exposed at `window.__TAURI__.dialog`
+# (no npm/bundler). Permission granted via `dialog:default` in capabilities.
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Path dep on the repo-root `unlocr` crate. Its library target (src/lib.rs)
+# exposes the clap-free run_ocr_job / OcrOptions / Progress API this bridge calls.
+# Additive: the unlocr package and its release profile are untouched.
+unlocr = { path = "../.." }
+
+# Release profile lives at the workspace root (repo-root Cargo.toml) since this
+# crate is now a workspace member; per-member [profile.release] is ignored and
+# warned by Cargo. The gui crate inherits the workspace root profile.

@@ -13,17 +13,21 @@ jobs:
     name: Dependency Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@4f366e64bc61985d572415ff039a7379854d97a2 # stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
           
       - name: Install tools
         run: |
           curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-          cargo binstall -y cargo-audit cargo-deny
+          # Pin cargo-deny: its config schema changes across minor releases
+          # (0.16 removed several keys), so an unpinned `latest` can break the
+          # check on a deny.toml that was valid yesterday. Bump deliberately
+          # alongside deny.toml.
+          cargo binstall -y cargo-audit cargo-deny@0.19.8
           
       - name: Run cargo audit
         run: cargo audit

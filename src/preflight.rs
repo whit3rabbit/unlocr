@@ -65,6 +65,11 @@ pub fn run_doctor(llama_override: Option<&Path>, model_dir: Option<PathBuf>, qua
 
     // 2. Check model files
     println!("\nChecking model cache...");
+    // Validate the user-supplied quant before it reaches check_presence: PathBuf
+    // ::join does not normalize, so a traversing quant (e.g. "../../etc/passwd")
+    // would otherwise turn into an is_file() probe outside the cache dir (a
+    // filesystem existence oracle). Same guard the write path already enforces.
+    crate::model::validate_quant(quant)?;
     let cache = crate::model::cache_dir(model_dir)?;
     println!("  Cache directory: {}", cache.display());
 
@@ -247,6 +252,14 @@ pub fn check(llama_override: Option<&Path>) -> Res<Tools> {
     }
 
     Ok(Tools { llama_server, pdftoppm })
+}
+
+/// Resolve pdftoppm alone. Remote inference still rasterizes locally, so the GUI's
+/// remote mode needs poppler but NOT llama-server; `check` requires both, which
+/// would wrongly block remote on a machine without llama.cpp. Same lookup +
+/// install hint as `check`'s pdftoppm step.
+pub fn pdftoppm() -> Res<PathBuf> {
+    locate("pdftoppm").ok_or_else(|| hint("pdftoppm", "brew install poppler"))
 }
 
 fn hint(bin: &str, install: &str) -> Box<dyn std::error::Error> {

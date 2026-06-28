@@ -5,6 +5,8 @@ Thin wrapper. Full usage/benchmarks in README.md.
 
 ## Layout
 - Cargo workspace lives in repo root. Source: `src/`.
+  Modules: `model` (HF download/cache), `pdf` (pdftoppm), `server` (llama-server
+  spawn), `ocr`, `preflight`, `lib` (public API), `main` (clap CLI).
 - Packaging (deb/rpm/installers) at repo root + `packaging/`.
 - Repo, product, binary, and crate are all named `unlocr`.
 
@@ -23,6 +25,11 @@ Thin wrapper. Full usage/benchmarks in README.md.
   declare as a package dep. deb postinst / rpm %post warn if missing.
 
 ## Gotchas
+- Public lib API (consumed by gui crate): `run_ocr_job` + `OcrOptions` + `Progress`
+  + `render_pages` (cached PDF->PNG for previews) (clap-free). Keep these stable;
+  the GUI links via `path = "../.."`.
+- Batch input: positionals accept files, folders, globs; `--from-list FILE` +
+  `--recursive`. `expand_inputs` (main.rs) dedups/sorts to a concrete PDF list.
 - Binary searches PATH then Homebrew prefixes (/opt/homebrew/bin, /usr/local/bin).
   Install hints in preflight.rs are macOS-only.
 - Model GGUFs download from HF on first run, cached at per-OS dir + `/unlocr`
