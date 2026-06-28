@@ -88,3 +88,40 @@ jobs:
             ${{ env.ASSET }}
             ${{ env.CHECKSUM }}
             ${{ env.ASSET }}.spdx.json
+
+  # Native CLI .deb + .rpm (amd64 only) via the existing Makefile/packaging scripts.
+  # arm64 packages are not built here (needs a cross toolchain or arm runner).
+  linux-packages:
+    name: linux deb/rpm (amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # dpkg-deb ships in base; `rpm` provides rpmbuild.
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y rpm dpkg-dev
+
+      - name: Build .deb + .rpm
+        run: |
+          make deb
+          make rpm
+
+      - name: Checksums
+        run: |
+          cd dist
+          for f in *.deb *.rpm; do sha256sum "$f" > "$f.sha256"; done
+
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            dist/*.deb
+            dist/*.rpm
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          files: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.sha256

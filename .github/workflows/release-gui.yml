@@ -48,7 +48,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
-            librsvg2-dev patchelf libxdo-dev libssl-dev build-essential file wget curl
+            librsvg2-dev patchelf libxdo-dev libssl-dev build-essential file wget curl \
+            rpm
+            # `rpm` provides rpmbuild so Tauri's "all" linux targets (deb + rpm +
+            # appimage) all build; without it the rpm bundle silently fails/skips.
 
       # TODO: pin tauri-action to a commit SHA (matching this repo's pinning style)
       # once a known-good release is chosen; dependabot can then bump it.
