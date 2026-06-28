@@ -74,8 +74,12 @@ unlocr <input.pdf> [more.pdf ...] [options]
 | `--quality TIER`  | `good`                                           | Alias for a quant: `best`=BF16 (5.47GB), `good`=Q8_0 (2.91GB), `less`=Q4_K_M (1.82GB) |
 | `--quant TAG`     | (from quality)                                   | Exact quant, e.g. `Q6_K`, `IQ4_XS`. Picks `Unlimited-OCR-<TAG>.gguf`. Overrides `--quality` |
 | `--max-tokens N`  | `4096`                                           | Cap generated tokens per page (bounds runaway generation on dense pages) |
-| `--prompt TEXT`   | `<\|grounding\|>Convert the document to markdown.` | `<\|grounding\|>` makes the model emit layout bbox coords; drop it for plain markdown |
-| `--dpi N`         | `144`                                            | pdftoppm rasterization DPI |
+| `--task PRESET`   | `markdown`                                        | Prompt preset: `markdown` (grounded markdown), `free` (plain text), `figure` (parse a chart/figure). Ignored when `--prompt` is set |
+| `--prompt TEXT`   | (from `--task`)                                   | OCR prompt, overrides `--task`. `<\|grounding\|>` makes the model emit layout bbox coords; drop it for plain markdown |
+| `--dpi N`         | `144`                                            | pdftoppm rasterization DPI (pixel size of the PNG handed to the model) |
+| `--image-max-tokens N` | model default                               | Vision-token budget per image (`llama-server --image-max-tokens`). DeepSeek-OCR's base/large detail knob: higher = finer recognition, slower + more VRAM. Independent of `--dpi` |
+| `--chat-template NAME` | model default                               | Forwarded to `llama-server --chat-template` (e.g. `deepseek-ocr`) |
+| `--repeat-penalty F` | server default                                | Sampling penalty (e.g. `1.1`); helps break the infinite-loop output some quants (notably Q4_K_M) hit on dense pages |
 | `--llama-bin P`   | auto                                             | Path to `llama-server` |
 | `--model-dir P`   | per-OS cache                                      | Where GGUFs are stored |
 | `--port N`        | `0` (auto)                                        | llama-server port |

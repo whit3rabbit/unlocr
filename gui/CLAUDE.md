@@ -47,14 +47,22 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
 ## Frontend conventions
 - `withGlobalTauri: true` (see tauri.conf.json), so JS uses `window.__TAURI__.core.invoke`,
   not an npm `@tauri-apps/api` import. No build step: edit JS, reload.
+- Engine backend mode + remote URL/key/model are read ONLY at `load_model` time (model
+  is held warm); `run_ocr` uses the loaded server and does NOT re-read engine fields.
+  Backend picker is `#enginePreset` (llamacpp=managed local, vllm/sglang/custom=remote);
+  `applyPreset()` in main.js drives field visibility + URL prefill.
 - `frontendDist` is `../src` (static files served as-is).
 - Native file picker: `tauri-plugin-dialog` (added). Init'd in `run()`,
   permission `dialog:default` in `capabilities/default.json`. The Import button
   calls `window.__TAURI__.dialog.open(...)` (exposed by the plugin's init IIFE
   under `withGlobalTauri`, no npm). Single-select seeds `#pdfPath`; batch import
   stays on drag-drop. Plugins added: `opener`, `dialog`. Ask before adding more.
+- `TASK_PROMPTS` (main.js) hardcodes the same prompt strings as Rust `Task::prompt()`
+  (src/main.rs); no shared source. Edit both. A Rust test asserts the `markdown`
+  preset equals `OcrOptions::default().prompt`, but only catches default drift.
 
 ## Build / run (from gui/)
+- `node --check src/main.js`  # cheapest gate after a JS edit (no bundler/test on the static frontend)
 - `cargo tauri dev`     # dev window, hot-reloads frontend on file change
 - `cargo tauri build`   # bundle for the host OS
 - `cargo build` in `src-tauri/` compiles the backend + linked `unlocr` (link check).

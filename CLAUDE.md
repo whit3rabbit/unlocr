@@ -28,12 +28,31 @@ Thin wrapper. Full usage/benchmarks in README.md.
 - Public lib API (consumed by gui crate): `run_ocr_job` + `OcrOptions` + `Progress`
   + `render_pages` (cached PDF->PNG for previews) (clap-free). Keep these stable;
   the GUI links via `path = "../.."`.
+- Bare `cargo build`/`cargo test` build the root CLI ONLY (gui is a workspace member
+  with no default-members). After changing the public lib API (`OcrOptions`,
+  `Server::start`, `run_ocr_job`, ...) run `cargo build --manifest-path
+  gui/src-tauri/Cargo.toml` (or `cargo build --workspace`) or gui breakage stays hidden.
+- Tests favor a pure helper + assert over spawning/network: extract arg-vec builders
+  (e.g. `server::server_args`) and stub HTTP servers for the OpenAI path (server.rs tests).
 - Batch input: positionals accept files, folders, globs; `--from-list FILE` +
   `--recursive`. `expand_inputs` (main.rs) dedups/sorts to a concrete PDF list.
 - Binary searches PATH then Homebrew prefixes (/opt/homebrew/bin, /usr/local/bin).
   Install hints in preflight.rs are macOS-only.
 - Model GGUFs download from HF on first run, cached at per-OS dir + `/unlocr`
   (model.rs). Renaming the binary changed this path: old `uocr` caches are orphaned.
+- Two independent "resolutions": `--dpi` is the PNG pixel size pdftoppm renders;
+  `--image-max-tokens` is llama-server's vision-token budget (DeepSeek-OCR base/large
+  detail). They stack. image-max-tokens + `--chat-template` are llama-server *startup*
+  flags (set in `Server::start`, baked at load in the GUI); `--repeat-penalty` is a
+  per-request body field (in `ocr_via`/`ocr_via_stream`). `--task` is a CLI-side prompt
+  preset; `--prompt` overrides it. Upstream Python knobs (`base_size`/`crop_mode`/
+  gundam tiling, `no_repeat_ngram_size`) are NOT reachable via the OpenAI endpoint.
+- Numeric knobs need explicit range guards in BOTH places: CLI `run()` (clap does
+  not bounds-check) AND the GUI `run_ocr`/`load_model` commands (a direct `invoke()`
+  bypasses the HTML `min=` form clamp). Pattern: reject `0`/non-finite/`<=0` before
+  spawn (dpi, image-max-tokens, repeat-penalty all do this).
+- A per-request body knob must be added to BOTH `ocr_via` and `ocr_via_stream`
+  (stream + non-stream paths). Route it through a shared helper (`apply_repeat_penalty`).
 - Ctrl-C does not clean up; may orphan llama-server.
 - Release profile tuned for size (opt-level=z, lto, panic=abort).
 - BSD sed (macOS) has no `\b`; use plain patterns or `[[:<:]]`/`[[:>:]]`.

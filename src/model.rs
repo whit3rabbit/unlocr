@@ -98,14 +98,17 @@ pub fn ensure_with_progress<P>(cache: &Path, quant: &str, on_progress: &mut P) -
 where
     P: FnMut(crate::Progress),
 {
-    let mut sink = |name: &str, pct: Option<u8>, _total: u64, _done: u64| {
+    let mut sink = |name: &str, pct: Option<u8>, total: u64, done: u64| {
         // Map the low-level (name, pct-or-start) signal to the public Progress
         // enum. pct=None is "download started" -> emit pct=0 so a UI shows the
-        // file is underway; otherwise forward the real percent.
+        // file is underway; otherwise forward the real percent. done/total ride
+        // along so a UI can show size and compute speed from successive events.
         let pct = pct.unwrap_or(0);
         on_progress(crate::Progress::Download {
             name: name.to_string(),
             pct,
+            done,
+            total,
         });
     };
     ensure_inner(cache, quant, &mut sink)
@@ -142,11 +145,17 @@ where
     Ok(())
 }
 
-/// Stream a URL to `<dest>.part`, then atomically rename. Reports rough progress
-/// through `progress(name, pct, total, done)`: one `pct=None` "started" event,
-/// then `pct=Some(percent)` ticks whenever the percent changes, and a final
-/// `Some(100)`-adjacent flush handled by the caller's newline. The total is
-/// unknown when the server omits Content-Length (0), in which case no ticks fire.
+/// Stream a URL to `<dest>.part`, resuming from a prior partial if one exists,
+/// then atomically rename. Reports rough progress through `progress(name, pct,
+/// total, done)`: one `pct=None` "started" event, then `pct=Some(percent)` ticks
+/// whenever the percent changes. The total is unknown when the server omits
+/// Content-Length (0), in which case no ticks fire.
+///
+/// Resume: a `.part` left by an interrupted download (e.g. a Ctrl-C that skipped
+/// cleanup) is continued via an HTTP `Range` request rather than re-fetched from
+/// byte 0. HF's CDN honors ranges with `206 Partial Content`; if the server
+/// ignores the range (`200`) or rejects it (`416`, part already >= total) we fall
+/// back to a clean full download so correctness never depends on resume working.
 fn download<F>(url: &str, dest: &Path, name: &str, progress: &mut F) -> Res<()>
 where
     F: FnMut(&str, Option<u8>, u64, u64),
@@ -158,19 +167,52 @@ where
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(30))
         .build();
-    let resp = agent.get(url).call()?;
-    let total: u64 = resp
-        .header("Content-Length")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
 
     let part = dest.with_extension("part");
+    // Bytes already on disk from a prior interrupted attempt. 0 = fresh download.
+    let have: u64 = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+
+    let mut req = agent.get(url);
+    if have > 0 {
+        req = req.set("Range", &format!("bytes={have}-"));
+    }
+
+    let resp = match req.call() {
+        Ok(r) => r,
+        // 416 Range Not Satisfiable: the `.part` is >= the full size (a complete
+        // but never-renamed download, or a corrupt oversized stub). Drop it and
+        // retry from scratch rather than guess.
+        Err(ureq::Error::Status(416, _)) => {
+            let _ = fs::remove_file(&part);
+            return download(url, dest, name, progress);
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    // 206 = server honored the range and is sending the tail. 200 (or any non-206
+    // when we asked for a range) = server ignored it and is sending the whole file,
+    // so discard the partial and start over. `start` is where the stream begins on
+    // disk; `total` is the FULL file size for the integrity check and percent.
+    let (start, total) = if have > 0 && resp.status() == 206 {
+        // Content-Length on a 206 is the length of the *remaining* range; the true
+        // total is in Content-Range ("bytes A-B/TOTAL"). Fall back to start+len.
+        let remaining = header_u64(&resp, "Content-Length").unwrap_or(0);
+        let total = content_range_total(&resp).unwrap_or(have + remaining);
+        (have, total)
+    } else {
+        // Full body: truncate any partial so we don't append onto stale bytes.
+        if have > 0 {
+            let _ = fs::remove_file(&part);
+        }
+        (0, header_u64(&resp, "Content-Length").unwrap_or(0))
+    };
+
     let reader = resp.into_reader();
 
     // Stream into `.part`. On ANY error (including a short/truncated read), delete
     // the partial file before propagating so a corrupt artifact is never left
     // behind for `ensure_file` to mistake for a complete download on the next run.
-    match stream_to_part(&part, name, total, reader, progress) {
+    match stream_to_part(&part, name, total, start, reader, progress) {
         Ok(()) => {}
         Err(e) => {
             let _ = fs::remove_file(&part);
@@ -182,6 +224,20 @@ where
     Ok(())
 }
 
+/// Parse a `u64` response header, returning None if absent or unparseable.
+fn header_u64(resp: &ureq::Response, name: &str) -> Option<u64> {
+    resp.header(name).and_then(|s| s.trim().parse().ok())
+}
+
+/// Extract the total size from a `Content-Range: bytes A-B/TOTAL` header. Returns
+/// None if the header is missing, malformed, or the total is `*` (unknown length).
+fn content_range_total(resp: &ureq::Response) -> Option<u64> {
+    resp.header("Content-Range")?
+        .rsplit('/')
+        .next()
+        .and_then(|t| t.trim().parse().ok())
+}
+
 /// Read `reader` fully into `part`, emitting progress, and verify the byte count
 /// matches Content-Length when known. Split out so `download` can clean up the
 /// `.part` file on any failure path with a single `match`.
@@ -189,6 +245,7 @@ fn stream_to_part<F, R>(
     part: &Path,
     name: &str,
     total: u64,
+    start: u64,
     mut reader: R,
     progress: &mut F,
 ) -> Res<()>
@@ -196,13 +253,20 @@ where
     F: FnMut(&str, Option<u8>, u64, u64),
     R: Read,
 {
-    let mut out = fs::File::create(part)?;
+    // start>0 resumes a prior `.part`: append to keep the bytes already on disk.
+    // start==0 is a fresh (or restarted) download: create/truncate.
+    let mut out = if start > 0 {
+        fs::OpenOptions::new().append(true).open(part)?
+    } else {
+        fs::File::create(part)?
+    };
 
-    // "download started" line, matching the original println! placement.
-    progress(name, None, total, 0);
+    // "download started" line, matching the original println! placement. `done`
+    // begins at `start` so a resumed transfer reports real cumulative progress.
+    progress(name, None, total, start);
 
     let mut buf = vec![0u8; 1 << 20]; // 1 MiB
-    let mut done: u64 = 0;
+    let mut done: u64 = start;
     let mut last_pct = u64::MAX;
     loop {
         let n = reader.read(&mut buf)?;
@@ -322,6 +386,7 @@ mod tests {
             &part,
             "model",
             100,
+            0,
             Cursor::new(vec![0u8; 10]),
             &mut |_, _, _, _| {},
         )
@@ -340,6 +405,7 @@ mod tests {
             &part,
             "model",
             0,
+            0,
             Cursor::new(vec![0u8; 10]),
             &mut |_, _, _, _| {},
         )
@@ -356,11 +422,40 @@ mod tests {
             &part,
             "model",
             10,
+            0,
             Cursor::new(vec![7u8; 10]),
             &mut |_, _, _, _| {},
         )
         .expect("full body must succeed");
         assert_eq!(std::fs::metadata(&part).unwrap().len(), 10);
+    }
+
+    #[test]
+    fn stream_to_part_resumes_appends_from_offset() {
+        // A resumed download (start>0) must APPEND the remaining bytes onto the
+        // existing `.part`, not truncate it. Seed 6 bytes, "resume" with the final
+        // 4, and assert the part is the full 10 bytes with the seed preserved.
+        let tmp = tempfile::tempdir().unwrap();
+        let part = tmp.path().join("model.part");
+        std::fs::write(&part, b"AAAAAA").unwrap(); // 6 bytes already on disk
+        let mut first_done = None;
+        stream_to_part(
+            &part,
+            "model",
+            10,    // full total
+            6,     // resume offset = bytes already present
+            Cursor::new(b"BBBB".to_vec()), // the remaining 4 bytes
+            &mut |_, pct, _, done| {
+                // The "started" event (pct=None) must report cumulative progress,
+                // i.e. done==start, not 0 — otherwise a UI shows a backwards jump.
+                if pct.is_none() && first_done.is_none() {
+                    first_done = Some(done);
+                }
+            },
+        )
+        .expect("resume must succeed");
+        assert_eq!(first_done, Some(6), "started event must report done==start");
+        assert_eq!(std::fs::read(&part).unwrap(), b"AAAAAABBBB", "seed kept, tail appended");
     }
 
     #[test]

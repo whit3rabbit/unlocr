@@ -56,13 +56,40 @@ struct Args {
     #[arg(long, default_value_t = 4096)]
     max_tokens: u32,
 
-    /// OCR prompt sent with every page
-    #[arg(long, default_value = "<|grounding|>Convert the document to markdown.")]
-    prompt: String,
+    /// Task preset that picks the OCR prompt: markdown (grounded markdown, default),
+    /// free (plain text), figure (parse a chart/figure). Ignored when --prompt is set.
+    #[arg(long, value_enum, default_value_t = Task::Markdown)]
+    task: Task,
 
-    /// Rasterization DPI passed to pdftoppm
+    /// OCR prompt sent with every page. Overrides --task when set.
+    #[arg(long)]
+    prompt: Option<String>,
+
+    /// Pages to OCR: a single page ("5") or an inclusive 1-based range ("5-9").
+    /// Omit to OCR all pages. Applies to every input PDF.
+    #[arg(long)]
+    pages: Option<String>,
+
+    /// Rasterization DPI passed to pdftoppm (size of the PNG handed to the model)
     #[arg(long, default_value_t = 144)]
     dpi: u32,
+
+    /// Cap on vision tokens per image (--image-max-tokens). DeepSeek-OCR's
+    /// base/large detail knob: higher = finer recognition, slower + more VRAM.
+    /// Omit to let the model use its default. Local mode only.
+    #[arg(long)]
+    image_max_tokens: Option<u32>,
+
+    /// Named chat template forwarded to llama-server's --chat-template (e.g.
+    /// deepseek-ocr). Omit to use the template baked into the model. Local mode only.
+    #[arg(long)]
+    chat_template: Option<String>,
+
+    /// Sampling repetition penalty (e.g. 1.1) sent with every page. Helps escape the
+    /// infinite-loop output some quants (notably Q4_K_M) hit on dense pages. Omit
+    /// for the server default.
+    #[arg(long)]
+    repeat_penalty: Option<f32>,
 
     /// Path to llama-server (default: PATH / Homebrew)
     #[arg(long)]
@@ -151,6 +178,76 @@ impl Quality {
     }
 }
 
+/// Prompt presets the model understands. Maps to one of DeepSeek-OCR's task
+/// prompts; `--prompt` overrides the resolved string for full control.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum Task {
+    /// Grounded markdown conversion (headings, layout). The default.
+    Markdown,
+    /// Plain-text OCR with no layout/markdown structure.
+    Free,
+    /// Parse a chart/figure into a structured description.
+    Figure,
+}
+
+impl Task {
+    fn prompt(self) -> &'static str {
+        match self {
+            // Keep in sync with OcrOptions::default().prompt (the no-flags default).
+            Task::Markdown => "<|grounding|>Convert the document to markdown.",
+            Task::Free => "Free OCR.",
+            Task::Figure => "Parse the figure.",
+        }
+    }
+}
+
+impl Args {
+    /// The OCR prompt to use: explicit `--prompt` wins; otherwise the `--task`
+    /// preset. Mirrors the --quant-over---quality override pattern.
+    fn resolved_prompt(&self) -> String {
+        self.prompt
+            .clone()
+            .unwrap_or_else(|| self.task.prompt().to_string())
+    }
+
+    /// Parse `--pages` into a 1-based inclusive `(first, last)` range, or None when
+    /// the flag is absent (= all pages). Accepts "5" (single) and "5-9" (range).
+    /// Rejects 0, reversed ranges, and non-numeric input so a bad flag fails before
+    /// any spawn rather than silently OCR'ing the wrong pages.
+    fn resolved_pages(&self) -> Res<Option<(u32, u32)>> {
+        Ok(match &self.pages {
+            None => None,
+            Some(s) => Some(parse_pages(s)?),
+        })
+    }
+}
+
+/// Pure parser for the `--pages` value. Split out for unit testing.
+fn parse_pages(s: &str) -> Res<(u32, u32)> {
+    let s = s.trim();
+    let parse_one = |p: &str| -> Res<u32> {
+        let n: u32 = p
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid page number: {p:?}"))?;
+        if n == 0 {
+            return Err("page numbers are 1-based; 0 is not valid".into());
+        }
+        Ok(n)
+    };
+    let (first, last) = match s.split_once('-') {
+        Some((a, b)) => (parse_one(a)?, parse_one(b)?),
+        None => {
+            let n = parse_one(s)?;
+            (n, n)
+        }
+    };
+    if last < first {
+        return Err(format!("page range is reversed: {first}-{last}").into());
+    }
+    Ok((first, last))
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -172,6 +269,25 @@ fn run() -> Res<()> {
         }
         return Ok(());
     }
+
+    // Reject out-of-range numerics before they reach pdftoppm / llama-server.
+    // Mirrors the GUI run_ocr guards: dpi=0 makes pdftoppm produce no pages,
+    // image-max-tokens=0 is rejected by llama-server at spawn, and a repeat
+    // penalty <= 0 (or non-finite) drives the sampler into degenerate output.
+    if args.dpi == 0 {
+        return Err("--dpi must be greater than 0".into());
+    }
+    if args.image_max_tokens == Some(0) {
+        return Err("--image-max-tokens must be greater than 0".into());
+    }
+    if let Some(rp) = args.repeat_penalty {
+        if !rp.is_finite() || rp <= 0.0 {
+            return Err("--repeat-penalty must be a finite value greater than 0".into());
+        }
+    }
+    // Surface a bad --pages value before any download/spawn (ocr::run_pdf reparses
+    // it per input, but failing here keeps the error off the slow path).
+    args.resolved_pages()?;
 
     // Expand folders, globs, and --from-list into a concrete, deduped PDF list.
     let inputs = expand_inputs(&args.inputs, args.from_list.as_deref(), args.recursive)?;
@@ -196,7 +312,14 @@ fn run() -> Res<()> {
     // 3. Start llama-server once; it stays up for every page of every PDF.
     // Pass the raw port (0 = auto) so Server::start owns free-port resolution and
     // the bind-race retry; read the actual bound port back from srv.port.
-    let srv = server::Server::start(&tools.llama_server, &files.model, &files.mmproj, args.port)?;
+    let srv = server::Server::start(
+        &tools.llama_server,
+        &files.model,
+        &files.mmproj,
+        args.port,
+        args.image_max_tokens,
+        args.chat_template.as_deref(),
+    )?;
     let port = srv.port;
     println!("llama-server ready on 127.0.0.1:{port}");
 
@@ -350,6 +473,18 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn markdown_task_matches_default_prompt() {
+        // The "markdown" preset is the no-flags default; the GUI's TASK_PROMPTS
+        // map (gui/src/main.js) mirrors these strings. If the default prompt is
+        // ever changed, this fails so the preset (and the JS copy) get updated too.
+        assert_eq!(
+            Task::Markdown.prompt(),
+            unlocr::OcrOptions::default().prompt,
+            "Task::Markdown must equal the OcrOptions default prompt"
+        );
+    }
+
+    #[test]
     fn expand_folder_list_dedup() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -399,5 +534,49 @@ mod tests {
         assert_eq!(Quality::Best.quant(), "BF16");
         assert_eq!(Quality::Good.quant(), "Q8_0");
         assert_eq!(Quality::Less.quant(), "Q4_K_M");
+    }
+
+    #[test]
+    fn task_prompt_mapping() {
+        assert_eq!(Task::Free.prompt(), "Free OCR.");
+        assert_eq!(Task::Figure.prompt(), "Parse the figure.");
+        // CLI parity: the default task's prompt must equal the no-flags default so
+        // `unlocr file.pdf` behaves identically before and after presets existed.
+        assert_eq!(Task::Markdown.prompt(), unlocr::OcrOptions::default().prompt);
+    }
+
+    #[test]
+    fn resolved_prompt_prefers_explicit_over_task() {
+        let mut args = Args::parse_from(["unlocr", "x.pdf", "--task", "free"]);
+        assert_eq!(args.resolved_prompt(), "Free OCR.");
+        // Explicit --prompt wins over the task preset.
+        args.prompt = Some("custom".to_string());
+        assert_eq!(args.resolved_prompt(), "custom");
+    }
+
+    #[test]
+    fn parse_pages_accepts_single_and_range() {
+        assert_eq!(parse_pages("5").unwrap(), (5, 5));
+        assert_eq!(parse_pages("5-9").unwrap(), (5, 9));
+        assert_eq!(parse_pages(" 5 - 9 ").unwrap(), (5, 9)); // whitespace tolerant
+        assert_eq!(parse_pages("3-3").unwrap(), (3, 3)); // degenerate range
+    }
+
+    #[test]
+    fn parse_pages_rejects_bad_input() {
+        assert!(parse_pages("0").is_err()); // 1-based
+        assert!(parse_pages("9-5").is_err()); // reversed
+        assert!(parse_pages("1-0").is_err()); // zero bound
+        assert!(parse_pages("abc").is_err()); // non-numeric
+        assert!(parse_pages("").is_err()); // empty
+        assert!(parse_pages("5-").is_err()); // missing bound
+    }
+
+    #[test]
+    fn resolved_pages_none_when_flag_absent() {
+        let args = Args::parse_from(["unlocr", "x.pdf"]);
+        assert_eq!(args.resolved_pages().unwrap(), None);
+        let args = Args::parse_from(["unlocr", "x.pdf", "--pages", "2-3"]);
+        assert_eq!(args.resolved_pages().unwrap(), Some((2, 3)));
     }
 }

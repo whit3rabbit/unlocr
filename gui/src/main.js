@@ -103,28 +103,14 @@ async function subscribeOcrEvents(ui) {
   ]);
 
   // Streaming token chunks: one event per token, arrives during inference.
-  // Append each chunk into a per-page <pre> in the transcript so text grows
-  // progressively instead of appearing all at once on ocr://done.
-  // `streamPre` tracks the current active <pre>; a new page resets it so
-  // chunks land in separate blocks (one block per page, readable as they arrive).
-  let streamPre = null;
+  // Routed through ui.appendPartial so the per-page <pre> grows in the transcript
+  // AND the run-popup log, and the stream cursor state lives in makeUi (this
+  // function cannot see the transcript body/placeholder in its own scope).
   handlers.push([
     "ocr://partial-text",
     (e) => {
       const { page, chunk } = e.payload || {};
-      if (!body || typeof chunk !== "string") return;
-      // On the first chunk of a new page (or the first chunk ever), create a
-      // fresh <pre> so each page's OCR text has its own block. The page counter
-      // resets across inputs, so a null chunk on page 1 means "new input started".
-      if (streamPre === null || streamPre.dataset.page !== String(page)) {
-        if (placeholder) placeholder.hidden = true;
-        streamPre = document.createElement("pre");
-        streamPre.dataset.page = String(page);
-        body.appendChild(streamPre);
-      }
-      streamPre.textContent += chunk;
-      // Keep the bottom of the transcript visible as tokens arrive.
-      body.scrollTop = body.scrollHeight;
+      ui.appendPartial(page, chunk);
     },
   ]);
 
@@ -136,12 +122,9 @@ async function subscribeOcrEvents(ui) {
     "ocr://done",
     (e) => {
       const { markdown } = e.payload || {};
-      // Remove any streaming pres we built (provisional token view) then
-      // render the assembled markdown so the transcript shows the clean result.
-      if (body) {
-        body.querySelectorAll("pre[data-page]").forEach((n) => n.remove());
-      }
-      streamPre = null;
+      // Drop the provisional streaming pres, then render the assembled markdown
+      // so the transcript shows the clean result.
+      ui.clearPartial();
       ui.renderMarkdown(markdown);
     },
   ]);
@@ -298,17 +281,30 @@ function makeMarkdownPane() {
 
 /** Controller over the center PDF preview pane. Calls the `render_pages` command
  *  (cached on disk by the backend) and loads each page PNG through the asset
- *  protocol via convertFileSrc. Single image at a time; clicking it cycles pages
- *  (ponytail: no nav buttons, add prev/next if multi-page navigation needs it).
- *  Fails soft outside the webview so layout work still loads in a plain browser. */
+ *  protocol via convertFileSrc. Single image at a time; prev/next buttons and the
+ *  Left/Right arrow keys page through, clamped to [0, n-1] (no wrap). Clicking the
+ *  image advances one page. Fails soft outside the webview so layout work still
+ *  loads in a plain browser. */
 function makePreviewPane() {
   const panel = document.querySelector(".panel.preview");
   if (!panel) return { show() {}, clear() {} };
   const stage = panel.querySelector(".preview__stage");
   const pageChip = panel.querySelector(".chip--soft");
   const pageCount = panel.querySelector(".preview__pagecount");
+  const prevBtn = panel.querySelector("#prevPage");
+  const nextBtn = panel.querySelector("#nextPage");
   let pages = []; // asset:// URLs, one per page
   let idx = 0;
+
+  // Clamp to [0, n-1] (no wrap) so the bounds buttons can disable at the ends.
+  function go(delta) {
+    if (pages.length === 0) return;
+    const next = Math.min(Math.max(idx + delta, 0), pages.length - 1);
+    if (next !== idx) {
+      idx = next;
+      paint();
+    }
+  }
 
   function paint() {
     if (!stage) return;
@@ -320,6 +316,8 @@ function makePreviewPane() {
       stage.appendChild(p);
       if (pageChip) pageChip.textContent = "Page 0";
       if (pageCount) pageCount.textContent = "page 0 / 0";
+      if (prevBtn) prevBtn.disabled = true;
+      if (nextBtn) nextBtn.disabled = true;
       return;
     }
     const img = document.createElement("img");
@@ -329,15 +327,26 @@ function makePreviewPane() {
     if (pages.length > 1) {
       img.title = "click for next page";
       img.style.cursor = "pointer";
-      img.addEventListener("click", () => {
-        idx = (idx + 1) % pages.length;
-        paint();
-      });
+      img.addEventListener("click", () => go(1));
     }
     stage.appendChild(img);
     if (pageChip) pageChip.textContent = "Page " + (idx + 1);
     if (pageCount) pageCount.textContent = "page " + (idx + 1) + " / " + pages.length;
+    if (prevBtn) prevBtn.disabled = idx <= 0;
+    if (nextBtn) nextBtn.disabled = idx >= pages.length - 1;
   }
+
+  if (prevBtn) prevBtn.addEventListener("click", () => go(-1));
+  if (nextBtn) nextBtn.addEventListener("click", () => go(1));
+  // Arrow keys page when the preview pane has focus or hover (don't hijack typing
+  // in an input/textarea elsewhere).
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    const t = e.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+    if (!panel.matches(":hover")) return;
+    go(e.key === "ArrowRight" ? 1 : -1);
+  });
 
   function clear() {
     pages = [];
@@ -766,6 +775,33 @@ function makeUi() {
   const body = document.getElementById("transcriptBody");
   const placeholder = document.getElementById("transcriptPlaceholder");
   const runBtn = document.getElementById("runBtn");
+  // Run popup: a dismissible panel mirroring the progress bar + live token log,
+  // with a Stop button. Closing it minimizes to a clickable toast that reopens.
+  const popup = document.getElementById("runPopup");
+  const popupFill = document.getElementById("runPopupFill");
+  const popupStatus = document.getElementById("runPopupStatus");
+  const popupLog = document.getElementById("runPopupLog");
+  const stopBtn = document.getElementById("stopBtn");
+  const popupClose = document.getElementById("runPopupClose");
+  // Tracks the current per-page <pre> in the transcript so streamed chunks for a
+  // page land in one block; reset across pages/inputs. Lives here (not in
+  // subscribeOcrEvents) so the partial-text handler routes through ui.appendPartial
+  // and shares state with reset()/clearPartial().
+  let streamPre = null;
+  // Controls greyed out during a run so a second run can't be launched and run
+  // options can't change mid-flight. loadModelBtn + importBtn + every #runOpts input.
+  function setControlsDisabled(on) {
+    const ids = ["loadModelBtn", "importBtn"];
+    ids.forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.disabled = on;
+    });
+    document
+      .querySelectorAll("#runOpts input, #runOpts select, #runOpts textarea")
+      .forEach((el) => {
+        el.disabled = on;
+      });
+  }
 
   // Run OCR is gated on a LOADED model (litellm-style) and no run in flight. The
   // load itself validates the environment for the chosen mode (local needs
@@ -801,22 +837,73 @@ function makeUi() {
     }
   }
 
-  return {
+  const api = {
     setStatus(text) {
       if (statusText) statusText.textContent = text;
+      if (popupStatus) popupStatus.textContent = text;
     },
     showProgress(show) {
       if (progress) progress.hidden = !show;
     },
     setIndeterminate(on) {
       if (fill) fill.classList.toggle("is-indeterminate", on);
-      if (on) fill.style.width = "";
+      if (on && fill) fill.style.width = "";
+      if (popupFill) {
+        popupFill.classList.toggle("is-indeterminate", on);
+        if (on) popupFill.style.width = "";
+      }
     },
     setFill(pct) {
+      const w = Math.max(0, Math.min(100, pct)) + "%";
       if (fill) {
         fill.classList.remove("is-indeterminate");
-        fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+        fill.style.width = w;
       }
+      if (popupFill) {
+        popupFill.classList.remove("is-indeterminate");
+        popupFill.style.width = w;
+      }
+    },
+    openPopup() {
+      if (popup) popup.hidden = false;
+    },
+    closePopup() {
+      if (popup) popup.hidden = true;
+    },
+    isRunning() {
+      return running;
+    },
+    /** Append one streamed token chunk for `page` to both the transcript (one
+     *  <pre> per page) and the popup log. Centralized here so subscribeOcrEvents
+     *  does not reach for body/placeholder it cannot see in its scope. */
+    appendPartial(page, chunk) {
+      if (typeof chunk !== "string") return;
+      if (body) {
+        if (streamPre === null || streamPre.dataset.page !== String(page)) {
+          if (placeholder) placeholder.hidden = true;
+          streamPre = document.createElement("pre");
+          streamPre.dataset.page = String(page);
+          body.appendChild(streamPre);
+        }
+        streamPre.textContent += chunk;
+        body.scrollTop = body.scrollHeight;
+      }
+      if (popupLog) {
+        popupLog.textContent += chunk;
+        // ponytail: the popup log accumulates every page of a batch; cap it so a
+        // long run can't grow it without bound (keep the most recent tail).
+        if (popupLog.textContent.length > 100000) {
+          popupLog.textContent = popupLog.textContent.slice(-80000);
+        }
+        popupLog.scrollTop = popupLog.scrollHeight;
+      }
+    },
+    /** Drop the provisional per-page <pre>s (ocr://done renders the assembled
+     *  markdown instead) and reset the stream cursor. Popup log is left intact so
+     *  the user can still scroll the streamed output after completion. */
+    clearPartial() {
+      if (body) body.querySelectorAll("pre[data-page]").forEach((n) => n.remove());
+      streamPre = null;
     },
     renderMarkdown(md) {
       if (placeholder) placeholder.hidden = true;
@@ -830,6 +917,8 @@ function makeUi() {
       if (placeholder) placeholder.hidden = false;
       if (body) body.innerHTML = "";
       if (body && placeholder) body.appendChild(placeholder);
+      streamPre = null;
+      if (popupLog) popupLog.textContent = "";
       this.showProgress(false);
       this.setFill(0);
       this.setStatus("Idle");
@@ -837,7 +926,17 @@ function makeUi() {
     setRunning(on) {
       running = on;
       gate();
+      setControlsDisabled(on);
       setPill(on ? "running" : "idle", on ? "Running" : "Idle");
+      if (on) {
+        if (stopBtn) stopBtn.disabled = false;
+        this.openPopup();
+      } else {
+        // Run ended (done/fail/stopped): disable Stop so it can't kill the warm
+        // server when no run is in flight, and drop the "minimized" toast.
+        if (stopBtn) stopBtn.disabled = true;
+        removeToast("ocr:running");
+      }
     },
     /** Model load gate: enable Run only when a model is loaded. Called by
      *  refreshModelStatus after load/unload and on startup. */
@@ -880,6 +979,45 @@ function makeUi() {
       }
     },
   };
+
+  // Stop: ask the backend to cancel (kills the local server -> in-flight read
+  // aborts; run_ocr remaps to "stopped"). One-shot: disable the button + show
+  // intent. The run's catch path surfaces the final "stopped" state.
+  if (stopBtn) {
+    stopBtn.addEventListener("click", async () => {
+      stopBtn.disabled = true;
+      api.setStatus("stopping…");
+      try {
+        const t = requireTauri();
+        await t.core.invoke("stop_ocr");
+      } catch (err) {
+        // Best-effort; the run will still error out on its own.
+      }
+    });
+  }
+
+  // Close (×): minimize. If a run is in flight, leave a clickable toast that
+  // reopens the popup; otherwise just hide it.
+  if (popupClose) {
+    popupClose.addEventListener("click", () => {
+      api.closePopup();
+      if (running) {
+        const el = showToast("ocr:running", {
+          kind: "info",
+          title: "OCR running — click to reopen",
+        });
+        if (el) {
+          el.style.cursor = "pointer";
+          el.onclick = () => {
+            api.openPopup();
+            removeToast("ocr:running");
+          };
+        }
+      }
+    });
+  }
+
+  return api;
 }
 
 /** Derive the parent directory of a path ("" if none). Used to pick the out_dir
@@ -960,6 +1098,7 @@ function readRunOptions() {
   const maxTokensEl = document.getElementById("optMaxTokens");
   const keepImagesEl = document.getElementById("optKeepImages");
   const promptEl = document.getElementById("optPrompt");
+  const repeatPenaltyEl = document.getElementById("optRepeatPenalty");
 
   const DEFAULT_DPI = 144;
   const DEFAULT_MAX_TOKENS = 4096;
@@ -968,6 +1107,11 @@ function readRunOptions() {
     const v = parseInt((el && el.value) || "", 10);
     return Number.isFinite(v) && v > 0 ? v : fallback;
   };
+  // Optional float; blank/invalid -> null so the backend omits it (server default).
+  const floatOrNull = (el) => {
+    const v = parseFloat((el && el.value) || "");
+    return Number.isFinite(v) && v > 0 ? v : null;
+  };
   const promptOr = (el, fallback) => {
     const v = (el && el.value) || "";
     // trim only newlines/whitespace at the ends; an interior-only edit is real.
@@ -975,13 +1119,68 @@ function readRunOptions() {
     return trimmed.length > 0 ? trimmed : fallback;
   };
 
+  const pages = readPageSelection();
+
   return {
     quant: (quantEl && quantEl.value) || "Q8_0",
     dpi: numOr(dpiEl, DEFAULT_DPI),
     maxTokens: numOr(maxTokensEl, DEFAULT_MAX_TOKENS),
     keepImages: !!(keepImagesEl && keepImagesEl.checked),
     prompt: promptOr(promptEl, DEFAULT_PROMPT),
+    repeatPenalty: floatOrNull(repeatPenaltyEl),
+    // 1-based inclusive page range; both null = all pages. The backend validates
+    // first>=1 and last>=first (a direct invoke bypasses the form min= clamp).
+    firstPage: pages.firstPage,
+    lastPage: pages.lastPage,
   };
+}
+
+/** Read the Pages control (All / Range / Single) into a `{firstPage, lastPage}`
+ *  pair. All (or a blank/invalid entry) -> both null (= all pages). Single -> the
+ *  same page for both bounds. Range -> the two bounds, leaving a blank bound null
+ *  for the backend to default (first->1, last->first). Never throws on a half-typed
+ *  field: an unparseable number falls back to all so a run is never blocked. */
+function readPageSelection() {
+  const mode = (document.getElementById("optPagesMode") || {}).value || "all";
+  const posInt = (id) => {
+    const v = parseInt((document.getElementById(id) || {}).value || "", 10);
+    return Number.isFinite(v) && v > 0 ? v : null;
+  };
+  if (mode === "single") {
+    const n = posInt("optPageFrom");
+    return n === null ? { firstPage: null, lastPage: null } : { firstPage: n, lastPage: n };
+  }
+  if (mode === "range") {
+    const f = posInt("optPageFrom");
+    const t = posInt("optPageTo");
+    if (f === null && t === null) return { firstPage: null, lastPage: null };
+    return { firstPage: f, lastPage: t };
+  }
+  return { firstPage: null, lastPage: null };
+}
+
+/** Show/hide the page-number inputs based on the Pages mode and keep the second
+ *  input (the range "to") visible only for Range. Called once at startup and on
+ *  every mode change so the form matches the selected mode. */
+function wirePageSelection() {
+  const modeEl = document.getElementById("optPagesMode");
+  const wrap = document.getElementById("optPagesInputs");
+  const toEl = document.getElementById("optPageTo");
+  const label = document.getElementById("optPagesInputsLabel");
+  const fromEl = document.getElementById("optPageFrom");
+  if (!modeEl || !wrap) return;
+  const apply = () => {
+    const mode = modeEl.value;
+    wrap.hidden = mode === "all";
+    if (toEl) toEl.hidden = mode !== "range";
+    if (label) label.textContent = mode === "range" ? "Pages" : "Page";
+    if (fromEl) fromEl.placeholder = mode === "range" ? "from" : "page";
+    renderEffectiveSummary();
+  };
+  // Visibility toggle on mode change; the summary is refreshed by the shared
+  // #runOpts input/change listeners wired in DOMContentLoaded.
+  modeEl.addEventListener("change", apply);
+  apply();
 }
 
 /** Render the "effective values" summary (EH-0005 bite 2) next to Run so the user
@@ -1001,10 +1200,20 @@ function renderEffectiveSummary() {
     .replace(/^\s+|\s+$/g, "");
   const shown = promptShort.length > 0 ? promptShort.slice(0, 48) : opts.prompt.slice(0, 48);
   const ellipsis = promptShort.length > 48 ? "…" : "";
+  // Page span: blank = all. "5" for single, "5-9" for range, "5-end" when only the
+  // first bound is set. Mirrors the firstPage/lastPage the run will send.
+  let pagesNote = "";
+  if (opts.firstPage != null || opts.lastPage != null) {
+    const f = opts.firstPage != null ? opts.firstPage : 1;
+    if (opts.lastPage != null && opts.lastPage !== f) pagesNote = " · pages " + f + "-" + opts.lastPage;
+    else if (opts.lastPage == null) pagesNote = " · pages " + f + "-end";
+    else pagesNote = " · page " + f;
+  }
   vals.textContent =
     opts.quant +
     " · " + opts.dpi + " DPI · " + opts.maxTokens + " tok · " +
     "keep images " + (opts.keepImages ? "on" : "off") +
+    pagesNote +
     " · prompt: “" + shown + ellipsis + "”";
 }
 
@@ -1078,6 +1287,9 @@ async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, board) {
       dpi: opts.dpi,
       prompt: opts.prompt,
       keepImages: opts.keepImages,
+      repeatPenalty: opts.repeatPenalty,
+      firstPage: opts.firstPage,
+      lastPage: opts.lastPage,
     });
     if (ui) {
       ui.setRunning(false);
@@ -1131,15 +1343,56 @@ async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, board) {
     // but never fails the run (recordRunOutcome swallows it).
     const outPath = haveFile && results && results.length ? results[0] : "";
     await recordRunOutcome(path, opts, "done", outPath, "", library, board);
+    // Surface completion: a momentary toast + a persisted bell notification.
+    const stem = (splitPath(path) || {}).name || path;
+    showToast("run:" + path, {
+      kind: "done",
+      title: stem + " — OCR complete",
+      meta: outPath || "",
+    });
+    removeToast("run:" + path, 5000);
+    addNotification("done", stem + " — OCR complete", outPath || "");
     return true;
   } catch (err) {
+    // User-initiated stop is not a failure. The backend killed the local server
+    // and dropped the model, so refresh the gate (Run -> "Load a model first").
+    const wasStopped = String(err).trim() === "stopped";
     if (ui) {
       ui.setRunning(false);
-      ui.fail(String(err));
+      if (wasStopped) {
+        ui.setStatus("stopped");
+      } else {
+        ui.fail(String(err));
+      }
+    }
+    if (wasStopped) {
+      // Drop the provisional half-page <pre> left by the interrupted page so the
+      // transcript does not keep dangling partial output (no ocr://done fires on
+      // a stopped run).
+      if (ui) ui.clearPartial();
+      await refreshModelStatus(ui);
+      // Record as "failed" (the Board/Library buckets only know done/failed/queued;
+      // "stopped" would mis-bucket to queued). The error text carries the reason.
+      await recordRunOutcome(path, opts, "failed", "", "stopped by user", library, board);
+      const stem = (splitPath(path) || {}).name || path;
+      showToast("run:" + path, { kind: "info", title: stem + " — stopped", meta: "reload the model to run again" });
+      removeToast("run:" + path, 6000);
+      addNotification("info", stem + " — OCR stopped", "Stopped by user; reload the model to run again.");
+      // Sentinel so a batch loop can stop dispatching the remaining files (the
+      // model was dropped; they would all fail "load a model first").
+      return "stopped";
     }
     // EH-0006: record the failed run too so the Library and Board show it as a
     // failed card (not silently dropped). The user already saw the error in the UI.
     await recordRunOutcome(path, opts, "failed", "", String(err), library, board);
+    const stem = (splitPath(path) || {}).name || path;
+    showToast("run:" + path, {
+      kind: "error",
+      title: stem + " — OCR failed",
+      meta: String(err).slice(0, 140),
+    });
+    removeToast("run:" + path, 8000);
+    addNotification("error", stem + " — OCR failed", String(err));
     return false;
   }
 }
@@ -1186,11 +1439,15 @@ function wireRunButton(ui, mdPane, unlistensRef, library, board, getQueuedPaths)
         // rejects (its pre-try teardown/subscribe can throw) — otherwise the
         // patch leaks past the loop and into later files.
         ui.setStatus = (text) => originalSetStatus(prefix + text);
+        let r;
         try {
-          await runOcrOnPath(path, ui, mdPane, unlistensRef, library, board);
+          r = await runOcrOnPath(path, ui, mdPane, unlistensRef, library, board);
         } finally {
           ui.setStatus = originalSetStatus;
         }
+        // A user Stop drops the model; remaining queued files would all fail
+        // "load a model first", so halt the batch instead of spamming errors.
+        if (r === "stopped") break;
       }
     })();
   });
@@ -1278,7 +1535,9 @@ function wireLibraryDrop(ui, mdPane, unlistensRef, library, board) {
         // eslint-disable-next-line no-console
         console.log("[drop] enqueuing OCR job:", pdf);
         // Each run is awaited so llama-server is torn down before the next starts.
-        await runOcrOnPath(pdf, ui, mdPane, unlistensRef, library, board);
+        const r = await runOcrOnPath(pdf, ui, mdPane, unlistensRef, library, board);
+        // User Stop dropped the model; halt the rest of the dropped batch.
+        if (r === "stopped") break;
       }
     } finally {
       importing = false;
@@ -1402,44 +1661,50 @@ async function refreshModelStatus(ui) {
   }
 }
 
-/** Wire the OCR engine tabs (Unlimited-OCR | Remote). Toggling the tab sets the
- *  active engine and shows/hides the remote URL/key fields. The active tab's
- *  data-engine is read by the Load button to pick local vs remote. */
-function wireEngineTabs() {
-  const tabs = document.getElementById("engineTabs");
-  const remoteFields = document.getElementById("remoteFields");
-  if (!tabs) return;
-  tabs.querySelectorAll(".seg__btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      tabs.querySelectorAll(".seg__btn").forEach((b) => b.classList.remove("is-active"));
-      btn.classList.add("is-active");
-      if (remoteFields) remoteFields.hidden = btn.dataset.engine !== "remote";
-    });
-  });
+// Backend presets. llamacpp = managed-local spawn (Quant control drives it, no
+// URL); vllm/sglang/custom are remote OpenAI-compatible endpoints. Non-custom
+// presets keep the URL/key/model fields hidden; vllm/sglang prefill #remoteUrl
+// with the backend's default port (base URL only -- the backend appends
+// /v1/chat/completions, so no /v1 suffix here). load_model reads mode + the
+// (possibly prefilled) #remoteUrl, so presets need no extra plumbing.
+const ENGINE_PRESETS = {
+  llamacpp: { mode: "local", url: null },
+  vllm: { mode: "remote", url: "http://127.0.0.1:8000" },
+  sglang: { mode: "remote", url: "http://127.0.0.1:30000" },
+  custom: { mode: "remote", url: null },
+};
 
-  // ponytail: convenience prefill, not a new engine mode. LM Studio's MLX engine
-  // is just a local OpenAI-compatible endpoint, so this flips to the Remote tab
-  // (reusing its click handler) and fills the default localhost:1234 URL.
-  const preset = document.getElementById("presetLmStudio");
-  if (preset) {
-    preset.addEventListener("click", () => {
-      const remoteBtn = tabs.querySelector('.seg__btn[data-engine="remote"]');
-      if (remoteBtn) remoteBtn.click();
-      if (remoteFields) {
-        const url = document.getElementById("remoteUrl");
-        // Base URL only (no /v1): the backend appends /v1/chat/completions.
-        // LM Studio's OpenAI server lives at localhost:1234, /v1 is the suffix
-        // unlocr adds itself, so writing it here would double it -> 404.
-        if (url) url.value = "http://localhost:1234";
-      }
-    });
+/** Apply a backend preset: toggle the remote field visibility (editable only for
+ *  Custom), prefill the URL for vllm/sglang, and hide the Quant control for any
+ *  remote backend (quant only applies to the managed-local spawn). */
+function applyPreset(name) {
+  const p = ENGINE_PRESETS[name] || ENGINE_PRESETS.llamacpp;
+  const remoteFields = document.getElementById("remoteFields");
+  if (remoteFields) remoteFields.hidden = name !== "custom";
+  if (p.url) {
+    const url = document.getElementById("remoteUrl");
+    if (url) url.value = p.url;
   }
+  const quantEl = document.getElementById("optQuant");
+  const quantField = quantEl && quantEl.closest(".opts__field");
+  if (quantField) quantField.hidden = p.mode !== "local";
 }
 
-/** Return the active engine tab's mode ("local" | "remote"). */
+/** Wire the OCR engine backend preset dropdown. Changing it re-applies the preset
+ *  (field visibility + URL prefill). The selected preset's mode is read by the
+ *  Load button to pick local vs remote. */
+function wireEnginePreset() {
+  const sel = document.getElementById("enginePreset");
+  if (!sel) return;
+  sel.addEventListener("change", () => applyPreset(sel.value));
+  applyPreset(sel.value);
+}
+
+/** Return the active backend's mode ("local" | "remote"). */
 function activeEngineMode() {
-  const active = document.querySelector("#engineTabs .seg__btn.is-active");
-  return (active && active.dataset.engine) || "local";
+  const sel = document.getElementById("enginePreset");
+  const name = sel ? sel.value : "llamacpp";
+  return (ENGINE_PRESETS[name] || ENGINE_PRESETS.llamacpp).mode;
 }
 
 /** Wire the Load/Unload model buttons. Load reads the active engine mode + the
@@ -1465,6 +1730,11 @@ function wireModelBar(ui) {
       const urlEl = document.getElementById("remoteUrl");
       const keyEl = document.getElementById("remoteKey");
       const modelEl = document.getElementById("remoteModel");
+      // Startup-only DeepSeek-OCR knobs read at load time (they parameterize the
+      // llama-server spawn). Blank/invalid -> null so the backend omits the flag.
+      const imtEl = document.getElementById("optImageMaxTokens");
+      const ctEl = document.getElementById("optChatTemplate");
+      const imtVal = imtEl ? parseInt(imtEl.value || "", 10) : NaN;
       loadBtn.disabled = true;
       if (unloadBtn) unloadBtn.disabled = true;
       if (statusText) statusText.textContent = "loading…";
@@ -1476,6 +1746,8 @@ function wireModelBar(ui) {
           apiKey: keyEl ? keyEl.value : null,
           model: modelEl ? modelEl.value : null,
           llamaBin: null,
+          imageMaxTokens: Number.isFinite(imtVal) && imtVal > 0 ? imtVal : null,
+          chatTemplate: ctEl && ctEl.value ? ctEl.value : null,
         });
         if (ui) ui.applyModelStatus(status);
       } catch (err) {
@@ -1580,14 +1852,13 @@ function applySettingsToControls(s) {
   setVal("remoteUrl", s.remoteBaseUrl);
   setVal("remoteKey", s.remoteApiKey);
   setVal("remoteModel", s.remoteModel);
-  // Select the engine tab matching the saved mode.
-  const tabs = document.getElementById("engineTabs");
-  const remoteFields = document.getElementById("remoteFields");
-  if (tabs) {
-    tabs.querySelectorAll(".seg__btn").forEach((b) => {
-      b.classList.toggle("is-active", b.dataset.engine === (s.mode || "local"));
-    });
-    if (remoteFields) remoteFields.hidden = (s.mode || "local") !== "remote";
+  // Select the backend preset matching the saved mode. We can't tell which remote
+  // backend was saved (settings only stores mode + URL), so remote -> Custom, which
+  // shows the fields and preserves the #remoteUrl restored by setVal above.
+  const sel = document.getElementById("enginePreset");
+  if (sel) {
+    sel.value = (s.mode || "local") === "remote" ? "custom" : "llamacpp";
+    applyPreset(sel.value);
   }
 }
 
@@ -1730,6 +2001,281 @@ async function wireCacheControls() {
   }
 }
 
+// --- notifications + toasts -------------------------------------------------
+//
+// Two surfaces: transient TOASTS (bottom-right #toastStack) for live download
+// progress and momentary done/failed flashes, and a persisted PANEL (the bell,
+// #notifyPanel) backed by notifications.json via the add/list/clear commands.
+// Toasts are pure DOM; the panel round-trips through Tauri. All user-supplied
+// text (filenames, error messages, output paths) is set via textContent, never
+// innerHTML, so a hostile path/error string cannot inject markup.
+
+/** Compact human byte size, e.g. 1503238553 -> "1.4 GB". */
+function fmtBytes(n) {
+  if (!n || n < 0) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) {
+    n /= 1024;
+    i += 1;
+  }
+  return (i === 0 ? n : n.toFixed(1)) + " " + u[i];
+}
+
+/** Relative age of a unix-seconds timestamp, e.g. "3m ago". */
+function relTime(secs) {
+  const now = Math.floor(Date.now() / 1000);
+  const d = Math.max(0, now - (secs || 0));
+  if (d < 60) return d + "s ago";
+  if (d < 3600) return Math.floor(d / 60) + "m ago";
+  if (d < 86400) return Math.floor(d / 3600) + "h ago";
+  return Math.floor(d / 86400) + "d ago";
+}
+
+/** Create or update a toast by id (same id = update in place, used for live
+ *  download progress). opts: {title, kind, meta, fill}. fill is 0..100 to show a
+ *  progress bar, omitted for a plain notice. */
+function showToast(id, opts) {
+  const stack = document.getElementById("toastStack");
+  if (!stack) return null;
+  let el = stack.querySelector('[data-toast="' + id + '"]');
+  if (!el) {
+    el = document.createElement("div");
+    el.dataset.toast = id;
+    el.innerHTML =
+      '<div class="toast__title"></div>' +
+      '<div class="toast__meta"></div>' +
+      '<div class="toast__bar" hidden><div class="toast__fill"></div></div>';
+    stack.appendChild(el);
+  }
+  el.className = "toast" + (opts.kind ? " toast--" + opts.kind : "");
+  el.querySelector(".toast__title").textContent = opts.title || "";
+  const meta = el.querySelector(".toast__meta");
+  meta.textContent = opts.meta || "";
+  meta.hidden = !opts.meta;
+  const bar = el.querySelector(".toast__bar");
+  if (typeof opts.fill === "number") {
+    bar.hidden = false;
+    el.querySelector(".toast__fill").style.width =
+      Math.max(0, Math.min(100, opts.fill)) + "%";
+  } else {
+    bar.hidden = true;
+  }
+  return el;
+}
+
+/** Remove a toast by id, optionally after `delay` ms (lets a completed toast
+ *  linger briefly before fading out). */
+function removeToast(id, delay) {
+  const stack = document.getElementById("toastStack");
+  if (!stack) return;
+  const el = stack.querySelector('[data-toast="' + id + '"]');
+  if (!el) return;
+  if (delay) setTimeout(() => el.remove(), delay);
+  else el.remove();
+}
+
+// Per-file download state for speed (bytes/sec) derived from successive events,
+// plus a flag so we only record a "model ready" notification when a download
+// actually happened this load (server-ready also fires on every plain run).
+const dlSpeed = new Map();
+let dlHappened = false;
+
+/** Add a persisted notification (best-effort). Refreshes the bell badge. Never
+ *  throws into the caller: outside the webview or on a store error it just no-ops. */
+async function addNotification(kind, title, body) {
+  let t;
+  try {
+    t = requireTauri();
+  } catch (err) {
+    return;
+  }
+  try {
+    await t.core.invoke("add_notification", { kind, title, body: body || "" });
+  } catch (err) {
+    return;
+  }
+  refreshNotifyPanel();
+}
+
+/** Reload the notification list into the panel and update the unread badge.
+ *  Best-effort; silent outside the webview. */
+async function refreshNotifyPanel() {
+  let t;
+  try {
+    t = requireTauri();
+  } catch (err) {
+    return;
+  }
+  let list = [];
+  try {
+    list = await t.core.invoke("list_notifications");
+  } catch (err) {
+    return;
+  }
+  const badge = document.getElementById("notifyBadge");
+  if (badge) {
+    const unread = list.filter((n) => !n.read).length;
+    badge.textContent = String(unread);
+    badge.hidden = unread === 0;
+  }
+  const listEl = document.getElementById("notifyList");
+  if (!listEl) return;
+  if (list.length === 0) {
+    listEl.innerHTML = '<p class="notify-panel__empty">No notifications.</p>';
+    return;
+  }
+  listEl.innerHTML = "";
+  // Newest first.
+  list
+    .slice()
+    .reverse()
+    .forEach((n) => {
+      const item = document.createElement("div");
+      item.className =
+        "notify-item notify-item--" + (n.kind || "info") + (n.read ? "" : " is-unread");
+
+      const title = document.createElement("div");
+      title.className = "notify-item__title";
+      title.textContent = n.title || "";
+      item.appendChild(title);
+
+      if (n.body) {
+        const bodyEl = document.createElement("div");
+        bodyEl.className = "notify-item__body";
+        bodyEl.textContent = n.body;
+        item.appendChild(bodyEl);
+      }
+
+      const time = document.createElement("div");
+      time.className = "notify-item__time";
+      time.textContent = relTime(n.createdAt);
+      item.appendChild(time);
+
+      const x = document.createElement("button");
+      x.className = "notify-item__x";
+      x.type = "button";
+      x.title = "Dismiss";
+      x.textContent = "×";
+      x.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        try {
+          await t.core.invoke("clear_notification", { id: n.id });
+        } catch (err) {
+          /* ignore */
+        }
+        refreshNotifyPanel();
+      });
+      item.appendChild(x);
+
+      listEl.appendChild(item);
+    });
+}
+
+/** Live download toasts: one per file, pct + size + MB/s, removed when complete.
+ *  Records a single "Model ready" notification once a download finishes. */
+function wireDownloadToasts(t) {
+  t.event.listen("ocr://progress", (e) => {
+    const { name, pct, done, total } = (e && e.payload) || {};
+    const key = name || "model";
+    const id = "dl:" + key;
+    dlHappened = true;
+
+    let speedStr = "";
+    if (typeof done === "number") {
+      const now = Date.now();
+      const prev = dlSpeed.get(key);
+      if (prev && now > prev.time) {
+        const bps = ((done - prev.done) * 1000) / (now - prev.time);
+        if (bps > 0) speedStr = fmtBytes(bps) + "/s";
+      }
+      dlSpeed.set(key, { done, time: now });
+    }
+    const sizeStr =
+      total > 0 ? fmtBytes(done) + " / " + fmtBytes(total) : fmtBytes(done || 0);
+    showToast(id, {
+      kind: "download",
+      title: "Downloading " + key,
+      meta:
+        (pct != null ? pct + "%  ·  " : "") +
+        sizeStr +
+        (speedStr ? "  ·  " + speedStr : ""),
+      fill: typeof pct === "number" ? pct : undefined,
+    });
+    if (pct >= 100) {
+      dlSpeed.delete(key);
+      removeToast(id, 1500);
+    }
+  });
+
+  t.event.listen("ocr://server-ready", () => {
+    // All files present and the server is up. Clear any lingering download toasts
+    // and, if a download actually ran this load, record one completion notice.
+    const stack = document.getElementById("toastStack");
+    if (stack) {
+      stack
+        .querySelectorAll('[data-toast^="dl:"]')
+        .forEach((el) => el.remove());
+    }
+    if (dlHappened) {
+      dlHappened = false;
+      addNotification("download", "Model download complete", "");
+    }
+  });
+}
+
+/** Wire the bell (toggle panel, mark-read on open, click-outside close), the
+ *  Clear-all button, and the download toasts. Silent outside the webview. */
+function initNotifications() {
+  let t;
+  try {
+    t = requireTauri();
+  } catch (err) {
+    return;
+  }
+  const bell = document.getElementById("notifyBell");
+  const panel = document.getElementById("notifyPanel");
+  const clearAll = document.getElementById("notifyClearAll");
+
+  if (bell && panel) {
+    bell.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const opening = panel.hidden;
+      panel.hidden = !opening;
+      bell.setAttribute("aria-expanded", String(opening));
+      if (opening) {
+        await refreshNotifyPanel();
+        // Mark read so the badge clears, then re-render to drop unread styling.
+        try {
+          await t.core.invoke("mark_notifications_read");
+        } catch (err) {
+          /* ignore */
+        }
+        refreshNotifyPanel();
+      }
+    });
+    document.addEventListener("click", (e) => {
+      if (panel.hidden) return;
+      if (e.target === bell || bell.contains(e.target) || panel.contains(e.target)) return;
+      panel.hidden = true;
+      bell.setAttribute("aria-expanded", "false");
+    });
+  }
+  if (clearAll) {
+    clearAll.addEventListener("click", async () => {
+      try {
+        await t.core.invoke("clear_all_notifications");
+      } catch (err) {
+        /* ignore */
+      }
+      refreshNotifyPanel();
+    });
+  }
+
+  wireDownloadToasts(t);
+  refreshNotifyPanel(); // seed the badge from the persisted store on launch
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   const library = makeLibrary();
   const board = makeBoard();
@@ -1761,7 +2307,7 @@ window.addEventListener("DOMContentLoaded", () => {
   // the app-lifetime load-progress listeners, and the settings panel. Load
   // settings first so saved defaults seed the controls, then mark which quants are
   // cached, then read the live model status to set the Run gate + badge.
-  wireEngineTabs();
+  wireEnginePreset();
   wireModelBar(ui);
   attachLoadListeners();
   wireSettings(() => {
@@ -1770,6 +2316,9 @@ window.addEventListener("DOMContentLoaded", () => {
   markCachedQuants();
   wireCacheControls();
   refreshModelStatus(ui);
+  // Notification bell + panel + download toasts. Self-contained; silent in a
+  // plain browser (no Tauri). Seeds the unread badge from the persisted store.
+  initNotifications();
 
   // EH-0004 bite 2 / EH-0012: the file list pane is bound to the queued-path
   // list. The Import button opens a MULTI-select picker; each chosen PDF is
@@ -1852,6 +2401,46 @@ window.addEventListener("DOMContentLoaded", () => {
     el.addEventListener("input", renderEffectiveSummary);
     el.addEventListener("change", renderEffectiveSummary);
   });
+
+  // Task preset -> fill the Prompt box. Keep these strings in sync with the CLI's
+  // Task::prompt() (src/main.rs). "custom" leaves whatever the user typed.
+  const TASK_PROMPTS = {
+    markdown: "<|grounding|>Convert the document to markdown.",
+    free: "Free OCR.",
+    figure: "Parse the figure.",
+  };
+  const taskEl = document.getElementById("optTask");
+  const promptEl = document.getElementById("optPrompt");
+  if (taskEl && promptEl) {
+    taskEl.addEventListener("change", () => {
+      const preset = TASK_PROMPTS[taskEl.value];
+      if (preset) {
+        promptEl.value = preset;
+        renderEffectiveSummary();
+      }
+    });
+    // A manual prompt edit means the box no longer matches a preset: flip to Custom
+    // so the dropdown does not falsely claim a preset is active.
+    promptEl.addEventListener("input", () => {
+      const match = Object.keys(TASK_PROMPTS).find((k) => TASK_PROMPTS[k] === promptEl.value);
+      taskEl.value = match || "custom";
+    });
+  }
+
+  // Surface the Q4_K_M loop caveat only when that quant is selected.
+  const quantEl = document.getElementById("optQuant");
+  const quantHint = document.getElementById("quantHint");
+  if (quantEl && quantHint) {
+    const syncHint = () => {
+      quantHint.hidden = quantEl.value !== "Q4_K_M";
+    };
+    quantEl.addEventListener("change", syncHint);
+    syncHint();
+  }
+
+  // Page-selection mode -> show/hide the from/to inputs.
+  wirePageSelection();
+
   renderEffectiveSummary();
 
   // Preflight only runs inside the Tauri webview; fail soft otherwise so the

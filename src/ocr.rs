@@ -36,10 +36,14 @@ pub fn run_pdf<S: ImageOcr>(backend: &S, pdftoppm: &Path, input: &Path, args: &A
         quant,
         max_tokens: args.max_tokens,
         dpi: args.dpi,
-        prompt: args.prompt.clone(),
+        prompt: args.resolved_prompt(),
         port: args.port,
         model_dir: args.model_dir.clone(),
         keep_images: args.keep_images,
+        image_max_tokens: args.image_max_tokens,
+        chat_template: args.chat_template.clone(),
+        repeat_penalty: args.repeat_penalty,
+        pages: args.resolved_pages()?,
     };
 
     let input_display = input.display().to_string();

@@ -5,9 +5,24 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Run `pdftoppm -png -r <dpi> <pdf> <outdir>/page` and collect the PNGs sorted
-/// by page number. pdftoppm zero-pads the suffix based on page count, so we
-/// sort by the parsed trailing integer rather than lexically.
+/// by page number. Renders all pages; thin wrapper over `rasterize_range`.
 pub fn rasterize(pdftoppm: &Path, pdf: &Path, outdir: &Path, dpi: u32) -> Res<Vec<PathBuf>> {
+    rasterize_range(pdftoppm, pdf, outdir, dpi, None)
+}
+
+/// Like `rasterize`, but when `range` is `Some((first, last))` (1-based inclusive)
+/// passes `-f`/`-l` so pdftoppm renders only that page span. pdftoppm preserves the
+/// real page number in the filename suffix (e.g. `-f 5` -> `page-5.png`), so
+/// `collect_pages`/`trailing_number` keep working and the caller can recover the
+/// true page number. pdftoppm zero-pads the suffix based on page count, so we sort
+/// by the parsed trailing integer rather than lexically.
+pub fn rasterize_range(
+    pdftoppm: &Path,
+    pdf: &Path,
+    outdir: &Path,
+    dpi: u32,
+    range: Option<(u32, u32)>,
+) -> Res<Vec<PathBuf>> {
     let prefix = outdir.join("page");
     // pdftoppm has no `--` end-of-options guard, so a relative path that begins
     // with `-` (e.g. "-foo.pdf") would be parsed as a flag. Prefix "./" to keep it
@@ -16,12 +31,12 @@ pub fn rasterize(pdftoppm: &Path, pdf: &Path, outdir: &Path, dpi: u32) -> Res<Ve
         Some(s) if s.starts_with('-') => Path::new(".").join(pdf),
         _ => pdf.to_path_buf(),
     };
-    let status = Command::new(pdftoppm)
-        .arg("-png")
-        .arg("-r").arg(dpi.to_string())
-        .arg(&pdf_arg)
-        .arg(&prefix)
-        .status()?;
+    let mut cmd = Command::new(pdftoppm);
+    cmd.arg("-png").arg("-r").arg(dpi.to_string());
+    if let Some((first, last)) = range {
+        cmd.arg("-f").arg(first.to_string()).arg("-l").arg(last.to_string());
+    }
+    let status = cmd.arg(&pdf_arg).arg(&prefix).status()?;
     if !status.success() {
         return Err(format!("pdftoppm failed ({status})").into());
     }

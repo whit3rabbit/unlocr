@@ -2,6 +2,7 @@
 // completions, and kill it on drop.
 
 use crate::Res;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpListener;
 use std::path::Path;
@@ -66,7 +67,26 @@ fn read_stderr_log(stderr_log: &tempfile::NamedTempFile) -> String {
 }
 
 impl Server {
-    pub fn start(bin: &Path, model: &Path, mmproj: &Path, port: u16) -> Res<Server> {
+    /// OS process id of the spawned llama-server. The GUI stashes this so it can
+    /// kill the server out-of-band (Stop) without holding the lock that owns the
+    /// `Server`. Unused by the CLI (server is dropped, not killed by pid).
+    #[allow(dead_code)]
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Spawn llama-server. `image_max_tokens` (Some) adds `--image-max-tokens N`
+    /// (DeepSeek-OCR detail knob); `chat_template` (Some) adds `--chat-template
+    /// <name>` (e.g. "deepseek-ocr"). Both are inert when None, so the default
+    /// command line is byte-for-byte what it was before these knobs existed.
+    pub fn start(
+        bin: &Path,
+        model: &Path,
+        mmproj: &Path,
+        port: u16,
+        image_max_tokens: Option<u32>,
+        chat_template: Option<&str>,
+    ) -> Res<Server> {
         let max_attempts = if port == 0 { 5 } else { 1 };
         let mut last_err = None;
 
@@ -88,11 +108,9 @@ impl Server {
             let stderr_log = tempfile::NamedTempFile::new()?;
             let stderr_handle = stderr_log.reopen()?;
 
-            let mut child = Command::new(bin)
-                .arg("-m").arg(model)
-                .arg("--mmproj").arg(mmproj)
-                .arg("--host").arg("127.0.0.1")
-                .arg("--port").arg(current_port.to_string())
+            let mut cmd = Command::new(bin);
+            cmd.args(server_args(model, mmproj, current_port, image_max_tokens, chat_template));
+            let mut child = cmd
                 .stdout(Stdio::null())
                 .stderr(Stdio::from(stderr_handle))
                 .spawn()
@@ -141,7 +159,13 @@ impl Server {
     }
 
     /// Send one image + prompt, return the model's markdown.
-    pub fn ocr_image(&self, prompt: &str, data_uri: &str, max_tokens: u32) -> Res<String> {
+    pub fn ocr_image(
+        &self,
+        prompt: &str,
+        data_uri: &str,
+        max_tokens: u32,
+        repeat_penalty: Option<f32>,
+    ) -> Res<String> {
         ocr_via(
             &format!("http://127.0.0.1:{}", self.port),
             None,
@@ -149,7 +173,52 @@ impl Server {
             prompt,
             data_uri,
             max_tokens,
+            repeat_penalty,
         )
+    }
+}
+
+/// Build the llama-server argument vector (everything after the binary path).
+/// Split out so the optional-flag wiring (`--image-max-tokens`, `--chat-template`)
+/// is unit-testable without spawning a process. Returns `OsString`s so model /
+/// mmproj paths are passed losslessly (a non-UTF8 cache path must not be mangled
+/// into U+FFFD the way `to_string_lossy` would).
+fn server_args(
+    model: &Path,
+    mmproj: &Path,
+    port: u16,
+    image_max_tokens: Option<u32>,
+    chat_template: Option<&str>,
+) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
+        "-m".into(),
+        model.as_os_str().to_owned(),
+        "--mmproj".into(),
+        mmproj.as_os_str().to_owned(),
+        "--host".into(),
+        "127.0.0.1".into(),
+        "--port".into(),
+        port.to_string().into(),
+    ];
+    // Optional DeepSeek-OCR knobs; omitted entirely when None so the baseline
+    // invocation is byte-for-byte unchanged.
+    if let Some(n) = image_max_tokens {
+        args.push("--image-max-tokens".into());
+        args.push(n.to_string().into());
+    }
+    if let Some(tmpl) = chat_template {
+        args.push("--chat-template".into());
+        args.push(tmpl.into());
+    }
+    args
+}
+
+/// Attach the optional llama.cpp `repeat_penalty` extension to a request body.
+/// No-op when None so the baseline body is byte-for-byte unchanged. Shared by the
+/// streaming and non-streaming request builders.
+fn apply_repeat_penalty(body: &mut serde_json::Value, repeat_penalty: Option<f32>) {
+    if let Some(rp) = repeat_penalty {
+        body["repeat_penalty"] = serde_json::json!(rp);
     }
 }
 
@@ -157,7 +226,13 @@ impl Server {
 /// `lib::ocr_pages` drive either a local `Server` or a `RemoteEndpoint` without
 /// caring which. The body it sends is provider-agnostic (OpenAI chat-completions).
 pub trait ImageOcr {
-    fn ocr_image(&self, prompt: &str, data_uri: &str, max_tokens: u32) -> Res<String>;
+    fn ocr_image(
+        &self,
+        prompt: &str,
+        data_uri: &str,
+        max_tokens: u32,
+        repeat_penalty: Option<f32>,
+    ) -> Res<String>;
 
     /// Stream completions: like `ocr_image` but calls `on_token` with each partial
     /// text chunk as it arrives (SSE delta), and returns the full assembled text.
@@ -168,16 +243,23 @@ pub trait ImageOcr {
         prompt: &str,
         data_uri: &str,
         max_tokens: u32,
+        repeat_penalty: Option<f32>,
         on_token: &mut dyn FnMut(&str),
     ) -> Res<String> {
         let _ = on_token; // default: ignore the sink
-        self.ocr_image(prompt, data_uri, max_tokens)
+        self.ocr_image(prompt, data_uri, max_tokens, repeat_penalty)
     }
 }
 
 impl ImageOcr for Server {
-    fn ocr_image(&self, prompt: &str, data_uri: &str, max_tokens: u32) -> Res<String> {
-        Server::ocr_image(self, prompt, data_uri, max_tokens)
+    fn ocr_image(
+        &self,
+        prompt: &str,
+        data_uri: &str,
+        max_tokens: u32,
+        repeat_penalty: Option<f32>,
+    ) -> Res<String> {
+        Server::ocr_image(self, prompt, data_uri, max_tokens, repeat_penalty)
     }
 
     fn ocr_image_stream(
@@ -185,6 +267,7 @@ impl ImageOcr for Server {
         prompt: &str,
         data_uri: &str,
         max_tokens: u32,
+        repeat_penalty: Option<f32>,
         on_token: &mut dyn FnMut(&str),
     ) -> Res<String> {
         ocr_via_stream(
@@ -194,6 +277,7 @@ impl ImageOcr for Server {
             prompt,
             data_uri,
             max_tokens,
+            repeat_penalty,
             on_token,
         )
     }
@@ -230,7 +314,13 @@ impl RemoteEndpoint {
 }
 
 impl ImageOcr for RemoteEndpoint {
-    fn ocr_image(&self, prompt: &str, data_uri: &str, max_tokens: u32) -> Res<String> {
+    fn ocr_image(
+        &self,
+        prompt: &str,
+        data_uri: &str,
+        max_tokens: u32,
+        repeat_penalty: Option<f32>,
+    ) -> Res<String> {
         ocr_via(
             self.base_url.trim_end_matches('/'),
             self.api_key.as_deref(),
@@ -238,6 +328,7 @@ impl ImageOcr for RemoteEndpoint {
             prompt,
             data_uri,
             max_tokens,
+            repeat_penalty,
         )
     }
 
@@ -246,6 +337,7 @@ impl ImageOcr for RemoteEndpoint {
         prompt: &str,
         data_uri: &str,
         max_tokens: u32,
+        repeat_penalty: Option<f32>,
         on_token: &mut dyn FnMut(&str),
     ) -> Res<String> {
         ocr_via_stream(
@@ -255,6 +347,7 @@ impl ImageOcr for RemoteEndpoint {
             prompt,
             data_uri,
             max_tokens,
+            repeat_penalty,
             on_token,
         )
     }
@@ -270,6 +363,7 @@ fn ocr_via(
     prompt: &str,
     data_uri: &str,
     max_tokens: u32,
+    repeat_penalty: Option<f32>,
 ) -> Res<String> {
     let url = format!("{base_url}/v1/chat/completions");
     let mut body = serde_json::json!({
@@ -288,6 +382,9 @@ fn ocr_via(
     if let Some(m) = model {
         body["model"] = serde_json::Value::String(m.to_string());
     }
+    // Non-OpenAI extension honored by llama.cpp's server; omitted when None so the
+    // request body is unchanged unless the caller opts in.
+    apply_repeat_penalty(&mut body, repeat_penalty);
     let mut req = ureq::post(&url).timeout(Duration::from_secs(600));
     if let Some(key) = api_key {
         req = req.set("Authorization", &format!("Bearer {key}"));
@@ -309,6 +406,7 @@ fn ocr_via_stream(
     prompt: &str,
     data_uri: &str,
     max_tokens: u32,
+    repeat_penalty: Option<f32>,
     on_token: &mut dyn FnMut(&str),
 ) -> Res<String> {
     let url = format!("{base_url}/v1/chat/completions");
@@ -327,6 +425,7 @@ fn ocr_via_stream(
     if let Some(m) = model {
         body["model"] = serde_json::Value::String(m.to_string());
     }
+    apply_repeat_penalty(&mut body, repeat_penalty);
     let mut req = ureq::post(&url).timeout(Duration::from_secs(600));
     if let Some(key) = api_key {
         req = req.set("Authorization", &format!("Bearer {key}"));
@@ -412,8 +511,42 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
-    use super::{ocr_via_stream, parse_completion, ImageOcr, RemoteEndpoint};
+    use super::{ocr_via_stream, parse_completion, server_args, ImageOcr, RemoteEndpoint};
     use serde_json::json;
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    /// The optional DeepSeek-OCR flags must reach the spawn args only when set,
+    /// and the no-flags baseline must stay byte-for-byte what it was. Mirrors the
+    /// EH-0002 "prove the flag reaches the subprocess" pattern, no network/spawn.
+    #[test]
+    fn server_args_adds_optional_flags_only_when_set() {
+        let model = Path::new("/m/model.gguf");
+        let mmproj = Path::new("/m/mmproj.gguf");
+
+        // Test paths are ASCII, so to_string_lossy round-trips losslessly here;
+        // the OsString return type matters only for non-UTF8 paths in the wild.
+        let stringify = |v: Vec<OsString>| -> Vec<String> {
+            v.iter().map(|s| s.to_string_lossy().into_owned()).collect()
+        };
+
+        let base = stringify(server_args(model, mmproj, 8080, None, None));
+        assert_eq!(
+            base,
+            vec![
+                "-m", "/m/model.gguf",
+                "--mmproj", "/m/mmproj.gguf",
+                "--host", "127.0.0.1",
+                "--port", "8080",
+            ]
+        );
+        assert!(!base.iter().any(|a| a == "--image-max-tokens" || a == "--chat-template"));
+
+        let full = stringify(server_args(model, mmproj, 8080, Some(1280), Some("deepseek-ocr")));
+        // Each flag appears adjacent to its value.
+        assert!(full.windows(2).any(|w| w == ["--image-max-tokens", "1280"]));
+        assert!(full.windows(2).any(|w| w == ["--chat-template", "deepseek-ocr"]));
+    }
 
     #[test]
     fn parses_content() {
@@ -488,7 +621,7 @@ mod tests {
             model: None,
         };
         let out = ep
-            .ocr_image("<|grounding|>x", "data:image/png;base64,AAAA", 64)
+            .ocr_image("<|grounding|>x", "data:image/png;base64,AAAA", 64, None)
             .expect("remote ocr");
         assert_eq!(out, "# remote ok");
 
@@ -547,7 +680,7 @@ mod tests {
                 api_key: None,
                 model,
             };
-            ep.ocr_image("p", "data:image/png;base64,AAAA", 64).expect("ocr");
+            ep.ocr_image("p", "data:image/png;base64,AAAA", 64, None).expect("ocr");
             let body = rx.recv().expect("stub recorded body");
             serde_json::from_slice(&body).expect("body is json")
         }
@@ -633,6 +766,7 @@ mod tests {
             "test prompt",
             "data:image/png;base64,AAAA",
             64,
+            None,
             &mut |chunk: &str| tokens.push(chunk.to_string()),
         );
 
@@ -708,6 +842,7 @@ mod tests {
             "test prompt",
             "data:image/png;base64,AAAA",
             64,
+            None,
             &mut |chunk: &str| tokens.push(chunk.to_string()),
         );
 

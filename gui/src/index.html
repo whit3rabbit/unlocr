@@ -36,7 +36,25 @@
         <div class="titlebar__mode" id="modeBadge">
           <span class="titlebar__mode-dot"></span>No model
         </div>
+        <!-- notification bell: toggles #notifyPanel; #notifyBadge shows unread count.
+             Wired in main.js initNotifications(). -->
+        <button class="titlebar__bell" id="notifyBell" type="button" title="Notifications" aria-haspopup="true" aria-expanded="false">
+          <svg width="17" height="17" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9.5 3a4 4 0 0 0-4 4v3l-1.5 2.5h11L13.5 10V7a4 4 0 0 0-4-4z"></path><path d="M8 15.5a1.5 1.5 0 0 0 3 0"></path></svg>
+          <span class="titlebar__bell-badge" id="notifyBadge" hidden>0</span>
+        </button>
       </header>
+
+      <!-- notification panel: anchored under the bell; populated from
+           list_notifications. Hidden until the bell is clicked. -->
+      <div class="notify-panel" id="notifyPanel" hidden>
+        <div class="notify-panel__head">
+          <span class="notify-panel__title">Notifications</span>
+          <button class="notify-panel__clear" id="notifyClearAll" type="button">Clear all</button>
+        </div>
+        <div class="notify-panel__list" id="notifyList">
+          <p class="notify-panel__empty">No notifications.</p>
+        </div>
+      </div>
 
       <!-- body: activity rail + screen area -->
       <div class="app__body">
@@ -130,7 +148,9 @@
                 <div class="preview__foot">
                   <div class="zoom">128%</div>
                   <div class="preview__spacer"></div>
+                  <button class="preview__nav" id="prevPage" type="button" aria-label="Previous page" title="Previous page">◀</button>
                   <span class="preview__pagecount">page 0 / 0</span>
+                  <button class="preview__nav" id="nextPage" type="button" aria-label="Next page" title="Next page">▶</button>
                 </div>
               </div>
 
@@ -141,22 +161,28 @@
                   <div class="transcript__spacer"></div>
                   <span class="status-pill status-pill--idle"><span class="status-dot"></span>Idle</span>
                 </div>
+                <!-- Scroll container for the config sections so a tall config
+                     (Custom endpoint + Advanced expanded) never pushes the pinned
+                     Effective/Run footer off-screen. See styles .transcript__config. -->
+                <div class="transcript__config">
                 <div class="transcript__engine">
                   <span class="panel__label">OCR engine</span>
-                  <div class="seg" id="engineTabs">
-                    <button class="seg__btn is-active" type="button" data-engine="local">Unlimited-OCR</button>
-                    <button class="seg__btn" type="button" data-engine="remote">Remote</button>
-                  </div>
-                  <!-- One-click preset: flip to Remote + fill LM Studio's local MLX
-                       server URL. MLX on Apple Silicon = LM Studio serving an MLX
-                       DeepSeek-OCR build over its OpenAI-compatible local API. -->
-                  <button class="model-btn model-btn--ghost" type="button" id="presetLmStudio"
-                    title="Use LM Studio's MLX server on localhost:1234">LM Studio (MLX)</button>
+                  <!-- Backend preset. llamacpp = managed-local mode (unlocr spawns
+                       llama-server, driven by the Quant control); vllm/sglang/custom
+                       are remote OpenAI-compatible endpoints. Non-custom presets hide
+                       the URL/key/model fields and (vllm/sglang) prefill #remoteUrl
+                       with the backend's default port. Wired in main.js applyPreset(). -->
+                  <select class="opts__select" id="enginePreset">
+                    <option value="llamacpp" selected>llama.cpp (managed local)</option>
+                    <option value="vllm">vLLM (http://127.0.0.1:8000)</option>
+                    <option value="sglang">SGLang (http://127.0.0.1:30000)</option>
+                    <option value="custom">Custom endpoint</option>
+                  </select>
                 </div>
                 <!-- Model load bar (litellm-style). A model must be loaded before
                      Run OCR is enabled; loading holds it warm in RAM, Unload frees
-                     it. Remote fields appear only for the Remote engine tab. The
-                     local quant is read from the Quant control in Engine options. -->
+                     it. Remote fields appear only for the Custom preset. The local
+                     quant is read from the Quant control in Engine options. -->
                 <div class="model-bar" id="modelBar">
                   <div class="model-bar__remote" id="remoteFields" hidden>
                     <input class="path-input" id="remoteUrl" type="text" spellcheck="false"
@@ -190,25 +216,89 @@
                         <option value="Q4_K_M">less (Q4_K_M)</option>
                         <option value="BF16">best (BF16)</option>
                       </select>
+                      <!-- Q4_K_M is known to loop on dense pages; steer users to a
+                           bigger quant or the repeat-penalty knob below. -->
+                      <span class="opts__hint" id="quantHint" hidden>
+                        Q4_K_M can loop on dense pages. Use Q8_0/BF16 or set a repeat penalty.
+                      </span>
                     </label>
                     <label class="opts__field">
                       <span class="opts__label">DPI</span>
                       <input class="opts__num" id="optDpi" type="number" min="72" max="600" step="1" value="144" />
                     </label>
+                    <!-- Page selection: All (default) OCRs every page; Range/Single
+                         map to pdftoppm -f/-l so a subset rasterizes only those
+                         pages. wirePageSelection() in main.js shows the inputs. -->
+                    <label class="opts__field">
+                      <span class="opts__label">Pages</span>
+                      <select class="opts__select" id="optPagesMode">
+                        <option value="all" selected>All</option>
+                        <option value="range">Range</option>
+                        <option value="single">Single</option>
+                      </select>
+                    </label>
+                    <label class="opts__field" id="optPagesInputs" hidden>
+                      <span class="opts__label" id="optPagesInputsLabel">Page</span>
+                      <span class="opts__pages">
+                        <input class="opts__num" id="optPageFrom" type="number" min="1" step="1" placeholder="from" />
+                        <input class="opts__num" id="optPageTo" type="number" min="1" step="1" placeholder="to" hidden />
+                      </span>
+                    </label>
+                  </div>
+                  <!-- Advanced: rare + startup-only knobs, collapsed by default.
+                       IDs unchanged so readRunOptions/load_model read them whether
+                       open or closed (details keeps children mounted). -->
+                  <details class="opts__advanced">
+                    <summary>Advanced</summary>
+                    <div class="opts__grid">
                     <label class="opts__field">
                       <span class="opts__label">Max tokens</span>
                       <input class="opts__num" id="optMaxTokens" type="number" min="256" max="32768" step="1" value="4096" />
+                    </label>
+                    <!-- DeepSeek-OCR detail knob (--image-max-tokens). Startup-only:
+                         applies on the next model Load, not mid-run. Blank = model
+                         default (the current behavior). -->
+                    <label class="opts__field">
+                      <span class="opts__label">Image max tokens</span>
+                      <input class="opts__num" id="optImageMaxTokens" type="number" min="1" max="16384" step="1" placeholder="model default" />
+                    </label>
+                    <!-- llama-server --chat-template; startup-only (applies on Load). -->
+                    <label class="opts__field">
+                      <span class="opts__label">Chat template</span>
+                      <select class="opts__select" id="optChatTemplate">
+                        <option value="" selected>model default</option>
+                        <option value="deepseek-ocr">deepseek-ocr</option>
+                      </select>
+                    </label>
+                    <!-- Per-run sampling penalty; blank = server default. >1 (e.g.
+                         1.1) helps break the Q4_K_M infinite-loop failure mode. -->
+                    <label class="opts__field">
+                      <span class="opts__label">Repeat penalty</span>
+                      <input class="opts__num" id="optRepeatPenalty" type="number" min="1" max="2" step="0.05" placeholder="server default" />
                     </label>
                     <label class="opts__toggle">
                       <input class="opts__check" id="optKeepImages" type="checkbox" />
                       <span class="opts__toggle-label">Keep page images</span>
                     </label>
-                  </div>
+                    </div>
+                  </details>
                   <!-- EH-0005 bite 2: editable prompt. Seeded with the exact
                        unlocr::OcrOptions::default().prompt string so a user who
                        leaves it alone gets CLI-parity behavior. main.js forwards
                        the (possibly edited) value into the run_ocr payload.
                        spellcheck off because the grounding tag is code, not prose. -->
+                  <!-- Task preset: picks one of DeepSeek-OCR's task prompts. On
+                       change it fills the Prompt box below; editing that box gives
+                       full control (the prompt is what is actually sent). -->
+                  <label class="opts__field opts__field--full">
+                    <span class="opts__label">Task</span>
+                    <select class="opts__select" id="optTask">
+                      <option value="markdown" selected>Markdown (grounded)</option>
+                      <option value="free">Free OCR (plain text)</option>
+                      <option value="figure">Parse figure</option>
+                      <option value="custom">Custom (edit prompt below)</option>
+                    </select>
+                  </label>
                   <label class="opts__field opts__field--full">
                     <span class="opts__label">Prompt</span>
                     <textarea
@@ -218,6 +308,7 @@
                       spellcheck="false"
                     >&lt;|grounding|&gt;Convert the document to markdown.</textarea>
                   </label>
+                </div>
                 </div>
                 <div class="transcript__body" id="transcriptBody">
                   <p class="placeholder" id="transcriptPlaceholder">Run OCR to stream the recognized markdown here.</p>
@@ -438,6 +529,25 @@
           </section>
 
         </main>
+      </div>
+    </div>
+
+    <!-- transient toast stack (download progress, run done/failed). Bottom-right.
+         Populated by main.js toast helpers; not persisted (that's the bell panel). -->
+    <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+
+    <!-- Run popup: dismissible progress panel shown while OCR runs. Progress bar +
+         live token log + Stop. Close (×) minimizes to a clickable toast (main.js). -->
+    <div class="run-popup" id="runPopup" hidden>
+      <div class="run-popup__head">
+        <span class="run-popup__title">Running OCR</span>
+        <button class="run-popup__close" id="runPopupClose" type="button" title="Minimize" aria-label="Minimize">×</button>
+      </div>
+      <div class="run-progress__bar"><div class="run-progress__fill" id="runPopupFill"></div></div>
+      <span class="run-progress__status" id="runPopupStatus">Idle</span>
+      <pre class="run-popup__log" id="runPopupLog" aria-live="polite"></pre>
+      <div class="run-popup__actions">
+        <button class="run-popup__stop" id="stopBtn" type="button" disabled>Stop</button>
       </div>
     </div>
   </body>

@@ -39,6 +39,22 @@ pub struct OcrOptions {
     pub model_dir: Option<PathBuf>,
     /// Keep the intermediate page PNGs instead of deleting them.
     pub keep_images: bool,
+    /// Cap on vision tokens per image (`--image-max-tokens`). This is DeepSeek-OCR's
+    /// base/large detail knob: more tokens = finer recognition, slower + more VRAM.
+    /// None lets the model use its default. Local-server only (set at spawn); inert
+    /// for a remote endpoint, whose server already fixed this at its own launch.
+    pub image_max_tokens: Option<u32>,
+    /// Named chat template forwarded to `--chat-template` (e.g. "deepseek-ocr").
+    /// None = let llama-server use the template baked into the model. Local-only.
+    pub chat_template: Option<String>,
+    /// Sampling repetition penalty sent in the request body. None omits it (server
+    /// default). >1.0 (e.g. 1.1) discourages the infinite-loop output some quants
+    /// (notably Q4_K_M) fall into on dense pages.
+    pub repeat_penalty: Option<f32>,
+    /// Page span to OCR, 1-based inclusive `(first, last)`. None = all pages. Maps
+    /// to pdftoppm `-f`/`-l`, so a subset rasterizes only those pages (not the whole
+    /// PDF then filtered). Caller validates `first >= 1` and `last >= first`.
+    pub pages: Option<(u32, u32)>,
 }
 
 impl Default for OcrOptions {
@@ -53,6 +69,10 @@ impl Default for OcrOptions {
             port: 0,
             model_dir: None,
             keep_images: false,
+            image_max_tokens: None,
+            chat_template: None,
+            repeat_penalty: None,
+            pages: None,
         }
     }
 }
@@ -61,8 +81,10 @@ impl Default for OcrOptions {
 /// subscribe to download + per-page stages. Kept allocation-free and serializable.
 #[derive(Clone, Debug)]
 pub enum Progress {
-    /// Model/projector download underway. `pct` is 0..=100.
-    Download { name: String, pct: u8 },
+    /// Model/projector download underway. `pct` is 0..=100. `done`/`total` are the
+    /// byte counts (total = 0 when the server omits Content-Length) so a UI can show
+    /// size and compute transfer speed from successive events.
+    Download { name: String, pct: u8, done: u64, total: u64 },
     /// Server became healthy on this port.
     ServerReady { port: u16 },
     /// One page rasterized+OCR'd. `page` is 1-based, `total` is the page count.
@@ -125,7 +147,14 @@ where
     // Pass the raw port (0 = auto): Server::start owns free-port resolution AND the
     // bind-race retry loop. Pre-resolving here would hand start a concrete port and
     // silently disable that retry. Read the real port back from the started server.
-    let srv = server::Server::start(&tools.llama_server, &files.model, &files.mmproj, opts.port)?;
+    let srv = server::Server::start(
+        &tools.llama_server,
+        &files.model,
+        &files.mmproj,
+        opts.port,
+        opts.image_max_tokens,
+        opts.chat_template.as_deref(),
+    )?;
     on_progress(Progress::ServerReady { port: srv.port });
 
     let (md, kept) = ocr_pages(&srv, &tools.pdftoppm, input, opts, on_progress)?;
@@ -206,12 +235,17 @@ where
     P: FnMut(Progress),
 {
     let tmp = tempfile::tempdir()?;
-    let pages = pdf::rasterize(pdftoppm, input, tmp.path(), opts.dpi)?;
+    let pages = pdf::rasterize_range(pdftoppm, input, tmp.path(), opts.dpi, opts.pages)?;
     let n = pages.len();
+
+    // With a page range, the first rasterized page is the range's start, not page 1.
+    // Derive the real page number so the `<!-- page N -->` delimiter and Progress
+    // events reflect the actual page, not the loop index.
+    let base = opts.pages.map(|(f, _)| f as usize).unwrap_or(1);
 
     let mut md = String::new();
     for (i, page) in pages.iter().enumerate() {
-        let page_num = i + 1;
+        let page_num = base + i;
         on_progress(Progress::Page { page: page_num, total: n });
 
         let bytes = std::fs::read(page)?;
@@ -224,6 +258,7 @@ where
             &opts.prompt,
             &data_uri,
             opts.max_tokens,
+            opts.repeat_penalty,
             &mut |chunk: &str| {
                 on_progress(Progress::PartialText {
                     page: page_num,
@@ -231,7 +266,8 @@ where
                 });
             },
         )?;
-        push_page(&mut md, i, text.trim());
+        // push_page writes page idx+1, so pass the real page number minus one.
+        push_page(&mut md, page_num - 1, text.trim());
     }
 
     let kept = if opts.keep_images {
@@ -269,6 +305,7 @@ mod tests {
         assert_eq!(o.port, 0);
         assert!(o.model_dir.is_none());
         assert!(!o.keep_images);
+        assert!(o.pages.is_none());
     }
 
     #[test]
@@ -344,95 +381,14 @@ mod tests {
             return;
         }
 
-        // --- 1. Stub HTTP server -----------------------------------------------
-        // Bind first so we know the port before spawning the Server.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("bind stub server");
-        let stub_port = listener.local_addr().expect("local_addr").port();
-
-        // Build a valid OpenAI chat-completion JSON response body once.
-        let resp_body = serde_json::json!({
-            "choices": [{ "message": { "content": "# page text" } }]
-        })
-        .to_string();
-        let http_response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-            resp_body.len(),
-            resp_body,
-        );
-
-        // Serve in a background thread; accept until the listener is closed.
-        // The stub fully reads the request (headers + body by Content-Length) before
-        // writing the response so ureq does not see a partial read while still writing.
-        let http_resp_clone = http_response.clone();
-        std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader, Write};
-            for stream in listener.incoming() {
-                let Ok(s) = stream else { break };
-                let mut reader = BufReader::new(s.try_clone().expect("clone socket"));
-                let mut writer = s;
-
-                // Read request headers line by line until the blank line.
-                let mut content_length: usize = 0;
-                loop {
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                        break; // EOF
-                    }
-                    let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
-                    if trimmed.is_empty() {
-                        break; // blank line = end of headers
-                    }
-                    // Parse Content-Length so we can drain the body.
-                    if trimmed.to_ascii_lowercase().starts_with("content-length:") {
-                        if let Some(v) = trimmed.splitn(2, ':').nth(1) {
-                            content_length = v.trim().parse().unwrap_or(0);
-                        }
-                    }
-                }
-                // Drain the request body.
-                let mut body = vec![0u8; content_length];
-                let _ = std::io::Read::read_exact(&mut reader, &mut body);
-
-                // Now send the response.
-                let _ = Write::write_all(&mut writer, http_resp_clone.as_bytes());
-            }
-        });
-
-        // --- 2. Server::for_test(port) ----------------------------------------
+        // --- 1. Stub HTTP server + 2. Server::for_test ------------------------
+        let stub_port = spawn_stub_ocr_server();
         let srv = server::Server::for_test(stub_port).expect("for_test");
 
         // --- 3. Fixture PDF + pdftoppm ----------------------------------------
-        // Reuse the same two-page generator from pdf.rs tests (inlined here to
-        // stay within the lib module without sharing a private test helper).
-        let p1 = "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 4 0 R/Resources<</Font<</F1 7 0 R>>>>>>";
-        let p2 = "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 6 0 R/Resources<</Font<</F1 7 0 R>>>>>>";
-        let objs: [&str; 7] = [
-            "<</Type/Catalog/Pages 2 0 R>>",
-            "<</Type/Pages/Kids[3 0 R 5 0 R]/Count 2>>",
-            p1,
-            "<</Length 38>>stream\nBT /F1 12 Tf 10 80 Td (Page one) Tj ET\nendstream",
-            p2,
-            "<</Length 38>>stream\nBT /F1 12 Tf 10 80 Td (Page two) Tj ET\nendstream",
-            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
-        ];
-        let mut pdf_buf = String::from("%PDF-1.4\n");
-        let mut offsets: Vec<usize> = Vec::with_capacity(objs.len());
-        for (i, obj) in objs.iter().enumerate() {
-            offsets.push(pdf_buf.len());
-            pdf_buf.push_str(&format!("{} 0 obj{}\nendobj\n", i + 1, obj));
-        }
-        let xref_start = pdf_buf.len();
-        pdf_buf.push_str("xref\n0 8\n0000000000 65535 f \n");
-        for off in &offsets {
-            pdf_buf.push_str(&format!("{:010} 00000 n \n", off));
-        }
-        pdf_buf.push_str(&format!(
-            "trailer<</Size 8/Root 1 0 R>>\nstartxref\n{xref_start}\n%%EOF\n",
-        ));
         let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
         let pdf_path = pdf_dir.path().join("fixture.pdf");
-        std::fs::write(&pdf_path, pdf_buf.as_bytes()).expect("write fixture pdf");
+        std::fs::write(&pdf_path, two_page_pdf_bytes()).expect("write fixture pdf");
 
         // --- 4. Run ocr_pages + capture Progress events -----------------------
         let pdftoppm_bin = std::path::Path::new("pdftoppm");
@@ -517,5 +473,130 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["page-1.png", "page-2.png", "page-10.png"]);
+    }
+
+    /// A page range OCRs only the selected pages AND labels them with the real page
+    /// number, not the loop index. Selecting page 2 of a 2-page PDF must produce a
+    /// single `<!-- page 2 -->` block (regression guard for the base+i numbering).
+    #[test]
+    fn ocr_pages_honors_page_range() {
+        if std::process::Command::new("pdftoppm")
+            .arg("-v")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping ocr_pages_honors_page_range: pdftoppm not on PATH");
+            return;
+        }
+
+        let stub_port = spawn_stub_ocr_server();
+        let srv = server::Server::for_test(stub_port).expect("for_test");
+
+        let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
+        let pdf_path = pdf_dir.path().join("fixture.pdf");
+        std::fs::write(&pdf_path, two_page_pdf_bytes()).expect("write fixture pdf");
+
+        let mut opts = OcrOptions::default();
+        opts.pages = Some((2, 2));
+        let mut events: Vec<Progress> = Vec::new();
+        let (md, _kept) = ocr_pages(
+            &srv,
+            std::path::Path::new("pdftoppm"),
+            &pdf_path,
+            &opts,
+            &mut |p: Progress| events.push(p),
+        )
+        .expect("ocr_pages with range");
+
+        // Exactly one page OCR'd, and it is reported/labeled as page 2.
+        let page_events: Vec<(usize, usize)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Progress::Page { page, total } => Some((*page, *total)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(page_events, vec![(2, 1)], "should OCR only page 2 of 1 selected");
+        assert!(md.contains("<!-- page 2 -->"), "markdown must carry the real page number: {md}");
+        assert!(!md.contains("<!-- page 1 -->"), "page 1 must not be OCR'd: {md}");
+    }
+
+    /// Spawn a throwaway HTTP server that returns a valid OpenAI chat-completion for
+    /// any POST and return its port. Used by the ocr_pages tests so they exercise the
+    /// real rasterize+request loop without a live llama-server. Drains the request
+    /// body before replying so ureq never sees a partial read.
+    fn spawn_stub_ocr_server() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub server");
+        let port = listener.local_addr().expect("local_addr").port();
+        let resp_body = serde_json::json!({
+            "choices": [{ "message": { "content": "# page text" } }]
+        })
+        .to_string();
+        let http_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body,
+        );
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            for stream in listener.incoming() {
+                let Ok(s) = stream else { break };
+                let mut reader = BufReader::new(s.try_clone().expect("clone socket"));
+                let mut writer = s;
+                let mut content_length: usize = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
+                    if trimmed.is_empty() {
+                        break;
+                    }
+                    if trimmed.to_ascii_lowercase().starts_with("content-length:") {
+                        if let Some(v) = trimmed.splitn(2, ':').nth(1) {
+                            content_length = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                let _ = std::io::Read::read_exact(&mut reader, &mut body);
+                let _ = Write::write_all(&mut writer, http_response.as_bytes());
+            }
+        });
+        port
+    }
+
+    /// Minimal valid 2-page PDF (Catalog -> Pages with two text pages + computed
+    /// xref). Inlined so the tests add no binary fixture to the repo.
+    fn two_page_pdf_bytes() -> Vec<u8> {
+        let p1 = "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 4 0 R/Resources<</Font<</F1 7 0 R>>>>>>";
+        let p2 = "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 6 0 R/Resources<</Font<</F1 7 0 R>>>>>>";
+        let objs: [&str; 7] = [
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R 5 0 R]/Count 2>>",
+            p1,
+            "<</Length 38>>stream\nBT /F1 12 Tf 10 80 Td (Page one) Tj ET\nendstream",
+            p2,
+            "<</Length 38>>stream\nBT /F1 12 Tf 10 80 Td (Page two) Tj ET\nendstream",
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+        ];
+        let mut buf = String::from("%PDF-1.4\n");
+        let mut offsets: Vec<usize> = Vec::with_capacity(objs.len());
+        for (i, obj) in objs.iter().enumerate() {
+            offsets.push(buf.len());
+            buf.push_str(&format!("{} 0 obj{}\nendobj\n", i + 1, obj));
+        }
+        let xref_start = buf.len();
+        buf.push_str("xref\n0 8\n0000000000 65535 f \n");
+        for off in &offsets {
+            buf.push_str(&format!("{:010} 00000 n \n", off));
+        }
+        buf.push_str(&format!(
+            "trailer<</Size 8/Root 1 0 R>>\nstartxref\n{xref_start}\n%%EOF\n",
+        ));
+        buf.into_bytes()
     }
 }
