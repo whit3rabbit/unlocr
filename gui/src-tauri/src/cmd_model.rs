@@ -196,8 +196,22 @@ pub(crate) async fn load_model(
     llama_bin: Option<String>,
     image_max_tokens: Option<u32>,
     chat_template: Option<String>,
+    model_file: Option<String>,
+    mmproj_file: Option<String>,
 ) -> Result<ModelStatus, String> {
     let llama_override = llama_bin.filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+    // Custom-GGUF mode (local only): when set, the model file is used directly,
+    // skipping the HF download and the quant naming convention. mmproj_file is an
+    // optional projector override; omit it to use the stock cached/downloaded one.
+    // Empty string -> None (same trim pattern as the other path fields).
+    let model_override = model_file.filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+    let mmproj_override = mmproj_file.filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+    // Overrides apply to the local spawn only; the remote arm ignores them. Skip the
+    // pairing guard in remote mode so a stale projector pick (picker hidden but its
+    // dataset persists after switching local->remote) can't spuriously fail a remote load.
+    if mode != "remote" && mmproj_override.is_some() && model_override.is_none() {
+        return Err("mmproj_file requires model_file".to_string());
+    }
     // Startup-only knobs (local mode): they parameterize the llama-server spawn,
     // so they belong here at load time, not per-run. Empty string = unset.
     let chat_template = chat_template.filter(|s| !s.trim().is_empty());
@@ -266,8 +280,17 @@ pub(crate) async fn load_model(
                         );
                     }
                 };
-                let files = unlocr::model::ensure_with_progress(&cache, &quant, &mut on_progress)
-                    .map_err(|e| e.to_string())?;
+                // Custom-GGUF mode routes through ensure_with_overrides (override
+                // paths used verbatim, existence-checked in model.rs); else the
+                // stock cache + download path. Both yield ModelFiles for Server::start.
+                let files = unlocr::model::ensure_with_overrides(
+                    &cache,
+                    &quant,
+                    model_override.as_deref(),
+                    mmproj_override.as_deref(),
+                    &mut on_progress,
+                )
+                .map_err(|e| e.to_string())?;
                 let port = free_port().map_err(|e| e.to_string())?;
                 let srv = Server::start(
                     &tools.llama_server,
@@ -282,12 +305,15 @@ pub(crate) async fn load_model(
                 // Capture the pid before `srv` moves into Backend so `stop_ocr`
                 // can kill it without the model lock (see AppState::server_pid).
                 pid = Some(srv.pid());
-                (
-                    Backend::Local(srv),
-                    format!("Unlimited-OCR {quant}"),
-                    "local".to_string(),
-                    tools.pdftoppm,
-                )
+                // Label: the model file stem for a custom GGUF, else the quant tag.
+                let label = match model_override.as_deref() {
+                    Some(p) => p
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "custom model".to_string()),
+                    None => format!("Unlimited-OCR {quant}"),
+                };
+                (Backend::Local(srv), label, "local".to_string(), tools.pdftoppm)
             }
         };
 

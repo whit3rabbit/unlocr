@@ -14,7 +14,8 @@
 //   - cmd_store.rs  job store, settings, and notification command wrappers.
 // This file keeps only the module wiring and the `run()` builder.
 
-use tauri::{Manager, RunEvent};
+use tauri::menu::{MenuBuilder, SubmenuBuilder};
+use tauri::{Emitter, Manager, RunEvent};
 
 // Persisted job store (EH-0006 bite 1). Purely additive: a new module exposing
 // `list_jobs` / `record_job` commands. No existing command changes.
@@ -64,6 +65,40 @@ pub fn run() {
                     eprintln!("[setup] asset scope allow_directory failed: {e}");
                 }
             }
+
+            // Native File menu. The action items just emit one event; the
+            // frontend reuses the existing toolbar buttons (no logic forked
+            // here). Exit uses the predefined quit item, which fires
+            // RunEvent::Exit below and kills llama-server.
+            let file = SubmenuBuilder::new(app, "File")
+                .text("menu_load_pdf", "Load PDF...")
+                .text("menu_load_model", "Load Model")
+                .text("menu_unload_model", "Unload Model")
+                .separator()
+                .quit()
+                .build()?;
+            // Edit menu kept so cut/copy/paste keep working in webview text
+            // fields on macOS (a custom menu replaces Tauri's default).
+            let edit = SubmenuBuilder::new(app, "Edit")
+                .undo()
+                .redo()
+                .separator()
+                .cut()
+                .copy()
+                .paste()
+                .select_all()
+                .build()?;
+            let menu = MenuBuilder::new(app).items(&[&file, &edit]).build()?;
+            app.set_menu(menu)?;
+
+            app.on_menu_event(|app, event| {
+                if let id @ ("menu_load_pdf" | "menu_load_model" | "menu_unload_model") =
+                    event.id().0.as_str()
+                {
+                    let _ = app.emit("menu://action", id);
+                }
+            });
+
             Ok(())
         })
         // Managed state holding the warm model + resolved pdftoppm across commands.

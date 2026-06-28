@@ -26,8 +26,13 @@ Thin wrapper. Full usage/benchmarks in README.md.
 
 ## Gotchas
 - Public lib API (consumed by gui crate): `run_ocr_job` + `OcrOptions` + `Progress`
-  + `render_pages` (cached PDF->PNG for previews) (clap-free). Keep these stable;
-  the GUI links via `path = "../.."`.
+  + `render_pages` (cached PDF->PNG for previews) + `resolve_output_path` (clap-free).
+  Keep these stable; the GUI links via `path = "../.."`.
+- Output path is resolved by the shared `resolve_output_path(out_dir, out_file, stem)`
+  called from BOTH CLI `ocr::run_pdf` and GUI `run_ocr`. `-o`/`out_file` is a single
+  output file, single-input only (both paths guard `inputs.len() > 1`). It appends `.md`
+  only when no extension; a custom non-`.md` name writes fine but the GUI review pane
+  (`read_text_file` is `.md`-only) cannot render it.
 - Bare `cargo build`/`cargo test` build the root CLI ONLY (gui is a workspace member
   with no default-members). After changing the public lib API (`OcrOptions`,
   `Server::start`, `run_ocr_job`, ...) run `cargo build --manifest-path
@@ -51,8 +56,14 @@ Thin wrapper. Full usage/benchmarks in README.md.
   not bounds-check) AND the GUI `run_ocr`/`load_model` commands (a direct `invoke()`
   bypasses the HTML `min=` form clamp). Pattern: reject `0`/non-finite/`<=0` before
   spawn (dpi, image-max-tokens, repeat-penalty all do this).
+  When both front ends route through one lib fn, put the guard there as a single
+  shared sink instead (e.g. `model::require_file` validates `--model`/`--mmproj` and
+  the GUI `model_file`/`mmproj_file` in one place).
 - A per-request body knob must be added to BOTH `ocr_via` and `ocr_via_stream`
   (stream + non-stream paths). Route it through a shared helper (`apply_repeat_penalty`).
+- rust-analyzer inline diagnostics can lag the source (saw repeated false
+  "no such field" on `Progress::Download {done,total}` while cargo was green).
+  Trust `cargo build`/`cargo test` over the editor diagnostics; re-check, don't chase.
 - Ctrl-C does not clean up; may orphan llama-server.
 - Release profile tuned for size (opt-level=z, lto, panic=abort).
 - BSD sed (macOS) has no `\b`; use plain patterns or `[[:<:]]`/`[[:>:]]`.

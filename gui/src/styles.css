@@ -18,6 +18,16 @@
   --violet: #9b8cf0;
   --track: #23262d;
 
+  /* performative-ui glow/gradient pack (purple/pink/cyan). Brand accent only;
+     --amber/--green/--red/--violet stay reserved for status meaning. */
+  --accent: #a855f7;
+  --accent-bg: rgba(168, 85, 247, 0.14);
+  --grad: linear-gradient(120deg, #7c3aed, #ec4899, #06b6d4);
+  --glow: 0 0 22px rgba(124, 58, 237, 0.32);
+  --glow-strong: 0 0 36px rgba(124, 58, 237, 0.42), 0 0 72px rgba(236, 72, 153, 0.18);
+  --glass: rgba(20, 22, 25, 0.62);
+  --glass-bd: rgba(255, 255, 255, 0.07);
+
   font-family: "IBM Plex Sans", Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
   font-size: 14px;
   line-height: 1.45;
@@ -87,11 +97,12 @@ button {
   width: 18px;
   height: 18px;
   border-radius: 5px;
-  background: var(--amber);
+  background: var(--grad);
+  box-shadow: var(--glow);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #1a1206;
+  color: #fff;
   font-size: 11px;
   font-weight: 700;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
@@ -99,9 +110,13 @@ button {
 
 .brand__name {
   font-weight: 600;
-  color: var(--hi);
   font-size: 13px;
   letter-spacing: 0.2px;
+  background: var(--grad);
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 .titlebar__divider {
@@ -202,8 +217,8 @@ button {
 }
 
 .rail__btn.is-active {
-  color: var(--amber);
-  background: var(--amberbg);
+  color: var(--accent);
+  background: var(--accent-bg);
 }
 
 .rail__spacer {
@@ -286,16 +301,16 @@ button {
   justify-content: center;
   height: 38px;
   border-radius: 9px;
-  border: 1px dashed rgba(232, 163, 61, 0.45);
-  background: var(--amberbg);
-  color: var(--amber);
+  border: 1px dashed rgba(168, 85, 247, 0.45);
+  background: var(--accent-bg);
+  color: var(--accent);
   font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
 }
 
 .import-btn:hover {
-  background: rgba(232, 163, 61, 0.18);
+  background: rgba(168, 85, 247, 0.20);
 }
 
 .file-list {
@@ -320,7 +335,7 @@ button {
 
 .pipeline__engine {
   font-size: 11px;
-  color: var(--amber);
+  color: var(--accent);
   font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
 
@@ -349,11 +364,13 @@ button {
   flex: none;
   border-radius: 50%;
   background: var(--dim);
+  color: var(--dim);
+  box-shadow: 0 0 7px currentColor;
 }
 
-.stage.is-ok .stage__dot { background: var(--green); }
-.stage.is-warn .stage__dot { background: var(--amber); }
-.stage.is-bad .stage__dot { background: var(--red); }
+.stage.is-ok .stage__dot { background: var(--green); color: var(--green); }
+.stage.is-warn .stage__dot { background: var(--amber); color: var(--amber); }
+.stage.is-bad .stage__dot { background: var(--red); color: var(--red); }
 
 .stage__name {
   flex: 1;
@@ -380,7 +397,7 @@ button {
   width: 16px;
   height: 16px;
   flex: none;
-  color: var(--amber);
+  color: var(--accent);
 }
 
 .file-row__body {
@@ -430,7 +447,10 @@ button {
 .preview__title {
   font-size: 13px;
   font-weight: 600;
-  color: var(--hi);
+  background: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 .preview__spacer {
@@ -456,6 +476,7 @@ button {
 }
 
 .preview__stage {
+  position: relative;
   flex: 1;
   overflow: auto;
   display: flex;
@@ -465,12 +486,36 @@ button {
   background: var(--bg);
 }
 
+/* Ambient aurora behind the preview. inset:0 (not negative) so the blurred
+   pseudo never adds scrollable area; the stage's overflow clips the blur bleed. */
+.preview__stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  filter: blur(55px) saturate(140%);
+  opacity: 0.18;
+  background:
+    radial-gradient(circle at 30% 30%, rgba(124, 58, 237, 0.5), transparent 60%),
+    radial-gradient(circle at 70% 70%, rgba(6, 182, 212, 0.4), transparent 60%);
+  animation: aurora-drift 18s ease-in-out infinite alternate;
+}
+
 /* Cached page PNG, loaded via the asset protocol. Fit the stage, keep aspect. */
 .preview__img {
+  position: relative;
+  z-index: 1;
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
+}
+
+/* Keep the placeholder text above the aurora too. */
+.preview__stage > .placeholder {
+  position: relative;
+  z-index: 1;
 }
 
 .preview__foot {
@@ -548,7 +593,10 @@ button {
 .transcript__title {
   font-size: 13px;
   font-weight: 600;
-  color: var(--hi);
+  background: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 .transcript__spacer {
@@ -577,6 +625,8 @@ button {
 
 .status-pill--running .status-dot {
   background: var(--amber);
+  color: var(--amber);
+  animation: pulse-dot 1.6s ease-in-out infinite;
 }
 
 .status-dot {
@@ -584,6 +634,8 @@ button {
   height: 7px;
   border-radius: 50%;
   background: var(--dim);
+  color: var(--dim);
+  box-shadow: 0 0 7px currentColor;
 }
 
 /* Scrolls the config sections (engine + model bar + options) as one block so a
@@ -602,6 +654,57 @@ button {
   display: flex;
   flex-direction: column;
   gap: 9px;
+}
+
+/* Preset select + Modify button on one row; the select takes the slack. */
+.transcript__engine-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.transcript__engine-row .opts__select {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Engine-connection modal (native <dialog>). Reuses model-bar/settings__note
+   styling for the relocated fields; only the shell + backdrop are new. */
+.engine-dialog {
+  width: 380px;
+  padding: 14px;
+  border: 1px solid var(--bd);
+  border-radius: 11px;
+  background: var(--panel);
+  color: var(--tx);
+}
+.engine-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+.engine-dialog__head,
+.engine-dialog__actions {
+  display: flex;
+  align-items: center;
+  margin: 0;
+}
+.engine-dialog__head {
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.engine-dialog__actions {
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+.engine-dialog__title {
+  font-size: 12px;
+  color: var(--hi);
+}
+/* #localFields/#remoteFields lost the .model-bar column flow when relocated;
+   restore the vertical stack inside the dialog. */
+.engine-dialog .model-bar__local,
+.engine-dialog .model-bar__remote {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 /* EH-0005 bite 1: engine/options controls. Lives in the transcript column so the
@@ -665,7 +768,8 @@ button {
 }
 
 .opts__select,
-.opts__num {
+.opts__num,
+.opts__text {
   height: 30px;
   border-radius: 7px;
   border: 1px solid var(--bd);
@@ -690,8 +794,15 @@ button {
 }
 
 .opts__select:focus,
-.opts__num:focus {
-  border-color: var(--amber);
+.opts__num:focus,
+.opts__text:focus {
+  border-color: var(--accent);
+}
+
+/* Disabled state for the single-file-only output filename field. */
+.opts__text:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Hide the native number spinners; values are typed, not nudged. */
@@ -708,7 +819,7 @@ button {
 .opts__check {
   width: 15px;
   height: 15px;
-  accent-color: var(--amber);
+  accent-color: var(--accent);
   cursor: pointer;
 }
 
@@ -733,7 +844,7 @@ button {
   resize: vertical;
 }
 .opts__textarea:focus {
-  border-color: var(--amber);
+  border-color: var(--accent);
 }
 
 /* EH-0005 bite 2: the live "effective values" summary that sits above Run. A
@@ -787,6 +898,7 @@ button {
 }
 
 .run-btn {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -794,15 +906,31 @@ button {
   padding: 0 16px;
   border-radius: 9px;
   border: none;
-  background: var(--amber);
-  color: #1a1206;
+  background: var(--accent);
+  color: #fff;
   font-size: 12.5px;
   font-weight: 700;
   cursor: pointer;
+  box-shadow: var(--glow);
+}
+
+/* Animated gradient halo bleeding out from behind the primary CTA. */
+.run-btn::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--grad);
+  background-size: 300% 300%;
+  filter: blur(12px);
+  opacity: 0.4;
+  animation: grad-shift 6s ease infinite;
 }
 
 .run-btn:hover {
-  background: #f0b156;
+  background: #b975f7;
+  box-shadow: var(--glow-strong);
 }
 
 .run-btn:disabled {
@@ -811,10 +939,15 @@ button {
 }
 
 /* Preflight-gate variant (EH-0004): a disabled Run that is blocked, not just
-   running. Slightly redder so the user reads it as "fix the env", not "wait". */
+   running. Slightly redder so the user reads it as "fix the env", not "wait".
+   No glow/halo so it never reads as the active accent. */
 .run-btn.is-blocked {
   background: #6b4a3a;
   color: #f3d9c9;
+  box-shadow: none;
+}
+.run-btn.is-blocked::before {
+  display: none;
 }
 
 /* Inline preflight-gate message in the transcript pane. */
@@ -836,7 +969,7 @@ button {
 }
 
 .path-input:focus {
-  border-color: var(--amber);
+  border-color: var(--accent);
 }
 
 .path-input::placeholder {
@@ -863,7 +996,7 @@ button {
 .run-progress__fill {
   height: 100%;
   width: 0%;
-  background: var(--amber);
+  background: var(--grad);
   border-radius: 4px;
   transition: width 0.2s ease;
 }
@@ -1006,12 +1139,14 @@ button {
   bottom: 0;
   width: 3px;
   background: var(--dim);
+  color: var(--dim);
+  box-shadow: 0 0 8px currentColor;
 }
 
-.job-card--done::before { background: var(--green); }
-.job-card--failed::before { background: var(--red); }
-.job-card--running::before { background: var(--amber); }
-.job-card--queued::before { background: var(--violet); }
+.job-card--done::before { background: var(--green); color: var(--green); }
+.job-card--failed::before { background: var(--red); color: var(--red); }
+.job-card--running::before { background: var(--amber); color: var(--amber); }
+.job-card--queued::before { background: var(--violet); color: var(--violet); }
 
 .job-card__head {
   display: flex;
@@ -1168,12 +1303,18 @@ button {
   border-radius: 50%;
   flex: none;
   background: var(--dim);
+  color: var(--dim);
+  box-shadow: 0 0 7px currentColor;
 }
 
-.board__col-dot--queued { background: var(--violet); }
-.board__col-dot--running { background: var(--amber); }
-.board__col-dot--done { background: var(--green); }
-.board__col-dot--failed { background: var(--red); }
+.board__col-dot--queued { background: var(--violet); color: var(--violet); }
+.board__col-dot--running {
+  background: var(--amber);
+  color: var(--amber);
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+.board__col-dot--done { background: var(--green); color: var(--green); }
+.board__col-dot--failed { background: var(--red); color: var(--red); }
 
 .board__col-name {
   flex: 1;
@@ -1242,8 +1383,8 @@ button {
   padding: 0 14px;
   border: 1px solid var(--bd);
   border-radius: 8px;
-  background: var(--amber);
-  color: #1a1206;
+  background: var(--accent);
+  color: #fff;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -1366,8 +1507,8 @@ button {
   height: 16px;
   padding: 0 4px;
   border-radius: 8px;
-  background: var(--amber);
-  color: #1a1206;
+  background: var(--accent);
+  color: #fff;
   font-size: 10px;
   font-weight: 600;
   line-height: 16px;
@@ -1383,9 +1524,11 @@ button {
   max-height: 70vh;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--bd);
+  border: 1px solid var(--glass-bd);
   border-radius: 10px;
-  background: var(--panel);
+  background: var(--glass);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
   overflow: hidden;
 }
@@ -1414,7 +1557,7 @@ button {
   cursor: pointer;
 }
 .notify-panel__clear:hover {
-  color: var(--amber);
+  color: var(--accent);
 }
 .notify-panel__list {
   overflow-y: auto;
@@ -1496,10 +1639,12 @@ button {
 .toast {
   pointer-events: auto;
   padding: 11px 12px;
-  border: 1px solid var(--bd);
+  border: 1px solid var(--glass-bd);
   border-left: 2px solid var(--violet);
   border-radius: 9px;
-  background: var(--panel);
+  background: var(--glass);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   animation: toast-in 0.15s ease-out;
 }
@@ -1553,9 +1698,11 @@ button {
   flex-direction: column;
   gap: 8px;
   padding: 12px;
-  border: 1px solid var(--bd);
+  border: 1px solid var(--glass-bd);
   border-radius: 11px;
-  background: var(--panel);
+  background: var(--glass);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 }
 .run-popup[hidden] {
@@ -1618,4 +1765,28 @@ button {
 .run-popup__stop:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* --- performative-ui glow/gradient animations ---------------------------- */
+@keyframes grad-shift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+@keyframes aurora-drift {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  100% { transform: translate3d(-3%, 2%, 0) scale(1.08); }
+}
+@keyframes pulse-dot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: 0.6; }
+}
+
+/* Respect the OS "reduce motion" setting: keep the colors/glow, drop movement. */
+@media (prefers-reduced-motion: reduce) {
+  .run-btn::before,
+  .preview__stage::before,
+  .status-pill--running .status-dot,
+  .board__col-dot--running {
+    animation: none;
+  }
 }

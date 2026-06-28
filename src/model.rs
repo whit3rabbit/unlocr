@@ -85,7 +85,7 @@ pub fn ensure(cache: &Path, quant: &str) -> Res<ModelFiles> {
             let _ = std::io::stdout().flush();
         }
     };
-    ensure_inner(cache, quant, &mut cli)
+    ensure_inner(cache, quant, None, None, &mut cli)
 }
 
 /// Like `ensure`, but routes download events through `on_progress` as
@@ -111,7 +111,47 @@ where
             total,
         });
     };
-    ensure_inner(cache, quant, &mut sink)
+    ensure_inner(cache, quant, None, None, &mut sink)
+}
+
+/// Like `ensure_with_progress`, but lets the caller point at GGUF files directly
+/// instead of the cache + quant naming convention. `model_override`, when set, is
+/// used verbatim as the model GGUF (no download, no quant lookup); `mmproj_override`
+/// likewise for the projector. Either `None` falls back to the cached/downloaded
+/// stock file. Powers the CLI `--model`/`--mmproj` flags and the GUI's custom-GGUF
+/// pickers. Override paths must exist (validated in `ensure_inner` via `require_file`),
+/// so this is the single sink for the "file exists" guard shared by both front ends.
+pub fn ensure_with_overrides<P>(
+    cache: &Path,
+    quant: &str,
+    model_override: Option<&Path>,
+    mmproj_override: Option<&Path>,
+    on_progress: &mut P,
+) -> Res<ModelFiles>
+where
+    P: FnMut(crate::Progress),
+{
+    let mut sink = |name: &str, pct: Option<u8>, total: u64, done: u64| {
+        let pct = pct.unwrap_or(0);
+        on_progress(crate::Progress::Download {
+            name: name.to_string(),
+            pct,
+            done,
+            total,
+        });
+    };
+    ensure_inner(cache, quant, model_override, mmproj_override, &mut sink)
+}
+
+/// Validate a caller-supplied GGUF override path: it must be an existing file
+/// (the resolver uses it verbatim, no download fallback). Single sink so both the
+/// CLI flag and the GUI command get the same check (the GUI's `invoke` bypasses any
+/// HTML form validation).
+fn require_file(path: &Path, kind: &str) -> Res<()> {
+    if !path.is_file() {
+        return Err(format!("{kind} file not found: {}", path.display()).into());
+    }
+    Ok(())
 }
 
 /// Shared ensure logic. `progress` is a thin closure receiving (name, pct, total,
@@ -119,17 +159,47 @@ where
 /// `pct = Some(p)` is a percent tick. Split out so the CLI-printing default
 /// (`ensure`) and the enum-emitting variant (`ensure_with_progress`) share one
 /// download implementation and cannot drift.
-fn ensure_inner<F>(cache: &Path, quant: &str, progress: &mut F) -> Res<ModelFiles>
+///
+/// `model_override`/`mmproj_override`: when `Some`, the path is used verbatim (after
+/// an existence check) instead of the cache + download path. `quant` still names the
+/// stock model file when `model_override` is `None`; the mmproj filename is fixed, so
+/// `quant` does not affect it.
+fn ensure_inner<F>(
+    cache: &Path,
+    quant: &str,
+    model_override: Option<&Path>,
+    mmproj_override: Option<&Path>,
+    progress: &mut F,
+) -> Res<ModelFiles>
 where
     F: FnMut(&str, Option<u8>, u64, u64),
 {
-    validate_quant(quant)?;
-    let model_name = model_filename(quant);
-    let model = cache.join(&model_name);
-    let mmproj = cache.join(MMPROJ);
+    let model = match model_override {
+        Some(p) => {
+            require_file(p, "model")?;
+            p.to_path_buf()
+        }
+        None => {
+            validate_quant(quant)?;
+            let model_name = model_filename(quant);
+            let model = cache.join(&model_name);
+            ensure_file(&model, &model_name, progress)?;
+            model
+        }
+    };
 
-    ensure_file(&model, &model_name, progress)?;
-    ensure_file(&mmproj, MMPROJ, progress)?;
+    let mmproj = match mmproj_override {
+        Some(p) => {
+            require_file(p, "mmproj")?;
+            p.to_path_buf()
+        }
+        None => {
+            let mmproj = cache.join(MMPROJ);
+            ensure_file(&mmproj, MMPROJ, progress)?;
+            mmproj
+        }
+    };
+
     Ok(ModelFiles { model, mmproj })
 }
 
@@ -354,8 +424,8 @@ pub fn list_cached_quants(cache: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_dir, check_presence, ensure_with_progress, list_cached_quants, model_filename,
-        stream_to_part, validate_quant, MMPROJ,
+        cache_dir, check_presence, ensure_with_overrides, ensure_with_progress, list_cached_quants,
+        model_filename, stream_to_part, validate_quant, MMPROJ,
     };
     use crate::Progress;
     use std::io::Cursor;
@@ -541,5 +611,63 @@ mod tests {
             files.mmproj,
             cache.join("mmproj-Unlimited-OCR-F16.gguf")
         );
+    }
+
+    #[test]
+    fn ensure_with_overrides_uses_model_path_and_falls_back_to_cached_mmproj() {
+        // model_override is used verbatim (no naming convention); mmproj_override
+        // absent -> the stock cached mmproj is used. No download for either since
+        // both files exist, so the progress sink must stay silent.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        let custom = cache.join("my-finetune.gguf");
+        std::fs::write(&custom, b"stub").unwrap();
+        std::fs::write(cache.join(MMPROJ), b"stub").unwrap(); // stock projector present
+
+        let mut events: Vec<Progress> = Vec::new();
+        let files =
+            ensure_with_overrides(cache, "Q8_0", Some(&custom), None, &mut |p| events.push(p))
+                .unwrap();
+        assert!(events.is_empty(), "no download expected, got {events:?}");
+        assert_eq!(files.model, custom); // verbatim, not Unlimited-OCR-Q8_0.gguf
+        assert_eq!(files.mmproj, cache.join(MMPROJ));
+    }
+
+    #[test]
+    fn ensure_with_overrides_errors_on_missing_model_path() {
+        // A nonexistent override path must fail fast (the resolver is the single
+        // existence-check sink for both the CLI flag and the GUI invoke).
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        let missing = cache.join("nope.gguf");
+        let err = ensure_with_overrides(cache, "Q8_0", Some(&missing), None, &mut |_| {})
+            .err()
+            .expect("missing model override should error")
+            .to_string();
+        assert!(err.contains("model file not found"), "got: {err}");
+    }
+
+    #[test]
+    fn ensure_with_overrides_uses_mmproj_override_path() {
+        // Both overrides supplied -> both used verbatim, nothing downloaded.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        let model = cache.join("m.gguf");
+        let mmproj = cache.join("custom-proj.gguf");
+        std::fs::write(&model, b"stub").unwrap();
+        std::fs::write(&mmproj, b"stub").unwrap();
+
+        let mut events: Vec<Progress> = Vec::new();
+        let files = ensure_with_overrides(
+            cache,
+            "Q8_0",
+            Some(&model),
+            Some(&mmproj),
+            &mut |p| events.push(p),
+        )
+        .unwrap();
+        assert!(events.is_empty(), "no download expected, got {events:?}");
+        assert_eq!(files.model, model);
+        assert_eq!(files.mmproj, mmproj);
     }
 }

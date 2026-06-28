@@ -32,7 +32,7 @@ export function makeUi() {
   // Controls greyed out during a run so a second run can't be launched and run
   // options can't change mid-flight. loadModelBtn + importBtn + every #runOpts input.
   function setControlsDisabled(on) {
-    const ids = ["loadModelBtn", "importBtn"];
+    const ids = ["loadModelBtn", "importBtn", "engineModifyBtn"];
     ids.forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.disabled = on;

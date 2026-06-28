@@ -172,27 +172,35 @@
                        are remote OpenAI-compatible endpoints. Non-custom presets hide
                        the URL/key/model fields and (vllm/sglang) prefill #remoteUrl
                        with the backend's default port. Wired in main.js applyPreset(). -->
-                  <select class="opts__select" id="enginePreset">
-                    <option value="llamacpp" selected>llama.cpp (managed local)</option>
-                    <option value="vllm">vLLM (http://127.0.0.1:8000)</option>
-                    <option value="sglang">SGLang (http://127.0.0.1:30000)</option>
-                    <option value="custom">Custom endpoint</option>
-                  </select>
+                  <!-- Select + Modify open the advanced connection knobs (remote
+                       URL/key/model and custom GGUF/projector) in #engineDialog.
+                       The default llama.cpp path needs none of them, so they live
+                       behind the button instead of cluttering the panel. -->
+                  <div class="transcript__engine-row">
+                    <select class="opts__select" id="enginePreset">
+                      <option value="llamacpp" selected>llama.cpp (managed local)</option>
+                      <option value="gpu">GPU full model (vLLM · DeepSeek-OCR)</option>
+                      <option value="vllm">vLLM (http://127.0.0.1:8000)</option>
+                      <option value="sglang">SGLang (http://127.0.0.1:30000)</option>
+                      <option value="custom">Custom endpoint</option>
+                    </select>
+                    <button class="model-btn model-btn--ghost" id="engineModifyBtn" type="button">Modify…</button>
+                  </div>
+                  <!-- The full (non-GGUF) model runs on vLLM, not llama.cpp. This
+                       preset just points the remote endpoint at a local vLLM serving
+                       deepseek-ai/DeepSeek-OCR; you must start that server yourself
+                       (16GB+ VRAM). See the Colab notebook / README for the command. -->
+                  <span class="opts__hint" id="gpuHint" hidden>
+                    Needs a local <code>vllm serve deepseek-ai/DeepSeek-OCR</code> (16GB+ VRAM).
+                    See the README "Run the full model on GPU" section and the Colab notebook.
+                  </span>
                 </div>
                 <!-- Model load bar (litellm-style). A model must be loaded before
                      Run OCR is enabled; loading holds it warm in RAM, Unload frees
-                     it. Remote fields appear only for the Custom preset. The local
-                     quant is read from the Quant control in Engine options. -->
+                     it. Connection knobs (remote URL/key/model, custom GGUF) live in
+                     #engineDialog behind the Modify button; the local quant is read
+                     from the Quant control in Engine options. -->
                 <div class="model-bar" id="modelBar">
-                  <div class="model-bar__remote" id="remoteFields" hidden>
-                    <input class="path-input" id="remoteUrl" type="text" spellcheck="false"
-                      placeholder="http://127.0.0.1:8080  (OpenAI-compatible base URL)" />
-                    <input class="path-input" id="remoteKey" type="password" spellcheck="false"
-                      placeholder="API key (optional)" />
-                    <input class="path-input" id="remoteModel" type="text" spellcheck="false"
-                      placeholder="model name (litellm/vLLM gateways; optional for bare llama-server)" />
-                    <p class="settings__note">Only llama.cpp (PR #17400), vLLM, and SGLang are known to support Unlimited-OCR / DeepSeek-OCR. Ollama / LM Studio do not.</p>
-                  </div>
                   <div class="model-bar__row">
                     <button class="model-btn" id="loadModelBtn" type="button">Load model</button>
                     <button class="model-btn model-btn--ghost" id="unloadModelBtn" type="button" disabled>Unload</button>
@@ -329,6 +337,23 @@
                 <div class="effective" id="effectiveSummary" aria-live="polite">
                   <span class="effective__label">Effective</span>
                   <span class="effective__vals" id="effectiveVals">Q8_0 &middot; 144 DPI &middot; 4096 tok &middot; keep images off</span>
+                </div>
+                <!-- Output location. Folder applies to every run (blank = write
+                     beside the input, the default). Filename is single-file only
+                     (disabled when 2+ files are queued); blank = {stem}.md. main.js
+                     wires the folder picker and the single-file enable/disable. -->
+                <div class="opts__output" id="outputOpts">
+                  <label class="opts__field opts__field--full">
+                    <span class="opts__label">Output folder</span>
+                    <span class="opts__pages">
+                      <input class="opts__text" id="outFolder" type="text" placeholder="beside input (default)" spellcheck="false" />
+                      <button class="import-btn" id="outFolderBtn" type="button">Choose folder…</button>
+                    </span>
+                  </label>
+                  <label class="opts__field opts__field--full">
+                    <span class="opts__label">Output filename</span>
+                    <input class="opts__text" id="outFile" type="text" placeholder="{stem}.md (single file only)" spellcheck="false" />
+                  </label>
                 </div>
                 <div class="transcript__run">
                   <button class="run-btn" id="runBtn" type="button">Run OCR</button>
@@ -550,5 +575,46 @@
         <button class="run-popup__stop" id="stopBtn" type="button" disabled>Stop</button>
       </div>
     </div>
+
+    <!-- Engine connection knobs, hidden behind the Modify button next to the
+         preset (model.js wireEngineDialog). applyPreset() toggles which block
+         shows: #remoteFields for the Custom endpoint, #localFields (custom GGUF /
+         projector) for the managed-local llama.cpp path. Field ids are unchanged
+         so load_model reads them here exactly as it did inline. The head/Done
+         buttons use <form method="dialog"> for native close (Esc + backdrop are
+         free with showModal()). -->
+    <dialog class="engine-dialog" id="engineDialog">
+      <form method="dialog" class="engine-dialog__head">
+        <span class="engine-dialog__title">Engine connection</span>
+        <button class="run-popup__close" value="close" type="submit" title="Close" aria-label="Close">&times;</button>
+      </form>
+      <div class="model-bar__remote" id="remoteFields" hidden>
+        <input class="path-input" id="remoteUrl" type="text" spellcheck="false"
+          placeholder="http://127.0.0.1:8080  (OpenAI-compatible base URL)" />
+        <input class="path-input" id="remoteKey" type="password" spellcheck="false"
+          placeholder="API key (optional)" />
+        <input class="path-input" id="remoteModel" type="text" spellcheck="false"
+          placeholder="model name (litellm/vLLM gateways; optional for bare llama-server)" />
+        <p class="settings__note">Only llama.cpp (PR #17400), vLLM, and SGLang are known to support Unlimited-OCR / DeepSeek-OCR. Ollama / LM Studio do not.</p>
+      </div>
+      <!-- Custom-GGUF override (local mode only; toggled by applyPreset).
+           Pick a model GGUF to skip the HF download + quant naming; the
+           projector picker is optional (omit to use the stock one). Click
+           a chosen path to clear it. Wired in model.js wireGgufPicker(). -->
+      <div class="model-bar__local" id="localFields">
+        <div class="model-bar__row">
+          <button class="model-btn model-btn--ghost" id="pickModelBtn" type="button">Custom model GGUF…</button>
+          <span class="model-bar__status" id="modelFilePath" title="">none</span>
+        </div>
+        <div class="model-bar__row">
+          <button class="model-btn model-btn--ghost" id="pickMmprojBtn" type="button">Custom projector (mmproj)…</button>
+          <span class="model-bar__status" id="mmprojFilePath" title="">none</span>
+        </div>
+        <p class="settings__note">Optional. A custom model GGUF skips the download and the quant control; the projector is optional (stock projector used if blank).</p>
+      </div>
+      <form method="dialog" class="engine-dialog__actions">
+        <button class="model-btn" value="done" type="submit">Done</button>
+      </form>
+    </dialog>
   </body>
 </html>

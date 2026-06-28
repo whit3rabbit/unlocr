@@ -281,6 +281,34 @@ where
     Ok((md.trim_start().to_string(), kept))
 }
 
+/// Resolve the output `.md` path for one input. Shared by the CLI (`ocr::run_pdf`)
+/// and the GUI (`run_ocr`) so both agree on where a result is written.
+///
+/// - `out_dir`: the chosen output folder. A relative `out_file` is joined under it;
+///   the default `{stem}.md` is written into it.
+/// - `out_file`: optional explicit filename/path (single-input only). An absolute
+///   path is used verbatim (ignoring `out_dir`). When it has no extension, `.md`
+///   is appended; a non-`.md` extension is left exactly as typed.
+/// - `stem`: input file stem, used for the default `{stem}.md` when `out_file` is None.
+pub fn resolve_output_path(out_dir: &Path, out_file: Option<&Path>, stem: &str) -> PathBuf {
+    match out_file {
+        None => out_dir.join(format!("{stem}.md")),
+        Some(p) => {
+            // Append .md only when no extension is present; respect a typed extension.
+            let p = if p.extension().is_none() {
+                p.with_extension("md")
+            } else {
+                p.to_path_buf()
+            };
+            if p.is_absolute() {
+                p
+            } else {
+                out_dir.join(p)
+            }
+        }
+    }
+}
+
 /// Append one page's text with a `<!-- page N -->` delimiter (1-based).
 /// Canonical implementation: ocr_pages (lib) and the CLI path (via run_pdf's
 /// delegation) both route through this, so page-delimited markdown is identical
@@ -306,6 +334,37 @@ mod tests {
         assert!(o.model_dir.is_none());
         assert!(!o.keep_images);
         assert!(o.pages.is_none());
+    }
+
+    #[test]
+    fn resolve_output_path_cases() {
+        let dir = Path::new("/out");
+        // Default: {stem}.md under out_dir.
+        assert_eq!(resolve_output_path(dir, None, "doc"), Path::new("/out/doc.md"));
+        // Relative name, no extension -> append .md, joined under out_dir.
+        assert_eq!(
+            resolve_output_path(dir, Some(Path::new("report")), "doc"),
+            Path::new("/out/report.md")
+        );
+        // Relative name with .md -> preserved.
+        assert_eq!(
+            resolve_output_path(dir, Some(Path::new("report.md")), "doc"),
+            Path::new("/out/report.md")
+        );
+        // Non-.md extension -> left as typed (caller's choice).
+        assert_eq!(
+            resolve_output_path(dir, Some(Path::new("report.txt")), "doc"),
+            Path::new("/out/report.txt")
+        );
+        // Absolute path -> used verbatim, ignoring out_dir (ext appended when missing).
+        assert_eq!(
+            resolve_output_path(dir, Some(Path::new("/tmp/x")), "doc"),
+            Path::new("/tmp/x.md")
+        );
+        assert_eq!(
+            resolve_output_path(dir, Some(Path::new("/tmp/x.md")), "doc"),
+            Path::new("/tmp/x.md")
+        );
     }
 
     #[test]

@@ -66,7 +66,13 @@ pub fn run_pdf<S: ImageOcr>(backend: &S, pdftoppm: &Path, input: &Path, args: &A
     let (md, kept) = ocr_pages(backend, pdftoppm, input, &opts, &mut on_progress)?;
     println!(); // newline after the last "\r  page N/N" line, matching the original
 
-    let out_path = args.out.join(format!("{stem}.md"));
+    // Resolve where to write: --output (single-input only; validated in main::run)
+    // wins over the default {stem}.md under --out. Create the parent dir first since
+    // a custom --output may point at a not-yet-created directory (main only creates --out).
+    let out_path = unlocr::resolve_output_path(&args.out, args.output.as_deref(), stem);
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::write(&out_path, md)?;
     println!("  wrote {}", out_path.display());
 

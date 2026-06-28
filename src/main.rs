@@ -18,6 +18,13 @@ use unlocr::{model, preflight, server};
 
 pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
+/// HF repo of the full (non-GGUF) DeepSeek-OCR model. Served by vLLM, not
+/// llama.cpp; `--gpu` points the remote endpoint at a local vLLM instance
+/// serving this. See README "Run the full model on GPU" + colab/ notebook.
+const DEEPSEEK_OCR_REPO: &str = "deepseek-ai/DeepSeek-OCR";
+/// Default base URL of a local `vllm serve` OpenAI server (`--gpu` shortcut).
+const VLLM_LOCAL_URL: &str = "http://localhost:8000";
+
 #[derive(Parser, Debug)]
 #[command(name = "unlocr", version, about = "OCR PDFs to markdown via Unlimited-OCR + llama.cpp")]
 struct Args {
@@ -41,6 +48,12 @@ struct Args {
     /// Output directory for the .md files (default: current dir)
     #[arg(long, default_value = ".")]
     out: PathBuf,
+
+    /// Output file path for the single-input case (e.g. report.md). Joined under
+    /// --out when relative; an absolute path is used verbatim. `.md` is appended
+    /// when no extension is given. Rejected with multiple inputs (use --out <DIR>).
+    #[arg(short = 'o', long)]
+    output: Option<PathBuf>,
 
     /// Quality tier, an alias for a model quant:
     /// best=BF16 (5.47GB), good=Q8_0 (2.91GB, default), less=Q4_K_M (1.82GB).
@@ -99,6 +112,17 @@ struct Args {
     #[arg(long)]
     model_dir: Option<PathBuf>,
 
+    /// Use this model GGUF directly, skipping the HF download and the
+    /// Unlimited-OCR-<quant>.gguf naming convention. With this set,
+    /// --quant/--quality/--model-dir no longer select the model file.
+    #[arg(long)]
+    model: Option<PathBuf>,
+
+    /// Projector (mmproj) GGUF override. Omit to use the standard
+    /// cached/downloaded projector. Requires --model.
+    #[arg(long)]
+    mmproj: Option<PathBuf>,
+
     /// Port for llama-server (0 = auto-pick a free port)
     #[arg(long, default_value_t = 0)]
     port: u16,
@@ -124,6 +148,14 @@ struct Args {
     /// omit for a bare remote llama-server).
     #[arg(long)]
     endpoint_model: Option<String>,
+
+    /// Run the full (non-GGUF) DeepSeek-OCR model on GPU via a local vLLM server.
+    /// Shortcut: when set and --endpoint is unset, defaults --endpoint to
+    /// http://localhost:8000 and --endpoint-model to deepseek-ai/DeepSeek-OCR.
+    /// Start the server first (see README "Run the full model on GPU"): vllm serve
+    /// deepseek-ai/DeepSeek-OCR. A Colab notebook (colab/) wires this end to end.
+    #[arg(long)]
+    gpu: bool,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -210,6 +242,21 @@ impl Args {
             .unwrap_or_else(|| self.task.prompt().to_string())
     }
 
+    /// Apply the `--gpu` shortcut: fill the remote-endpoint defaults (local vLLM +
+    /// the full DeepSeek-OCR model) only where unset, so an explicit `--endpoint`/
+    /// `--endpoint-model` still wins. No-op unless `--gpu` is passed.
+    fn apply_gpu_defaults(&mut self) {
+        if !self.gpu {
+            return;
+        }
+        if self.endpoint.is_none() {
+            self.endpoint = Some(VLLM_LOCAL_URL.to_string());
+        }
+        if self.endpoint_model.is_none() {
+            self.endpoint_model = Some(DEEPSEEK_OCR_REPO.to_string());
+        }
+    }
+
     /// Parse `--pages` into a 1-based inclusive `(first, last)` range, or None when
     /// the flag is absent (= all pages). Accepts "5" (single) and "5-9" (range).
     /// Rejects 0, reversed ranges, and non-numeric input so a bad flag fails before
@@ -259,7 +306,12 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Res<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    // --gpu is sugar over the remote-endpoint path: a local vLLM serving the full
+    // DeepSeek-OCR model. From here on the normal remote path handles it; no
+    // GPU-specific code below.
+    args.apply_gpu_defaults();
 
     if let Some(cmd) = args.command {
         match cmd {
@@ -292,10 +344,30 @@ fn run() -> Res<()> {
     // Expand folders, globs, and --from-list into a concrete, deduped PDF list.
     let inputs = expand_inputs(&args.inputs, args.from_list.as_deref(), args.recursive)?;
 
+    // --output names one file; it is ambiguous across a batch. Reject before any
+    // download/spawn. Covers both the local and remote paths (both share `inputs`).
+    if args.output.is_some() && inputs.len() > 1 {
+        return Err("--output names a single file; use --out <DIR> for multiple inputs".into());
+    }
+
+    // --model/--mmproj select a local GGUF to spawn llama-server with; remote mode
+    // has no local model to load. Reject before the remote return rather than
+    // silently ignoring them. Checked here so both the local and remote paths share it.
+    if args.endpoint.is_some() && (args.model.is_some() || args.mmproj.is_some()) {
+        return Err("--model/--mmproj are local-only; remove them when using --endpoint".into());
+    }
+
     // Remote endpoint mode: rasterize locally, OCR against a remote
     // OpenAI-compatible server. No local llama-server spawn, no model download.
     if let Some(base_url) = args.endpoint.clone() {
         return run_remote(base_url, &inputs, &args);
+    }
+
+    // --mmproj alone is meaningless: it overrides the projector for a custom model,
+    // but without --model the stock model + stock projector are the matched pair.
+    // Checked before preflight so it fails fast without needing llama-server present.
+    if args.mmproj.is_some() && args.model.is_none() {
+        return Err("--mmproj requires --model".into());
     }
 
     // 1. Preflight: locate external binaries and validate the llama.cpp build.
@@ -305,7 +377,30 @@ fn run() -> Res<()> {
     // Explicit --quant wins; otherwise --quality maps to a quant.
     let quant = args.quant.clone().unwrap_or_else(|| args.quality.quant().to_string());
     let cache = model::cache_dir(args.model_dir.clone())?;
-    let files = model::ensure(&cache, &quant)?;
+    // Custom-GGUF mode: route through ensure_with_overrides so override paths are
+    // used verbatim (existence-checked in model.rs). The custom model is never
+    // downloaded; at most the stock mmproj is fetched here. ensure_with_overrides
+    // emits Progress::Download with a concrete pct, so print percent ticks (no
+    // separate "downloading <name> ..." header line, the one cosmetic difference
+    // from model::ensure's CLI output).
+    let files = if args.model.is_some() {
+        let mut on_progress = |p: unlocr::Progress| {
+            if let unlocr::Progress::Download { pct, done, total, .. } = p {
+                use std::io::Write;
+                print!("\r  {pct:>3}%  ({} / {} MiB)", done >> 20, total >> 20);
+                let _ = std::io::stdout().flush();
+            }
+        };
+        model::ensure_with_overrides(
+            &cache,
+            &quant,
+            args.model.as_deref(),
+            args.mmproj.as_deref(),
+            &mut on_progress,
+        )?
+    } else {
+        model::ensure(&cache, &quant)?
+    };
 
     std::fs::create_dir_all(&args.out)?;
 
@@ -570,6 +665,30 @@ mod tests {
         assert!(parse_pages("abc").is_err()); // non-numeric
         assert!(parse_pages("").is_err()); // empty
         assert!(parse_pages("5-").is_err()); // missing bound
+    }
+
+    #[test]
+    fn gpu_flag_fills_remote_defaults() {
+        // --gpu with nothing else points the remote path at a local vLLM serving
+        // the full DeepSeek-OCR model. Mirrors the normalization in run().
+        let mut args = Args::parse_from(["unlocr", "x.pdf", "--gpu"]);
+        args.apply_gpu_defaults();
+        assert_eq!(args.endpoint.as_deref(), Some("http://localhost:8000"));
+        assert_eq!(args.endpoint_model.as_deref(), Some("deepseek-ai/DeepSeek-OCR"));
+
+        // An explicit --endpoint wins; --gpu only fills the model default.
+        let mut args = Args::parse_from([
+            "unlocr", "x.pdf", "--gpu", "--endpoint", "http://host:9000",
+        ]);
+        args.apply_gpu_defaults();
+        assert_eq!(args.endpoint.as_deref(), Some("http://host:9000"));
+        assert_eq!(args.endpoint_model.as_deref(), Some("deepseek-ai/DeepSeek-OCR"));
+
+        // No --gpu = no remote defaults injected (stays local GGUF path).
+        let mut args = Args::parse_from(["unlocr", "x.pdf"]);
+        args.apply_gpu_defaults();
+        assert_eq!(args.endpoint, None);
+        assert_eq!(args.endpoint_model, None);
     }
 
     #[test]

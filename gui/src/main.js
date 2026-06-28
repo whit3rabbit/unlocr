@@ -14,6 +14,7 @@ import { makeFileRail, makeMarkdownPane, makePreviewPane } from "./panes.js";
 import { wireRunButton, wireLibraryDrop } from "./run.js";
 import {
   wireEnginePreset,
+  wireEngineDialog,
   wireModelBar,
   attachLoadListeners,
   markCachedQuants,
@@ -56,6 +57,7 @@ window.addEventListener("DOMContentLoaded", () => {
   // settings first so saved defaults seed the controls, then mark which quants are
   // cached, then read the live model status to set the Run gate + badge.
   wireEnginePreset();
+  wireEngineDialog();
   wireModelBar(ui);
   attachLoadListeners();
   wireSettings(() => {
@@ -68,6 +70,22 @@ window.addEventListener("DOMContentLoaded", () => {
   // plain browser (no Tauri). Seeds the unread badge from the persisted store.
   initNotifications();
 
+  // Native File menu (lib.rs) emits one event per action; reuse the existing
+  // toolbar buttons by id so all their validation/status logic is shared.
+  // Unload is disabled when no model is loaded, so the guard makes it a no-op.
+  const menuEv = window.__TAURI__ && window.__TAURI__.event;
+  if (menuEv && menuEv.listen) {
+    const menuMap = {
+      menu_load_pdf: "importBtn",
+      menu_load_model: "loadModelBtn",
+      menu_unload_model: "unloadModelBtn",
+    };
+    menuEv.listen("menu://action", (e) => {
+      const btn = document.getElementById(menuMap[e.payload]);
+      if (btn && !btn.disabled) btn.click();
+    });
+  }
+
   // EH-0004 bite 2 / EH-0012: the file list pane is bound to the queued-path
   // list. The Import button opens a MULTI-select picker; each chosen PDF is
   // added to queuedPaths and rendered in the file-rail. The path-input field
@@ -77,6 +95,17 @@ window.addEventListener("DOMContentLoaded", () => {
   const importBtn = document.getElementById("importBtn");
   const preview = makePreviewPane();
 
+  // Output filename is single-file only: enable it when exactly one PDF is queued,
+  // otherwise disable + clear so a stale name can't apply to a batch (the backend
+  // also rejects out_file with >1 input). Called on every queue change.
+  const outFileEl = document.getElementById("outFile");
+  function updateOutFileState() {
+    if (!outFileEl) return;
+    const single = queuedPaths.length === 1;
+    outFileEl.disabled = !single;
+    if (!single) outFileEl.value = "";
+  }
+
   // Apply queuedPaths to the file-rail display and clear the text field
   // (the canonical list is in queuedPaths, not the field, for multi-file batches).
   function applyQueue(paths) {
@@ -85,6 +114,7 @@ window.addEventListener("DOMContentLoaded", () => {
     // Show the first file in the path field for context; for multi-file batches
     // this is the first item only (the rail shows the full list).
     if (pathInput) pathInput.value = queuedPaths.length === 1 ? queuedPaths[0] : "";
+    updateOutFileState();
   }
 
   if (pathInput) {
@@ -93,6 +123,7 @@ window.addEventListener("DOMContentLoaded", () => {
       // Typed path replaces the entire queue (single-file typed entry).
       queuedPaths = v ? [v] : [];
       rail.renderFiles(queuedPaths);
+      updateOutFileState();
     };
     // Preview render shells out to pdftoppm; only refresh on blur/Enter/change,
     // not per keystroke.
@@ -135,8 +166,31 @@ window.addEventListener("DOMContentLoaded", () => {
       });
     }
   }
+
+  // Output-folder picker: native folder dialog (same plugin as the PDF/GGUF
+  // pickers). Sets the #outFolder field; blank field = write beside the input.
+  const outFolderBtn = document.getElementById("outFolderBtn");
+  const outFolderEl = document.getElementById("outFolder");
+  if (outFolderBtn && outFolderEl) {
+    outFolderBtn.addEventListener("click", async () => {
+      const dialog = window.__TAURI__ && window.__TAURI__.dialog;
+      if (!dialog || !dialog.open) {
+        outFolderEl.focus();
+        return;
+      }
+      try {
+        const dir = await dialog.open({ directory: true, multiple: false });
+        if (typeof dir === "string" && dir.trim()) outFolderEl.value = dir;
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("[output] folder picker failed:", err.message);
+      }
+    });
+  }
+
   // Start empty (matches the "No files imported yet" placeholder).
   rail.renderFiles([]);
+  updateOutFileState();
 
   // EH-0005 bite 2: the "effective values" summary mirrors whatever the engine
   // options controls hold, so it never drifts from the next Run's payload. Update

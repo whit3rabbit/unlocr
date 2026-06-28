@@ -22,7 +22,7 @@ import { showToast, removeToast, addNotification } from "./toasts.js";
  *
  *  `ui` may be null when there is no transcript UI to drive (kept optional so a
  *  future background importer can reuse the path without a progress surface). */
-export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, board) {
+export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, board, outOverride) {
   let t;
   try {
     t = requireTauri();
@@ -62,21 +62,26 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, boar
   const opts = readRunOptions();
 
   try {
-    // out_dir = the input's parent dir so run_ocr writes {stem}.md next to the
-    // source (mirrors the CLI default of output-beside-input) and returns the
-    // written path. inputs is a Vec for forward-compat with batch runs.
+    // out_dir = the chosen output folder, else the input's parent dir so run_ocr
+    // writes {stem}.md next to the source (mirrors the CLI default of
+    // output-beside-input) and returns the written path. inputs is a Vec for
+    // forward-compat with batch runs.
     // EH-0005 bite 1: the engine/options controls (quant/dpi/maxTokens/keepImages)
     // are forwarded into the run_ocr payload so the GUI drives quality, DPI, and
     // image-keeping instead of always sending CLI defaults.
     // A bare filename has no parent dir; fall back to "." (cwd) so run_ocr always
     // writes a file beside the input rather than silently flipping to in-memory
     // mode (empty out_dir) and writing nothing to disk.
-    const outDir = parentDirOf(path) || ".";
+    const ov = outOverride || {};
+    const outDir = (ov.dir || "").trim() || parentDirOf(path) || ".";
+    // out_file: single-file custom name (null for batch; the caller gates this).
+    const outFile = (ov.file || "").trim() || null;
     // quant is fixed at load time (the model is already held warm); run_ocr only
     // takes the per-run options below.
     const results = await t.core.invoke("run_ocr", {
       inputs: [path],
       outDir,
+      outFile,
       maxTokens: opts.maxTokens,
       dpi: opts.dpi,
       prompt: opts.prompt,
@@ -107,9 +112,11 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, boar
       if (haveFile) {
         mdPath = results[0];
         try {
-          // Pass outDir as allowedDir so the backend enforces the allowlist:
-          // only .md files inside the run's output directory can be read.
-          resolvedMd = await t.core.invoke("read_text_file", { path: mdPath, allowedDir: outDir });
+          // Allowlist = the parent of the file run_ocr actually wrote, not the
+          // outDir we sent: a custom/absolute out_file can land outside outDir, and
+          // the backend enforces "only .md files inside allowedDir" (matches jobs.js).
+          const allowedDir = parentDirOf(mdPath) || outDir;
+          resolvedMd = await t.core.invoke("read_text_file", { path: mdPath, allowedDir });
         } catch (readErr) {
           // File read failed (rare: written then removed). Surface in the review
           // pane so the user sees why no markdown is shown, but keep the run green.
@@ -216,6 +223,11 @@ export function wireRunButton(ui, mdPane, unlistensRef, library, board, getQueue
     }
     // Fire-and-forget: the click handler cannot await without holding the event.
     // runOcrOnPath owns UI state transitions + error surfacing per file.
+    // Output location: folder applies to every file; a custom filename is honored
+    // only for a single-file run (the backend rejects out_file with >1 input, and
+    // the field is disabled in the UI for batches).
+    const outDir = (document.getElementById("outFolder") || {}).value || "";
+    const outFile = paths.length === 1 ? (document.getElementById("outFile") || {}).value || "" : "";
     (async () => {
       // Capture the real setStatus once, before any patching, so a rejection in
       // one file cannot leave a patched function that the next iteration would
@@ -235,7 +247,7 @@ export function wireRunButton(ui, mdPane, unlistensRef, library, board, getQueue
         ui.setStatus = (text) => originalSetStatus(prefix + text);
         let r;
         try {
-          r = await runOcrOnPath(path, ui, mdPane, unlistensRef, library, board);
+          r = await runOcrOnPath(path, ui, mdPane, unlistensRef, library, board, { dir: outDir, file: outFile });
         } finally {
           ui.setStatus = originalSetStatus;
         }
@@ -329,7 +341,10 @@ export function wireLibraryDrop(ui, mdPane, unlistensRef, library, board) {
         // eslint-disable-next-line no-console
         console.log("[drop] enqueuing OCR job:", pdf);
         // Each run is awaited so llama-server is torn down before the next starts.
-        const r = await runOcrOnPath(pdf, ui, mdPane, unlistensRef, library, board);
+        // Honor the chosen output folder; dropped imports are batch-shaped, so no
+        // custom filename (each writes {stem}.md into the folder / beside input).
+        const outDir = (document.getElementById("outFolder") || {}).value || "";
+        const r = await runOcrOnPath(pdf, ui, mdPane, unlistensRef, library, board, { dir: outDir, file: null });
         // User Stop dropped the model; halt the rest of the dropped batch.
         if (r === "stopped") break;
       }

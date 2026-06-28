@@ -58,8 +58,9 @@ struct ImagesKept {
 /// used for the run so the backend can enforce an allowlist (EH-0005 bite 3).
 /// Errors are stringified so the future stays Send and the UI can surface them inline.
 ///
-/// `allowed_dir` is the directory that `run_ocr` wrote output into (i.e. the
-/// parent directory of the PDF). When supplied, the canonicalized file path MUST
+/// `allowed_dir` is the parent of the path `run_ocr` actually wrote (the caller
+/// derives it from the returned output path, which for a custom or absolute
+/// `out_file` may differ from `out_dir`). When supplied, the canonicalized file path MUST
 /// start with the canonicalized allowed dir; any path outside that directory is
 /// rejected even if it passes the extension check. This is an allowlist, not a
 /// denylist: it confines reads to the known output location at runtime.
@@ -164,7 +165,10 @@ pub(crate) async fn render_pages(pdf_path: String, dpi: Option<u32>) -> Result<V
 ///
 /// `inputs`  absolute or relative PDF paths (batch supported).
 /// `out_dir` directory the assembled markdown is written to (one `.md` per input,
-///           named after the stem). Empty string = in-memory only.
+///           named after the stem). Empty string + no `out_file` = in-memory only.
+/// `out_file` optional explicit output filename/path for the single-input case
+///           (relative -> under `out_dir`, absolute -> verbatim, `.md` appended when
+///           missing). Rejected with multiple inputs.
 /// Remaining params map onto the per-run `OcrOptions` fields (quant is fixed at
 /// load time and not accepted here).
 #[tauri::command]
@@ -172,6 +176,7 @@ pub(crate) async fn run_ocr(
     app: AppHandle,
     inputs: Vec<String>,
     out_dir: String,
+    out_file: Option<String>,
     max_tokens: Option<u32>,
     dpi: Option<u32>,
     prompt: Option<String>,
@@ -232,6 +237,11 @@ pub(crate) async fn run_ocr(
             Some((first, last))
         }
     };
+
+    // A custom out_file names one file; ambiguous across a batch (mirror the CLI).
+    if out_file.is_some() && inputs.len() > 1 {
+        return Err("out_file names a single file; clear it for multiple inputs".to_string());
+    }
 
     #[cfg(debug_assertions)]
     eprintln!(
@@ -318,24 +328,30 @@ pub(crate) async fn run_ocr(
             }
             let _ = app.emit("ocr://done", OcrDone { markdown: md.clone() });
 
-            if out_dir.as_os_str().is_empty() {
+            // Write to disk when a folder OR an explicit filename was given; only an
+            // empty folder AND no filename keeps the result in memory (results = md).
+            if out_dir.as_os_str().is_empty() && out_file.is_none() {
                 results.push(md);
             } else {
                 let stem = input_path
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("output");
-                // Create the output dir first, matching the CLI (main.rs creates
-                // args.out before writing). Without this a non-existent out_dir
-                // fails the write with NotFound instead of being created.
-                if let Err(e) = std::fs::create_dir_all(&out_dir) {
-                    return Err(format!("failed to create {}: {e}", out_dir.display()));
+                // Shared resolver (with the CLI): out_file wins, else {stem}.md under
+                // out_dir; .md appended when missing, absolute out_file used verbatim.
+                let out_path =
+                    unlocr::resolve_output_path(&out_dir, out_file.as_deref().map(Path::new), stem);
+                // Create the parent first (a custom/absolute out_file may target a
+                // not-yet-created dir), matching the CLI's create_dir_all.
+                if let Some(parent) = out_path.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        return Err(format!("failed to create {}: {e}", parent.display()));
+                    }
                 }
-                let out_file = out_dir.join(format!("{stem}.md"));
-                if let Err(e) = std::fs::write(&out_file, &md) {
-                    return Err(format!("failed to write {}: {e}", out_file.display()));
+                if let Err(e) = std::fs::write(&out_path, &md) {
+                    return Err(format!("failed to write {}: {e}", out_path.display()));
                 }
-                results.push(out_file.display().to_string());
+                results.push(out_path.display().to_string());
             }
         }
         } // model guard dropped here

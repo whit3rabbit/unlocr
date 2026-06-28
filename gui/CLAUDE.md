@@ -26,6 +26,9 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
 - `unlocr`'s error is `Box<dyn Error>` (not Send). Convert to `String` INSIDE the
   blocking closure before returning, so the future stays Send.
 - Register every command in `generate_handler![...]` in `run()`.
+- `read_text_file` enforces a `.md`-only allowlist; pass `allowedDir` = the PARENT of the
+  path `run_ocr` actually returned (not the `out_dir` you sent). A custom/absolute output
+  filename can land outside `out_dir`. `run.js`/`jobs.js` both derive it from the output path.
 - Job-store commands (`list_jobs`, `jobs_store_path`, `record_job`) wrap `store.rs`;
   `record_job` fires after each run_ocr completes/fails. Defaults mirror `OcrOptions::default()`.
 
@@ -50,7 +53,10 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
 - Engine backend mode + remote URL/key/model are read ONLY at `load_model` time (model
   is held warm); `run_ocr` uses the loaded server and does NOT re-read engine fields.
   Backend picker is `#enginePreset` (llamacpp=managed local, vllm/sglang/custom=remote);
-  `applyPreset()` in main.js drives field visibility + URL prefill.
+  `applyPreset()` in model.js drives field visibility + URL prefill. The remote
+  URL/key/model + custom GGUF/projector fields live in `#engineDialog` (native
+  `<dialog>`, opened by the Modify button via `wireEngineDialog`), NOT inline in
+  `.model-bar`; their ids are unchanged so `load_model` reads them the same.
 - `frontendDist` is `../src` (static files served as-is).
 - Native file picker: `tauri-plugin-dialog` (added). Init'd in `run()`,
   permission `dialog:default` in `capabilities/default.json`. The Import button
