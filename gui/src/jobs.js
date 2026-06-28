@@ -38,13 +38,10 @@ export async function openInReview(outputPath, mdPane, buttons) {
     return;
   }
   try {
-    // allowed_dir: the parent directory of the .md file so read_text_file's
-    // allowlist check passes (matches the outDir the run used).
-    const lastSep = Math.max(outputPath.lastIndexOf("/"), outputPath.lastIndexOf("\\"));
-    const allowedDir = lastSep > 0 ? outputPath.slice(0, lastSep) : ".";
+    // No client allowlist: read_text_file serves only paths recorded in the job
+    // store (this outputPath came from that store) or written this session.
     const markdown = await t.core.invoke("read_text_file", {
       path: outputPath,
-      allowedDir,
     });
     if (mdPane) mdPane.render(markdown, outputPath);
   } catch (err) {

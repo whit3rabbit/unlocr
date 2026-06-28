@@ -26,9 +26,11 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
 - `unlocr`'s error is `Box<dyn Error>` (not Send). Convert to `String` INSIDE the
   blocking closure before returning, so the future stays Send.
 - Register every command in `generate_handler![...]` in `run()`.
-- `read_text_file` enforces a `.md`-only allowlist; pass `allowedDir` = the PARENT of the
-  path `run_ocr` actually returned (not the `out_dir` you sent). A custom/absolute output
-  filename can land outside `out_dir`. `run.js`/`jobs.js` both derive it from the output path.
+- `read_text_file(path)` enforces a `.md`-only, BACKEND-DERIVED allowlist: it serves only
+  files the app itself produced (`AppState.read_allow`, the paths `run_ocr` wrote this session,
+  plus non-empty `output_path`s in the job store). The match is exact after canonicalize, not a
+  dir prefix. No `allowedDir` arg: the renderer cannot widen the read scope. `check_readable`
+  (cmd_run.rs) is the pure, unit-tested core.
 - Job-store commands (`list_jobs`, `jobs_store_path`, `record_job`) wrap `store.rs`;
   `record_job` fires after each run_ocr completes/fails. Defaults mirror `OcrOptions::default()`.
 
@@ -77,6 +79,13 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
 ## Runtime deps (same as the CLI, NOT bundled)
 - `pdftoppm` (poppler) and `llama-server` (llama.cpp >= b8530) must be on PATH /
   Homebrew prefixes. The `preflight` command surfaces missing ones to the UI.
+
+## Gotchas
+- `spawn_blocking` keeps Rust off the UI thread, but a high-rate `emit` (e.g. the
+  per-token `ocr://partial-text` stream) still freezes the WEBVIEW: each event runs
+  its JS handler, and per-token DOM writes + forced reflow (`scrollTop`) starve the
+  event loop so clicks (Stop) never run. Throttle DOM writes (buffer + flush per
+  requestAnimationFrame) and cap rendered text. See ui.js `appendPartial`/`flushPartial`.
 
 ## Eatahorse run log (2026-06-27/28)
 

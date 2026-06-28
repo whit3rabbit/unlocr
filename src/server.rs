@@ -41,7 +41,11 @@ fn await_health(child: &mut Child, stderr_log: &tempfile::NamedTempFile, port: u
             )
             .into());
         }
-        if ureq::get(&url).timeout(Duration::from_secs(2)).call().is_ok() {
+        if ureq::get(&url)
+            .timeout(Duration::from_secs(2))
+            .call()
+            .is_ok()
+        {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -62,7 +66,15 @@ fn read_stderr_log(stderr_log: &tempfile::NamedTempFile) -> String {
         let _ = f.read_to_string(&mut s);
     }
     // keep the tail; startup logs can be long
-    let tail: String = s.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+    let tail: String = s
+        .lines()
+        .rev()
+        .take(20)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
     tail
 }
 
@@ -109,7 +121,13 @@ impl Server {
             let stderr_handle = stderr_log.reopen()?;
 
             let mut cmd = Command::new(bin);
-            cmd.args(server_args(model, mmproj, current_port, image_max_tokens, chat_template));
+            cmd.args(server_args(
+                model,
+                mmproj,
+                current_port,
+                image_max_tokens,
+                chat_template,
+            ));
             let mut child = cmd
                 .stdout(Stdio::null())
                 .stderr(Stdio::from(stderr_handle))
@@ -399,6 +417,7 @@ fn ocr_via(
 /// are silently skipped. On a parse failure for a single chunk, the chunk is
 /// skipped (best-effort) and the loop continues so a single corrupt line does not
 /// abort a long OCR run.
+#[allow(clippy::too_many_arguments)]
 fn ocr_via_stream(
     base_url: &str,
     api_key: Option<&str>,
@@ -495,17 +514,32 @@ impl Server {
         // Drop, which is benign (the child exits). On Windows use `timeout`
         // with a large value; on Unix `sleep 9999` is universal.
         #[cfg(unix)]
-        let child = Command::new("sleep").arg("9999").spawn()
+        let child = Command::new("sleep")
+            .arg("9999")
+            .spawn()
             .map_err(|e| format!("Server::for_test: could not spawn sleep: {e}"))?;
         #[cfg(windows)]
-        let child = Command::new("cmd").args(["/C", "timeout", "/t", "9999", "/nobreak"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+        let child = Command::new("cmd")
+            .args(["/C", "timeout", "/t", "9999", "/nobreak"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
             .map_err(|e| format!("Server::for_test: could not spawn timeout: {e}"))?;
         Ok(Server {
             child,
             stderr_log: tempfile::NamedTempFile::new()?,
             port,
         })
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        // ponytail: Drop covers normal + error exit. Ctrl-C (SIGINT) does NOT
+        // run Drop, so it can orphan llama-server. Add a `ctrlc` handler if
+        // that turns out to bite.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -534,18 +568,32 @@ mod tests {
         assert_eq!(
             base,
             vec![
-                "-m", "/m/model.gguf",
-                "--mmproj", "/m/mmproj.gguf",
-                "--host", "127.0.0.1",
-                "--port", "8080",
+                "-m",
+                "/m/model.gguf",
+                "--mmproj",
+                "/m/mmproj.gguf",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8080",
             ]
         );
-        assert!(!base.iter().any(|a| a == "--image-max-tokens" || a == "--chat-template"));
+        assert!(!base
+            .iter()
+            .any(|a| a == "--image-max-tokens" || a == "--chat-template"));
 
-        let full = stringify(server_args(model, mmproj, 8080, Some(1280), Some("deepseek-ocr")));
+        let full = stringify(server_args(
+            model,
+            mmproj,
+            8080,
+            Some(1280),
+            Some("deepseek-ocr"),
+        ));
         // Each flag appears adjacent to its value.
         assert!(full.windows(2).any(|w| w == ["--image-max-tokens", "1280"]));
-        assert!(full.windows(2).any(|w| w == ["--chat-template", "deepseek-ocr"]));
+        assert!(full
+            .windows(2)
+            .any(|w| w == ["--chat-template", "deepseek-ocr"]));
     }
 
     #[test]
@@ -574,8 +622,8 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
         let port = listener.local_addr().unwrap().port();
 
-        let resp_body = json!({ "choices": [{ "message": { "content": "# remote ok" } }] })
-            .to_string();
+        let resp_body =
+            json!({ "choices": [{ "message": { "content": "# remote ok" } }] }).to_string();
         let http_response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             resp_body.len(),
@@ -585,7 +633,9 @@ mod tests {
         // Capture the request line + Authorization header from one request.
         let (tx, rx) = mpsc::channel::<(String, Option<String>)>();
         std::thread::spawn(move || {
-            let Ok(s) = listener.incoming().next().unwrap() else { return };
+            let Ok(s) = listener.incoming().next().unwrap() else {
+                return;
+            };
             let mut reader = BufReader::new(s.try_clone().unwrap());
             let mut writer = s;
             let mut request_line = String::new();
@@ -597,7 +647,7 @@ mod tests {
                 if reader.read_line(&mut line).unwrap_or(0) == 0 {
                     break;
                 }
-                let t = line.trim_end_matches(|c| c == '\r' || c == '\n');
+                let t = line.trim_end_matches(['\r', '\n']);
                 if t.is_empty() {
                     break;
                 }
@@ -641,8 +691,7 @@ mod tests {
         fn run_once(model: Option<String>) -> serde_json::Value {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
             let port = listener.local_addr().unwrap().port();
-            let resp_body =
-                json!({ "choices": [{ "message": { "content": "ok" } }] }).to_string();
+            let resp_body = json!({ "choices": [{ "message": { "content": "ok" } }] }).to_string();
             let http_response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 resp_body.len(),
@@ -650,7 +699,9 @@ mod tests {
             );
             let (tx, rx) = mpsc::channel::<Vec<u8>>();
             std::thread::spawn(move || {
-                let Ok(s) = listener.incoming().next().unwrap() else { return };
+                let Ok(s) = listener.incoming().next().unwrap() else {
+                    return;
+                };
                 let mut reader = BufReader::new(s.try_clone().unwrap());
                 let mut writer = s;
                 let mut content_length = 0usize;
@@ -661,7 +712,7 @@ mod tests {
                     if reader.read_line(&mut line).unwrap_or(0) == 0 {
                         break;
                     }
-                    let t = line.trim_end_matches(|c| c == '\r' || c == '\n');
+                    let t = line.trim_end_matches(['\r', '\n']);
                     if t.is_empty() {
                         break;
                     }
@@ -680,7 +731,8 @@ mod tests {
                 api_key: None,
                 model,
             };
-            ep.ocr_image("p", "data:image/png;base64,AAAA", 64, None).expect("ocr");
+            ep.ocr_image("p", "data:image/png;base64,AAAA", 64, None)
+                .expect("ocr");
             let body = rx.recv().expect("stub recorded body");
             serde_json::from_slice(&body).expect("body is json")
         }
@@ -689,7 +741,10 @@ mod tests {
         assert_eq!(with["model"], json!("my-model"));
 
         let without = run_once(None);
-        assert!(without.get("model").is_none(), "model key must be absent when unset");
+        assert!(
+            without.get("model").is_none(),
+            "model key must be absent when unset"
+        );
     }
 
     /// EH-0010 acceptance: prove `ocr_via_stream` fires `on_token` once per SSE
@@ -741,12 +796,12 @@ mod tests {
                     if reader.read_line(&mut line).unwrap_or(0) == 0 {
                         break;
                     }
-                    let t = line.trim_end_matches(|c| c == '\r' || c == '\n');
+                    let t = line.trim_end_matches(['\r', '\n']);
                     if t.is_empty() {
                         break;
                     }
                     if t.to_ascii_lowercase().starts_with("content-length:") {
-                        if let Some(v) = t.splitn(2, ':').nth(1) {
+                        if let Some(v) = t.split_once(':').map(|x| x.1) {
                             content_length = v.trim().parse().unwrap_or(0);
                         }
                     }
@@ -817,12 +872,12 @@ mod tests {
                     if reader.read_line(&mut line).unwrap_or(0) == 0 {
                         break;
                     }
-                    let t = line.trim_end_matches(|c| c == '\r' || c == '\n');
+                    let t = line.trim_end_matches(['\r', '\n']);
                     if t.is_empty() {
                         break;
                     }
                     if t.to_ascii_lowercase().starts_with("content-length:") {
-                        if let Some(v) = t.splitn(2, ':').nth(1) {
+                        if let Some(v) = t.split_once(':').map(|x| x.1) {
                             content_length = v.trim().parse().unwrap_or(0);
                         }
                     }
@@ -850,15 +905,5 @@ mod tests {
         assert_eq!(assembled, "plain json ok", "fallback text mismatch");
         // The fallback delivers the whole body as one on_token call.
         assert_eq!(tokens, vec!["plain json ok".to_string()]);
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        // ponytail: Drop covers normal + error exit. Ctrl-C (SIGINT) does NOT
-        // run Drop, so it can orphan llama-server. Add a `ctrlc` handler if
-        // that turns out to bite.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }

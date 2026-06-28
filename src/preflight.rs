@@ -19,7 +19,11 @@ pub struct Tools {
     pub pdftoppm: PathBuf,
 }
 
-pub fn run_doctor(llama_override: Option<&Path>, model_dir: Option<PathBuf>, quant: &str) -> Res<()> {
+pub fn run_doctor(
+    llama_override: Option<&Path>,
+    model_dir: Option<PathBuf>,
+    quant: &str,
+) -> Res<()> {
     println!("=== unlocr doctor ===");
 
     // 1. Check tools
@@ -37,7 +41,9 @@ pub fn run_doctor(llama_override: Option<&Path>, model_dir: Option<PathBuf>, qua
     }
 
     // Check llama-server
-    let llama_path = llama_override.map(|p| p.to_path_buf()).or_else(|| locate("llama-server"));
+    let llama_path = llama_override
+        .map(|p| p.to_path_buf())
+        .or_else(|| locate("llama-server"));
     match llama_path {
         Some(path) => {
             print!("  [OK] llama-server: found at {}", path.display());
@@ -71,16 +77,24 @@ pub fn run_doctor(llama_override: Option<&Path>, model_dir: Option<PathBuf>, qua
     // check_presence now validates the quant internally (defense in depth), so
     // the explicit validate_quant call above is no longer needed here. The `?`
     // propagates an invalid-quant error with the same message.
-    let (model_path, model_present, mmproj_path, mmproj_present) = crate::model::check_presence(&cache, quant)?;
-    
+    let (model_path, model_present, mmproj_path, mmproj_present) =
+        crate::model::check_presence(&cache, quant)?;
+
     if model_present {
         let size_str = match fs::metadata(&model_path) {
             Ok(meta) => format!("{:.2} GiB", meta.len() as f64 / 1024.0 / 1024.0 / 1024.0),
             Err(_) => "unknown size".to_string(),
         };
-        println!("  [OK] Model file: present at {} ({})", model_path.display(), size_str);
+        println!(
+            "  [OK] Model file: present at {} ({})",
+            model_path.display(),
+            size_str
+        );
     } else {
-        println!("  [INFO] Model file: missing at {} (will download on first run)", model_path.display());
+        println!(
+            "  [INFO] Model file: missing at {} (will download on first run)",
+            model_path.display()
+        );
     }
 
     if mmproj_present {
@@ -88,9 +102,16 @@ pub fn run_doctor(llama_override: Option<&Path>, model_dir: Option<PathBuf>, qua
             Ok(meta) => format!("{:.2} MiB", meta.len() as f64 / 1024.0 / 1024.0),
             Err(_) => "unknown size".to_string(),
         };
-        println!("  [OK] Projector file: present at {} ({})", mmproj_path.display(), size_str);
+        println!(
+            "  [OK] Projector file: present at {} ({})",
+            mmproj_path.display(),
+            size_str
+        );
     } else {
-        println!("  [INFO] Projector file: missing at {} (will download on first run)", mmproj_path.display());
+        println!(
+            "  [INFO] Projector file: missing at {} (will download on first run)",
+            mmproj_path.display()
+        );
     }
 
     // 3. Check RAM availability
@@ -100,7 +121,9 @@ pub fn run_doctor(llama_override: Option<&Path>, model_dir: Option<PathBuf>, qua
             let total_gb = total_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
             print!("  Total physical RAM: {:.2} GB", total_gb);
             if total_gb < 4.0 {
-                println!(" - [WARN] Very low memory. OCR will likely crash or run extremely slowly.");
+                println!(
+                    " - [WARN] Very low memory. OCR will likely crash or run extremely slowly."
+                );
             } else if total_gb < 8.0 {
                 println!(" - [WARN] Low memory. Good/Best models may exceed available RAM.");
             } else {
@@ -119,7 +142,9 @@ pub fn run_doctor(llama_override: Option<&Path>, model_dir: Option<PathBuf>, qua
             let free_gb = free_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
             print!("  Free space on cache partition: {:.2} GB", free_gb);
             if free_gb < 5.0 {
-                println!(" - [WARN] Low disk space. Downloading the model or rasterizing PDFs may fail.");
+                println!(
+                    " - [WARN] Low disk space. Downloading the model or rasterizing PDFs may fail."
+                );
             } else {
                 println!(" - [OK]");
             }
@@ -135,7 +160,7 @@ pub fn run_doctor(llama_override: Option<&Path>, model_dir: Option<PathBuf>, qua
     } else {
         println!("Warning: some issues were found. Please resolve the [FAIL] items above.");
     }
-    
+
     Ok(())
 }
 
@@ -196,11 +221,7 @@ fn get_free_disk_space_bytes(path: &Path) -> Option<u64> {
         stdout.parse().ok()
     } else {
         // macOS or Linux (Unix)
-        let out = Command::new("df")
-            .arg("-k")
-            .arg(path)
-            .output()
-            .ok()?;
+        let out = Command::new("df").arg("-k").arg(path).output().ok()?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
         if lines.len() < 2 {
@@ -209,15 +230,17 @@ fn get_free_disk_space_bytes(path: &Path) -> Option<u64> {
         let headers: Vec<&str> = lines[0].split_whitespace().collect();
         let data_joined = lines[1..].join(" ");
         let data: Vec<&str> = data_joined.split_whitespace().collect();
-        
-        let avail_idx = headers.iter().position(|&h| h.contains("Avail") || h.contains("Free") || h.contains("avail"));
+
+        let avail_idx = headers
+            .iter()
+            .position(|&h| h.contains("Avail") || h.contains("Free") || h.contains("avail"));
         if let Some(idx) = avail_idx {
             if idx < data.len() {
                 let kb: u64 = data[idx].parse().ok()?;
                 return Some(kb * 1024);
             }
         }
-        
+
         if data.len() >= 4 {
             let kb: u64 = data[3].parse().ok()?;
             return Some(kb * 1024);
@@ -234,8 +257,7 @@ pub fn check(llama_override: Option<&Path>) -> Res<Tools> {
             Box::<dyn std::error::Error>::from(hint_str)
         })?,
     };
-    let pdftoppm =
-        locate("pdftoppm").ok_or_else(|| hint("pdftoppm", "brew install poppler"))?;
+    let pdftoppm = locate("pdftoppm").ok_or_else(|| hint("pdftoppm", "brew install poppler"))?;
 
     // Soft version gate. The hard gate is the real model load in server.rs.
     match build_number(&llama_server) {
@@ -249,7 +271,10 @@ pub fn check(llama_override: Option<&Path>) -> Res<Tools> {
         ),
     }
 
-    Ok(Tools { llama_server, pdftoppm })
+    Ok(Tools {
+        llama_server,
+        pdftoppm,
+    })
 }
 
 /// Resolve pdftoppm alone. Remote inference still rasterizes locally, so the GUI's

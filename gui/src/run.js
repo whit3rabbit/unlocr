@@ -74,6 +74,15 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, boar
     // mode (empty out_dir) and writing nothing to disk.
     const ov = outOverride || {};
     const outDir = (ov.dir || "").trim() || parentDirOf(path) || ".";
+
+    // Show/confirm the resolved output directory
+    showToast("run-dir-info:" + path, {
+      kind: "info",
+      title: "Saving output to:",
+      meta: outDir === "." ? "Current working directory (.)" : outDir
+    });
+    removeToast("run-dir-info:" + path, 4000);
+
     // out_file: single-file custom name (null for batch; the caller gates this).
     const outFile = (ov.file || "").trim() || null;
     // quant is fixed at load time (the model is already held warm); run_ocr only
@@ -90,11 +99,6 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, boar
       firstPage: opts.firstPage,
       lastPage: opts.lastPage,
     });
-    if (ui) {
-      ui.setRunning(false);
-      ui.setFill(100);
-      ui.setStatus("done");
-    }
 
     // run_ocr's return contract depends on out_dir: a non-empty out_dir yields
     // WRITTEN FILE PATHS, an empty out_dir yields in-memory markdown strings.
@@ -108,25 +112,33 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, boar
     const haveFile = outDir.length > 0;
     let resolvedMd = "";
     let mdPath = "";
+    let readError = null;
     if (results && results.length) {
       if (haveFile) {
         mdPath = results[0];
         try {
-          // Allowlist = the parent of the file run_ocr actually wrote, not the
-          // outDir we sent: a custom/absolute out_file can land outside outDir, and
-          // the backend enforces "only .md files inside allowedDir" (matches jobs.js).
-          const allowedDir = parentDirOf(mdPath) || outDir;
-          resolvedMd = await t.core.invoke("read_text_file", { path: mdPath, allowedDir });
+          // The backend authorizes reads from its own record of files run_ocr just
+          // wrote (AppState.read_allow); no client-supplied allowlist is needed.
+          resolvedMd = await t.core.invoke("read_text_file", { path: mdPath });
         } catch (readErr) {
           // File read failed (rare: written then removed). Surface in the review
           // pane so the user sees why no markdown is shown, but keep the run green.
           if (mdPane) mdPane.render("could not read " + mdPath + ": " + String(readErr), mdPath);
           resolvedMd = "";
+          readError = String(readErr);
         }
       } else {
         // In-memory mode: results[0] IS the markdown content.
         resolvedMd = results[0];
       }
+    }
+
+    // Only declare success once the result is actually in hand: gate the "done" UI
+    // on the read outcome so a read failure does not flash 100%/"done" then "failed".
+    if (ui && !readError) {
+      ui.setRunning(false);
+      ui.setFill(100);
+      ui.setStatus("done");
     }
 
     if (resolvedMd) {
@@ -135,6 +147,23 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, boar
       // attached before invoke, so it always fires): do NOT also append here, or
       // a race between the invoke resolving and the event firing renders twice.
       if (mdPane) mdPane.render(resolvedMd, mdPath);
+    }
+
+    if (readError) {
+      if (ui) {
+        ui.setRunning(false);
+        ui.fail("read failed: " + readError);
+      }
+      await recordRunOutcome(path, opts, "failed", mdPath, "read failed: " + readError, library, board);
+      const stem = (splitPath(path) || {}).name || path;
+      showToast("run:" + path, {
+        kind: "error",
+        title: stem + " — OCR failed",
+        meta: "read failed: " + readError.slice(0, 140),
+      });
+      removeToast("run:" + path, 8000);
+      addNotification("error", stem + " — OCR failed", "read failed: " + readError);
+      return false;
     }
 
     // EH-0006: record the run's outcome so it shows in the Library grid. The

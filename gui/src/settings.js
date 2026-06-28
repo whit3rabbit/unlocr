@@ -51,6 +51,7 @@ export async function wireSettings(onSaved) {
     defaultDpi: "setDpi",
     defaultMaxTokens: "setMaxTokens",
     defaultPrompt: "setPrompt",
+    idleUnloadMinutes: "setIdleMinutes",
   };
   const get = (id) => document.getElementById(id);
 
@@ -78,6 +79,11 @@ export async function wireSettings(onSaved) {
         const v = parseInt((get(id) && get(id).value) || "", 10);
         return Number.isFinite(v) && v > 0 ? v : fallback;
       };
+      // Like num() but allows 0 (idle-unload uses 0 to mean "never").
+      const numOrZero = (id, fallback) => {
+        const v = parseInt((get(id) && get(id).value) || "", 10);
+        return Number.isFinite(v) && v >= 0 ? v : fallback;
+      };
       const newSettings = {
         mode: (get(ids.mode) && get(ids.mode).value) || "local",
         defaultQuant: (get(ids.defaultQuant) && get(ids.defaultQuant).value) || "Q8_0",
@@ -90,6 +96,7 @@ export async function wireSettings(onSaved) {
         defaultPrompt:
           (get(ids.defaultPrompt) && get(ids.defaultPrompt).value) ||
           "<|grounding|>Convert the document to markdown.",
+        idleUnloadMinutes: numOrZero(ids.idleUnloadMinutes, 15),
       };
       try {
         await t.core.invoke("save_settings", { newSettings });
@@ -105,6 +112,14 @@ export async function wireSettings(onSaved) {
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error("[settings] save failed", err);
+        if (saved) {
+          saved.textContent = "Error saving settings: " + String(err);
+          saved.hidden = false;
+          setTimeout(() => {
+            saved.hidden = true;
+            saved.textContent = "Saved.";
+          }, 3000);
+        }
       }
     });
   }
@@ -128,6 +143,10 @@ export async function wireCacheControls() {
 
   /** Format bytes to a human-readable string (MiB for GB-scale GGUFs). */
   function fmtBytes(n) {
+    if (n < 0) {
+      // eslint-disable-next-line no-console
+      console.error("[settings] fmtBytes: negative size:", n);
+    }
     if (n <= 0) return "0 B";
     if (n < 1024) return n + " B";
     if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KiB";
@@ -142,7 +161,7 @@ export async function wireCacheControls() {
       if (dirEl) dirEl.textContent = (info && info.path) || "—";
       if (sizeEl) sizeEl.textContent = info ? fmtBytes(Number(info.sizeBytes) || 0) : "";
     } catch (err) {
-      if (dirEl) dirEl.textContent = "unavailable";
+      if (dirEl) dirEl.textContent = "unavailable: " + String(err);
       if (sizeEl) sizeEl.textContent = "";
     }
   }
@@ -156,12 +175,12 @@ export async function wireCacheControls() {
       try {
         await t.core.invoke("clear_model_cache");
         if (statusEl) statusEl.textContent = "Cache cleared.";
-        await refreshCacheInfo();
-        // Re-mark cached quants (all gone after a clear).
-        markCachedQuants();
       } catch (err) {
         if (statusEl) statusEl.textContent = "Error: " + String(err);
       } finally {
+        await refreshCacheInfo();
+        // Re-mark cached quants (all gone after a clear).
+        markCachedQuants();
         clearBtn.disabled = false;
         if (statusEl) {
           setTimeout(() => { if (statusEl) statusEl.hidden = true; }, 3000);

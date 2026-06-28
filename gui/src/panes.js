@@ -127,26 +127,46 @@ export function makePreviewPane() {
   const pageCount = panel.querySelector(".preview__pagecount");
   const prevBtn = panel.querySelector("#prevPage");
   const nextBtn = panel.querySelector("#nextPage");
-  let pages = []; // asset:// URLs, one per page
-  let idx = 0;
+  // Lazy per-page model: render only the page being viewed (on demand, as the user
+  // navigates), not every page up front. Importing a 300-page book no longer
+  // rasterizes 300 PNGs when the user may never leave page 1. (No look-ahead
+  // prefetch: each page is rendered when first shown, then cached.)
+  let pdfPath = null; // current PDF; null when cleared
+  let cache = {}; // 1-based page number -> asset URL (string), or null if out of range
+  let idx = 1; // current page (1-based)
+  let lastPage = null; // known last page once an out-of-range render is hit; null = unknown
+  let token = 0; // bumps on each show()/clear() so stale async renders are dropped
 
-  // Clamp to [0, n-1] (no wrap) so the bounds buttons can disable at the ends.
-  function go(delta) {
-    if (pages.length === 0) return;
-    const next = Math.min(Math.max(idx + delta, 0), pages.length - 1);
-    if (next !== idx) {
-      idx = next;
-      paint();
+  // Render+cache one page (1-based). Returns its asset URL, or null when the page is
+  // out of range (the backend render_page Errs past the last page). Never throws.
+  async function fetchPage(t, n) {
+    if (n in cache) return cache[n];
+    try {
+      const p = await t.core.invoke("render_page", { pdfPath, page: n, dpi: null });
+      cache[n] = t.core.convertFileSrc(p);
+    } catch (err) {
+      // Only an out-of-range page marks the end of the document: cache the null and
+      // bound navigation. A REAL render failure (pdftoppm error, transient IPC) is
+      // NOT cached, so a later navigation retries instead of permanently truncating
+      // the preview at a page that would render fine on a second try.
+      if (String(err).includes("out of range")) {
+        cache[n] = null;
+        if (lastPage === null || n - 1 < lastPage) lastPage = Math.max(0, n - 1);
+      } else {
+        return undefined; // transient: leave uncached so the next attempt retries
+      }
     }
+    return cache[n];
   }
 
-  function paint() {
+  function paint(errorMsg) {
     if (!stage) return;
     stage.innerHTML = "";
-    if (pages.length === 0) {
+    const url = pdfPath ? cache[idx] : null;
+    if (url == null) {
       const p = document.createElement("p");
       p.className = "placeholder";
-      p.textContent = "Import a PDF to see a page preview here.";
+      p.textContent = errorMsg || "Import a PDF to see a page preview here.";
       stage.appendChild(p);
       if (pageChip) pageChip.textContent = "Page 0";
       if (pageCount) pageCount.textContent = "page 0 / 0";
@@ -156,18 +176,46 @@ export function makePreviewPane() {
     }
     const img = document.createElement("img");
     img.className = "preview__img";
-    img.src = pages[idx];
-    img.alt = "PDF page " + (idx + 1);
-    if (pages.length > 1) {
+    img.src = url;
+    img.alt = "PDF page " + idx;
+    // Click advances when a next page may exist (unknown end, or before the last).
+    if (lastPage === null || idx < lastPage) {
       img.title = "click for next page";
       img.style.cursor = "pointer";
       img.addEventListener("click", () => go(1));
     }
     stage.appendChild(img);
-    if (pageChip) pageChip.textContent = "Page " + (idx + 1);
-    if (pageCount) pageCount.textContent = "page " + (idx + 1) + " / " + pages.length;
-    if (prevBtn) prevBtn.disabled = idx <= 0;
-    if (nextBtn) nextBtn.disabled = idx >= pages.length - 1;
+    if (pageChip) pageChip.textContent = "Page " + idx;
+    // Total is unknown until the user reaches the end (no separate page-count probe);
+    // show "page N" until then, "page N / total" once discovered.
+    if (pageCount) {
+      pageCount.textContent = lastPage !== null ? "page " + idx + " / " + lastPage : "page " + idx;
+    }
+    if (prevBtn) prevBtn.disabled = idx <= 1;
+    if (nextBtn) nextBtn.disabled = lastPage !== null && idx >= lastPage;
+  }
+
+  // Move by delta (1-based, no wrap), rendering the target page on demand.
+  async function go(delta) {
+    if (!pdfPath) return;
+    const target = idx + delta;
+    if (target < 1) return;
+    if (lastPage !== null && target > lastPage) return;
+    let t;
+    try {
+      t = requireTauri();
+    } catch (err) {
+      return;
+    }
+    const my = token;
+    const url = await fetchPage(t, target);
+    if (my !== token) return; // a newer show()/clear() superseded this render
+    if (url == null) {
+      paint(); // hit the end; nextBtn disables via lastPage
+      return;
+    }
+    idx = target;
+    paint();
   }
 
   if (prevBtn) prevBtn.addEventListener("click", () => go(-1));
@@ -183,33 +231,36 @@ export function makePreviewPane() {
   });
 
   function clear() {
-    pages = [];
-    idx = 0;
+    token++;
+    pdfPath = null;
+    cache = {};
+    idx = 1;
+    lastPage = null;
     paint();
   }
 
-  /** Render previews for one PDF path. Non-PDF or empty clears the pane. */
-  async function show(pdfPath) {
+  /** Render the first page of one PDF; later pages load lazily on navigation. Non-PDF
+   *  or empty clears the pane. Fails soft outside the webview. */
+  async function show(path) {
     let t;
     try {
       t = requireTauri();
     } catch (err) {
       return; // plain browser: no backend render
     }
-    if (!pdfPath || !pdfPath.toLowerCase().endsWith(".pdf")) {
+    token++;
+    const my = token;
+    if (!path || !path.toLowerCase().endsWith(".pdf")) {
       clear();
       return;
     }
-    try {
-      const paths = await t.core.invoke("render_pages", { pdfPath, dpi: null });
-      pages = (paths || []).map((p) => t.core.convertFileSrc(p));
-      idx = 0;
-      paint();
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("[preview] render failed:", err.message);
-      clear();
-    }
+    pdfPath = path;
+    cache = {};
+    idx = 1;
+    lastPage = null;
+    const url = await fetchPage(t, 1);
+    if (my !== token) return; // superseded by a newer show()/clear()
+    paint(url == null ? "Preview render failed." : undefined);
   }
 
   return { show, clear };

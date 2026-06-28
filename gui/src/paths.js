@@ -45,7 +45,13 @@ export function jobBaseName(path) {
  *  never lost. */
 export function formatEpoch(secs) {
   const n = Number(secs);
-  if (!Number.isFinite(n) || n <= 0) return String(secs);
+  if (!Number.isFinite(n) || n <= 0) {
+    if (secs !== undefined && secs !== null && secs !== "") {
+      // eslint-disable-next-line no-console
+      console.error("[paths] formatEpoch: bad unix epoch value:", secs);
+    }
+    return String(secs);
+  }
   const d = new Date(n * 1000);
   if (Number.isNaN(d.getTime())) return String(secs);
   // YYYY-MM-DD HH:MM in local time, compact and locale-stable.

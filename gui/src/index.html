@@ -114,6 +114,24 @@
                 <div class="file-list" id="fileList" aria-live="polite">
                   <p class="placeholder" id="fileListEmpty">No files imported yet.</p>
                 </div>
+                <!-- Output location (input -> output reads top-to-bottom in the rail).
+                     Folder applies to every run; autofilled from the selected PDF's
+                     directory (blank = write beside the input). Filename is single-file
+                     only (disabled when 2+ files are queued); autofilled to {stem}.md.
+                     main.js wires the folder picker, autofill, and single-file gate. -->
+                <div class="opts__output" id="outputOpts">
+                  <label class="opts__field opts__field--full">
+                    <span class="opts__label">Output folder</span>
+                    <span class="opts__pages">
+                      <input class="opts__text" id="outFolder" type="text" placeholder="beside input (default)" spellcheck="false" />
+                      <button class="import-btn" id="outFolderBtn" type="button">Choose folder…</button>
+                    </span>
+                  </label>
+                  <label class="opts__field opts__field--full">
+                    <span class="opts__label">Output filename</span>
+                    <input class="opts__text" id="outFile" type="text" placeholder="{stem}.md (single file only)" spellcheck="false" />
+                  </label>
+                </div>
                 <!-- pipeline: rendered from the preflight report (main.js),
                      not a hardcoded label. Each stage lights up green/amber/red
                      from the report's tool + model flags. -->
@@ -157,7 +175,7 @@
               <!-- right: live transcript -->
               <div class="panel transcript">
                 <div class="transcript__head">
-                  <span class="transcript__title">Live Transcript</span>
+                  <span class="transcript__title">Engine</span>
                   <div class="transcript__spacer"></div>
                   <span class="status-pill status-pill--idle"><span class="status-dot"></span>Idle</span>
                 </div>
@@ -338,23 +356,6 @@
                   <span class="effective__label">Effective</span>
                   <span class="effective__vals" id="effectiveVals">Q8_0 &middot; 144 DPI &middot; 4096 tok &middot; keep images off</span>
                 </div>
-                <!-- Output location. Folder applies to every run (blank = write
-                     beside the input, the default). Filename is single-file only
-                     (disabled when 2+ files are queued); blank = {stem}.md. main.js
-                     wires the folder picker and the single-file enable/disable. -->
-                <div class="opts__output" id="outputOpts">
-                  <label class="opts__field opts__field--full">
-                    <span class="opts__label">Output folder</span>
-                    <span class="opts__pages">
-                      <input class="opts__text" id="outFolder" type="text" placeholder="beside input (default)" spellcheck="false" />
-                      <button class="import-btn" id="outFolderBtn" type="button">Choose folder…</button>
-                    </span>
-                  </label>
-                  <label class="opts__field opts__field--full">
-                    <span class="opts__label">Output filename</span>
-                    <input class="opts__text" id="outFile" type="text" placeholder="{stem}.md (single file only)" spellcheck="false" />
-                  </label>
-                </div>
                 <div class="transcript__run">
                   <button class="run-btn" id="runBtn" type="button">Run OCR</button>
                 </div>
@@ -530,6 +531,10 @@
                   <span class="opts__label">Default max tokens</span>
                   <input class="opts__num" id="setMaxTokens" type="number" min="256" max="32768" step="1" value="4096" />
                 </label>
+                <label class="opts__field">
+                  <span class="opts__label">Idle unload (min, 0 = never)</span>
+                  <input class="opts__num" id="setIdleMinutes" type="number" min="0" max="1440" step="1" value="15" />
+                </label>
                 <label class="opts__field opts__field--full">
                   <span class="opts__label">Default prompt</span>
                   <textarea class="opts__textarea" id="setPrompt" rows="2" spellcheck="false"></textarea>
@@ -561,8 +566,10 @@
          Populated by main.js toast helpers; not persisted (that's the bell panel). -->
     <div class="toast-stack" id="toastStack" aria-live="polite"></div>
 
-    <!-- Run popup: dismissible progress panel shown while OCR runs. Progress bar +
-         live token log + Stop. Close (×) minimizes to a clickable toast (main.js). -->
+    <!-- Run popup: centered modal progress panel shown while OCR runs. Progress bar +
+         live token log + Stop. Close (×) or backdrop click minimizes to a clickable
+         toast (ui.js). The backdrop dims the app behind it during a run. -->
+    <div class="run-popup-backdrop" id="runPopupBackdrop" hidden></div>
     <div class="run-popup" id="runPopup" hidden>
       <div class="run-popup__head">
         <span class="run-popup__title">Running OCR</span>

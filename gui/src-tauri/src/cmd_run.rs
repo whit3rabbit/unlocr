@@ -2,11 +2,12 @@
 // (fetch the written .md for the review pane), and run_ocr (the batch OCR loop).
 // These drive the held backend in `AppState` (state.rs).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, State};
 use unlocr::{OcrOptions, Progress};
 
 use crate::state::{AppState, Backend};
@@ -53,78 +54,72 @@ struct ImagesKept {
 /// Read a UTF-8 text file off disk into a String. Used by the frontend to fetch
 /// the `{stem}.md` written by `run_ocr` (the path is returned from that command)
 /// so the result can be rendered in a dedicated read-only markdown pane (see
-/// EH-0004 bite 2). Kept a thin, additive FS shim: no globbing; the frontend
-/// passes the exact path the OCR command returned along with the output directory
-/// used for the run so the backend can enforce an allowlist (EH-0005 bite 3).
-/// Errors are stringified so the future stays Send and the UI can surface them inline.
+/// EH-0004 bite 2). Kept a thin, additive FS shim: no globbing.
 ///
-/// `allowed_dir` is the parent of the path `run_ocr` actually wrote (the caller
-/// derives it from the returned output path, which for a custom or absolute
-/// `out_file` may differ from `out_dir`). When supplied, the canonicalized file path MUST
-/// start with the canonicalized allowed dir; any path outside that directory is
-/// rejected even if it passes the extension check. This is an allowlist, not a
-/// denylist: it confines reads to the known output location at runtime.
+/// Read scope is BACKEND-DERIVED, not renderer-supplied: the only files served are
+/// ones the app itself produced. The allowlist is the union of the output paths
+/// this session's runs wrote (`AppState::read_allow`) and the non-empty
+/// `output_path`s recorded in the job store (so re-opening a past run from Library
+/// works across restarts). The requested path must, after canonicalization, EXACTLY
+/// equal one of those. This is strictly tighter than the old caller-supplied
+/// `allowed_dir`, which let a compromised webview read any `.md` anywhere by
+/// pointing `allowed_dir` at the target's parent.
 #[tauri::command]
-pub(crate) fn read_text_file(path: String, allowed_dir: Option<String>) -> Result<String, String> {
-    // Harden against path-traversal and symlink attacks (EH-0005 bites 2+3).
-    //
-    // Threat: the webview (or a compromised script inside it) passes a crafted
-    // path like `../../etc/passwd` or a symlink whose target is outside the
-    // expected output location. Defenses in order:
-    //
-    // 1. Extension pre-check on the raw string (fast, catches the common case).
-    // 2. `canonicalize` resolves `..` and follows all symlinks; the *resolved*
-    //    path is then re-checked for the `.md` extension (catches `foo.md ->
-    //    /etc/shadow` symlinks).
-    //    Canonicalize also rejects non-existent paths, so a speculative probe
-    //    against a path that does not yet exist fails closed.
-    // 3. Allowlist: if `allowed_dir` is provided (always supplied by the frontend
-    //    during a real run), the canonical file path must start with the canonical
-    //    allowed_dir. This confines reads to the known output directory and
-    //    eliminates the residual risk the old denylist left open (any .md file
-    //    outside system dirs, e.g. /tmp/x/secret.md, was previously readable).
+pub(crate) fn read_text_file(path: String, state: State<'_, AppState>) -> Result<String, String> {
+    let allowed = allowed_output_paths(&state);
+    let canonical = check_readable(&path, &allowed)?;
+    std::fs::read_to_string(&canonical)
+        .map_err(|e| format!("failed to read {}: {e}", canonical.display()))
+}
 
-    // Step 1: raw extension check before touching the filesystem.
-    if Path::new(&path).extension().and_then(|e| e.to_str()) != Some("md") {
+/// Canonicalized set of files `read_text_file` may serve: the paths written this
+/// session plus the non-empty `output_path`s persisted in the job store. Paths that
+/// no longer resolve (deleted output) are simply absent, so a stale store entry
+/// fails closed rather than widening scope.
+fn allowed_output_paths(state: &AppState) -> HashSet<PathBuf> {
+    let mut set: HashSet<PathBuf> = state
+        .read_allow
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    for job in crate::store::load_jobs() {
+        if job.output_path.is_empty() {
+            continue;
+        }
+        if let Ok(c) = std::fs::canonicalize(&job.output_path) {
+            set.insert(c);
+        }
+    }
+    set
+}
+
+/// Pure-of-Tauri core of `read_text_file`: validate `path` and return the canonical
+/// target iff it is allowed. Split out so it is unit-testable with an explicit
+/// `allowed` set (no live Tauri `State`). Defenses, in order:
+/// 1. `.md` extension pre-check on the raw string (fast reject).
+/// 2. `canonicalize` resolves `..` + symlinks and rejects non-existent paths
+///    (fail closed); re-check the extension on the resolved target to defeat a
+///    `foo.md -> /etc/shadow` symlink.
+/// 3. Exact match against the backend-derived `allowed` set (not a dir prefix).
+fn check_readable(path: &str, allowed: &HashSet<PathBuf>) -> Result<PathBuf, String> {
+    if Path::new(path).extension().and_then(|e| e.to_str()) != Some("md") {
         return Err(format!("refusing to read non-markdown path: {path}"));
     }
-
-    // Step 2: canonicalize (resolves `..`, symlinks, and relative segments).
-    // Fails if the file does not exist — intentional: we never read a speculative
-    // path, only one that run_ocr already wrote.
-    let canonical = std::fs::canonicalize(&path)
-        .map_err(|e| format!("cannot resolve path {}: {e}", path))?;
-
-    // Step 3: re-check extension on the canonical target (symlink defense).
+    let canonical =
+        std::fs::canonicalize(path).map_err(|e| format!("cannot resolve path {path}: {e}"))?;
     if canonical.extension().and_then(|e| e.to_str()) != Some("md") {
         return Err(format!(
             "refusing to read non-markdown path after resolution: {}",
             canonical.display()
         ));
     }
-
-    // Step 4: allowlist — the canonical file path must start with the canonical
-    // allowed_dir. Reject the read when allowed_dir is provided but cannot be
-    // resolved (e.g. the dir was deleted between run_ocr writing the file and
-    // read_text_file being called); fail closed rather than silently widening scope.
-    if let Some(dir) = allowed_dir {
-        if dir.is_empty() {
-            return Err("allowed_dir is required but was empty".to_string());
-        }
-        let canonical_dir = std::fs::canonicalize(&dir)
-            .map_err(|e| format!("cannot resolve allowed_dir {dir}: {e}"))?;
-        // Use starts_with on PathBuf components so "/tmp/foo" does not match
-        // "/tmp/foobar" (component boundary check, not a string prefix).
-        if !canonical.starts_with(&canonical_dir) {
-            return Err(format!(
-                "refusing to read path outside allowed output dir {}: {}",
-                canonical_dir.display(),
-                canonical.display()
-            ));
-        }
+    if !allowed.contains(&canonical) {
+        return Err(format!(
+            "refusing to read a file the app did not produce: {}",
+            canonical.display()
+        ));
     }
-
-    std::fs::read_to_string(&canonical).map_err(|e| format!("failed to read {}: {e}", canonical.display()))
+    Ok(canonical)
 }
 
 /// Rasterize a PDF to per-page PNGs for the preview pane, cached on disk by the
@@ -135,7 +130,10 @@ pub(crate) fn read_text_file(path: String, allowed_dir: Option<String>) -> Resul
 /// freezes; `unlocr`'s `Box<dyn Error>` is stringified inside the closure so the
 /// future stays Send.
 #[tauri::command]
-pub(crate) async fn render_pages(pdf_path: String, dpi: Option<u32>) -> Result<Vec<String>, String> {
+pub(crate) async fn render_pages(
+    pdf_path: String,
+    dpi: Option<u32>,
+) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>, String> {
         let dpi = dpi.unwrap_or_else(|| OcrOptions::default().dpi);
         let cache = unlocr::model::cache_dir(None).map_err(|e| e.to_string())?;
@@ -150,6 +148,30 @@ pub(crate) async fn render_pages(pdf_path: String, dpi: Option<u32>) -> Result<V
             .into_iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect())
+    })
+    .await
+    .map_err(|e| format!("render worker join failed: {e}"))?
+}
+
+/// Render ONE page (1-based) of a PDF for the preview pane, returning its PNG path.
+/// Backs the preview's lazy per-page load: importing a large PDF no longer rasterizes
+/// every page up front, only the page being viewed (and the next, on navigation).
+/// Shares the same on-disk cache as `render_pages`. Returns Err for an out-of-range
+/// page, which the frontend uses as the "past the last page" signal (no separate
+/// page-count probe). Same poppler-only resolution + spawn_blocking as `render_pages`.
+#[tauri::command]
+pub(crate) async fn render_page(
+    pdf_path: String,
+    page: u32,
+    dpi: Option<u32>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let dpi = dpi.unwrap_or_else(|| OcrOptions::default().dpi);
+        let cache = unlocr::model::cache_dir(None).map_err(|e| e.to_string())?;
+        let pdftoppm = unlocr::preflight::pdftoppm().map_err(|e| e.to_string())?;
+        let path = unlocr::render_page(&pdftoppm, Path::new(&pdf_path), dpi, &cache, page)
+            .map_err(|e| e.to_string())?;
+        Ok(path.to_string_lossy().into_owned())
     })
     .await
     .map_err(|e| format!("render worker join failed: {e}"))?
@@ -171,6 +193,9 @@ pub(crate) async fn render_pages(pdf_path: String, dpi: Option<u32>) -> Result<V
 ///           missing). Rejected with multiple inputs.
 /// Remaining params map onto the per-run `OcrOptions` fields (quant is fixed at
 /// load time and not accepted here).
+// Tauri commands take one fn arg per invoke field; the count is the JS contract,
+// not a refactor smell. A params struct would just move the fields, not remove them.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub(crate) async fn run_ocr(
     app: AppHandle,
@@ -251,109 +276,208 @@ pub(crate) async fn run_ocr(
 
     let out_dir = PathBuf::from(out_dir);
 
-    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>, String> {
+    // Stamp the idle clock at run START, not only at run-END (below). Otherwise the
+    // idle-unload watcher (lib.rs) can unload an idle-past-threshold model in the
+    // window between this invoke and the worker acquiring the model lock, failing the
+    // run with "load a model first" on a model the user just clicked Run on. Stamping
+    // here (synchronously, before dispatch) shrinks that window to IPC transit.
+    {
+        let state = app.state::<AppState>();
+        *state.last_used.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(std::time::Instant::now());
+    }
+
+    let app_for_join = app.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>, String> {
         let state = app.state::<AppState>();
 
         // pdftoppm was resolved at load time (rasterization is always local).
         let pdftoppm = state
             .pdftoppm
             .lock()
-            .ok()
-            .and_then(|g| g.clone())
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
             .ok_or("load a model first")?;
 
         let mut results = Vec::with_capacity(inputs.len());
+        let mut errors = Vec::new();
         // Set true if stop_ocr fired mid-run; handled after the model guard drops.
         let mut stopped = false;
 
         // Hold the model lock for the whole batch (inner scope so the guard drops
         // before we may need to re-lock to clear a stopped run's dead model). The
         // local Server cannot be cloned, and serializing runs is fine for one user.
+        // Only a local backend has a server stop_ocr can kill; captured inside the
+        // guard scope but used after it drops, so declare it out here.
+        let is_local;
         {
-        let guard = state.model.lock().map_err(|_| "model state poisoned")?;
-        let lm = guard.as_ref().ok_or("load a model first")?;
+            let guard = state.model.lock().unwrap_or_else(|p| p.into_inner());
+            let lm = guard.as_ref().ok_or("load a model first")?;
+            is_local = matches!(&lm.backend, Backend::Local(_));
 
-        // NOTE: do NOT reset `cancel` here. A Stop clicked in the brief window
-        // between the JS invoke and this point would be silently overwritten.
-        // `cancel` is false on entry by invariant: load_model clears it, and a
-        // clean run clears it at the end (below); a stopped run drops the model,
-        // so the next run can't start until a reload re-clears it.
+            // NOTE: do NOT reset `cancel` here. A Stop clicked in the brief window
+            // between the JS invoke and this point would be silently overwritten.
+            // `cancel` is false on entry by invariant: load_model clears it, and a
+            // clean run clears it at the end (below); a stopped run drops the model,
+            // so the next run can't start until a reload re-clears it.
 
-        for input in &inputs {
-            let input_path = PathBuf::from(input);
+            for input in &inputs {
+                let input_path = PathBuf::from(input);
 
-            // Per-input progress sink: forward Page (per-page bar) and PartialText
-            // (live token stream) to the webview. Best-effort emit (a failed IPC
-            // must never abort the run).
-            let app_for_progress = app.clone();
-            let mut on_progress = |p: Progress| match p {
-                Progress::Page { page, total } => {
-                    let _ = app_for_progress.emit("ocr://page", PageProgress { page, total });
-                }
-                Progress::PartialText { page, chunk } => {
-                    let _ = app_for_progress.emit("ocr://partial-text", PartialText { page, chunk });
-                }
-                _ => {}
-            };
+                // Per-input progress sink: forward Page (per-page bar) and PartialText
+                // (live token stream) to the webview. Best-effort emit (a failed IPC
+                // must never abort the run).
+                //
+                // Coalesce streamed tokens: ocr_pages emits one PartialText per token,
+                // and one Tauri IPC dispatch per token floods the webview event loop on
+                // a repetition-heavy page (each dispatch runs a JS handler), starving
+                // clicks like Stop (see gui/CLAUDE.md gotcha). Buffer per page and emit
+                // one event per ~FLUSH_CHARS or per newline instead. The previous page's
+                // tail is flushed when the bar advances (Page event); the final page's
+                // sub-threshold tail is rendered by ocr://done (assembled markdown), so
+                // it needs no separate flush.
+                const FLUSH_CHARS: usize = 256;
+                let app_for_progress = app.clone();
+                let mut buf = String::new();
+                let mut buf_page = 0usize;
+                let mut on_progress = |p: Progress| match p {
+                    Progress::Page { page, total } => {
+                        if !buf.is_empty() {
+                            let _ = app_for_progress.emit(
+                                "ocr://partial-text",
+                                PartialText {
+                                    page: buf_page,
+                                    chunk: std::mem::take(&mut buf),
+                                },
+                            );
+                        }
+                        let _ = app_for_progress.emit("ocr://page", PageProgress { page, total });
+                    }
+                    Progress::PartialText { page, chunk } => {
+                        buf_page = page;
+                        let had_newline = chunk.contains('\n');
+                        buf.push_str(&chunk);
+                        if buf.len() >= FLUSH_CHARS || had_newline {
+                            let _ = app_for_progress.emit(
+                                "ocr://partial-text",
+                                PartialText {
+                                    page: buf_page,
+                                    chunk: std::mem::take(&mut buf),
+                                },
+                            );
+                        }
+                    }
+                    _ => {}
+                };
 
-            // Dispatch to the held backend. ocr_pages is generic over ImageOcr so
-            // both the local Server and the RemoteEndpoint drive the same loop.
-            let outcome = match &lm.backend {
-                Backend::Local(srv) => {
-                    unlocr::ocr_pages(srv, &pdftoppm, &input_path, &opts, &mut on_progress)
-                }
-                Backend::Remote(ep) => {
-                    unlocr::ocr_pages(ep, &pdftoppm, &input_path, &opts, &mut on_progress)
-                }
-            };
-            // stop_ocr kills the local server, so the in-flight stream read fails
-            // here. Remap that error to a clean "stopped" so the UI shows intent,
-            // not a raw connection error. (Remote backend has no pid to kill, so
-            // stop cannot abort an in-flight remote run; it finishes normally.)
-            let (md, kept) = match outcome {
-                Ok(v) => v,
-                Err(e) if state.cancel.load(Ordering::SeqCst) => {
-                    let _ = e;
-                    stopped = true;
-                    break;
-                }
-                Err(e) => return Err(e.to_string()),
-            };
+                // Dispatch to the held backend. ocr_pages is generic over ImageOcr so
+                // both the local Server and the RemoteEndpoint drive the same loop.
+                // Stop sets state.cancel; ocr_pages checks it at each page boundary so a
+                // remote run (no pid to kill) aborts at the next page. The local backend
+                // is also killed by pid in stop_ocr, so its in-flight stream errors out.
+                let should_cancel = || state.cancel.load(Ordering::SeqCst);
+                let outcome = match &lm.backend {
+                    Backend::Local(srv) => unlocr::ocr_pages(
+                        srv,
+                        &pdftoppm,
+                        &input_path,
+                        &opts,
+                        &mut on_progress,
+                        &should_cancel,
+                    ),
+                    Backend::Remote(ep) => unlocr::ocr_pages(
+                        ep,
+                        &pdftoppm,
+                        &input_path,
+                        &opts,
+                        &mut on_progress,
+                        &should_cancel,
+                    ),
+                };
+                // stop_ocr kills the local server, so the in-flight stream read fails
+                // here. Remap that error to a clean "stopped" so the UI shows intent,
+                // not a raw connection error. (Remote backend has no pid to kill, so
+                // stop cannot abort an in-flight remote run; it finishes normally.)
+                let (md, kept) = match outcome {
+                    Ok(v) => v,
+                    Err(e) if state.cancel.load(Ordering::SeqCst) => {
+                        let _ = e;
+                        stopped = true;
+                        break;
+                    }
+                    Err(e) => {
+                        errors.push(format!("{}: {}", input_path.display(), e));
+                        continue;
+                    }
+                };
 
-            if let Some(dir) = kept {
+                if let Some(dir) = kept {
+                    let _ = app.emit(
+                        "ocr://images-kept",
+                        ImagesKept {
+                            dir: dir.display().to_string(),
+                        },
+                    );
+                }
                 let _ = app.emit(
-                    "ocr://images-kept",
-                    ImagesKept { dir: dir.display().to_string() },
+                    "ocr://done",
+                    OcrDone {
+                        markdown: md.clone(),
+                    },
                 );
-            }
-            let _ = app.emit("ocr://done", OcrDone { markdown: md.clone() });
 
-            // Write to disk when a folder OR an explicit filename was given; only an
-            // empty folder AND no filename keeps the result in memory (results = md).
-            if out_dir.as_os_str().is_empty() && out_file.is_none() {
-                results.push(md);
-            } else {
-                let stem = input_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("output");
-                // Shared resolver (with the CLI): out_file wins, else {stem}.md under
-                // out_dir; .md appended when missing, absolute out_file used verbatim.
-                let out_path =
-                    unlocr::resolve_output_path(&out_dir, out_file.as_deref().map(Path::new), stem);
-                // Create the parent first (a custom/absolute out_file may target a
-                // not-yet-created dir), matching the CLI's create_dir_all.
-                if let Some(parent) = out_path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        return Err(format!("failed to create {}: {e}", parent.display()));
+                // Write to disk when a folder OR an explicit filename was given; only an
+                // empty folder AND no filename keeps the result in memory (results = md).
+                if out_dir.as_os_str().is_empty() && out_file.is_none() {
+                    results.push(md);
+                } else {
+                    let stem = input_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("output");
+                    // Shared resolver (with the CLI): out_file wins, else {stem}.md under
+                    // out_dir; .md appended when missing, absolute out_file used verbatim.
+                    let out_path = unlocr::resolve_output_path(
+                        &out_dir,
+                        out_file.as_deref().map(Path::new),
+                        stem,
+                    );
+                    // Create the parent first (a custom/absolute out_file may target a
+                    // not-yet-created dir), matching the CLI's create_dir_all.
+                    let mut write_failed = false;
+                    if let Some(parent) = out_path.parent() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            errors.push(format!("failed to create {}: {e}", parent.display()));
+                            write_failed = true;
+                        }
+                    }
+                    if !write_failed {
+                        if let Err(e) = std::fs::write(&out_path, &md) {
+                            errors.push(format!("failed to write {}: {e}", out_path.display()));
+                            write_failed = true;
+                        }
+                    }
+                    if !write_failed {
+                        let abs_path = if out_path.is_absolute() {
+                            out_path
+                        } else {
+                            match std::env::current_dir() {
+                                Ok(cwd) => cwd.join(&out_path),
+                                Err(_) => out_path,
+                            }
+                        };
+                        // Authorize the review pane to read THIS file back. Canonicalize
+                        // so it matches read_text_file's canonical comparison (the file
+                        // exists now); fall back to the absolute path if that fails.
+                        let canon =
+                            std::fs::canonicalize(&abs_path).unwrap_or_else(|_| abs_path.clone());
+                        if let Ok(mut g) = state.read_allow.lock() {
+                            g.insert(canon);
+                        }
+                        results.push(abs_path.display().to_string());
                     }
                 }
-                if let Err(e) = std::fs::write(&out_path, &md) {
-                    return Err(format!("failed to write {}: {e}", out_path.display()));
-                }
-                results.push(out_path.display().to_string());
             }
-        }
         } // model guard dropped here
 
         if stopped {
@@ -361,19 +485,91 @@ pub(crate) async fn run_ocr(
             // Drop it (and the stale pid) so the UI gate flips to "load a model
             // first" instead of letting the next Run hit a dead socket. Remote
             // runs have no pid to kill and don't reach here.
-            if let Ok(mut g) = state.model.lock() {
-                *g = None;
-            }
-            if let Ok(mut sp) = state.server_pid.lock() {
-                *sp = None;
-            }
+            *state.model.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            *state.server_pid.lock().unwrap_or_else(|p| p.into_inner()) = None;
             return Err("stopped".to_string());
         }
-        // Clean batch: clear cancel so the next run starts from a known state
-        // (we no longer reset at run entry, to avoid racing a launch-window Stop).
-        state.cancel.store(false, Ordering::SeqCst);
+        // Clean batch: clear cancel so the next run starts from a known state (we no
+        // longer reset at run entry, to avoid racing a launch-window Stop). If a Stop
+        // landed in the TAIL window (after the last page finished but before this
+        // reset) on a local backend, stop_ocr may have just killed the server, so drop
+        // the now-dead model -> the next Run gates to "load a model first" instead of
+        // hitting a dead socket. This run still completed, so its results are returned.
+        let tail_stop = state.cancel.swap(false, Ordering::SeqCst);
+        if tail_stop && is_local {
+            *state.model.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            *state.server_pid.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
+
+        // Surface failures, but never discard the outputs that DID succeed. A
+        // single-input run that fails has no successes (results empty) -> Err as
+        // before; a partial batch keeps the written paths (Ok) and logs the rest, so
+        // a caller passing multiple inputs does not lose every good file to one bad one.
+        if !errors.is_empty() {
+            if results.is_empty() {
+                return Err(errors.join("; "));
+            }
+            eprintln!(
+                "[run_ocr] {} input(s) failed: {}",
+                errors.len(),
+                errors.join("; ")
+            );
+        }
+
         Ok(results)
     })
-    .await
-    .map_err(|e| format!("ocr worker join failed: {e}"))?
+    .await;
+    // Stamp run-end for the idle-unload watcher (lib.rs), whatever the outcome. The
+    // model lock protects against unloading DURING a run; stamping here starts the
+    // idle clock from when the run finished, not when it started.
+    {
+        let state = app_for_join.state::<AppState>();
+        *state.last_used.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(std::time::Instant::now());
+    }
+    match res {
+        Ok(val) => val,
+        Err(e) => {
+            let state = app_for_join.state::<AppState>();
+            *state.model.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            *state.server_pid.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            Err(format!("ocr worker join failed: {e}"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_readable;
+    use std::collections::HashSet;
+
+    /// A path in the allowed set is served; an existing-but-unlisted .md is rejected
+    /// (the core of the renderer-cannot-widen-scope guarantee).
+    #[test]
+    fn check_readable_exact_match_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let allow = tmp.path().join("allowed.md");
+        let other = tmp.path().join("other.md");
+        std::fs::write(&allow, b"# ok").unwrap();
+        std::fs::write(&other, b"# secret").unwrap();
+
+        // canonicalize so the set matches what check_readable computes internally.
+        let mut set = HashSet::new();
+        set.insert(std::fs::canonicalize(&allow).unwrap());
+
+        let got = check_readable(allow.to_str().unwrap(), &set).unwrap();
+        assert_eq!(got, std::fs::canonicalize(&allow).unwrap());
+
+        // An existing .md that the app did not produce is refused.
+        let err = check_readable(other.to_str().unwrap(), &set).unwrap_err();
+        assert!(err.contains("did not produce"), "unexpected error: {err}");
+    }
+
+    /// Non-.md paths are rejected before any filesystem access.
+    #[test]
+    fn check_readable_rejects_non_markdown() {
+        let set = HashSet::new();
+        let err = check_readable("/etc/passwd", &set).unwrap_err();
+        assert!(err.contains("non-markdown"), "unexpected error: {err}");
+    }
 }

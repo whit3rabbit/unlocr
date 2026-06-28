@@ -35,6 +35,11 @@ Thin wrapper. Full usage/benchmarks in README.md.
   declare as a package dep. deb postinst / rpm %post warn if missing.
 
 ## Gotchas
+- `cargo clippy --workspace --all-targets -- -D warnings` currently FAILS on
+  pre-existing debt (~14 errors in untouched code: server.rs tests, main.rs,
+  ocr.rs match). The release gate lists clippy but the tree is already red. For an
+  unrelated change, verify YOUR diff adds no NEW lints (stash + compare error sets);
+  don't try to make the whole gate green.
 - Public lib API (consumed by gui crate): `run_ocr_job` + `OcrOptions` + `Progress`
   + `render_pages` (cached PDF->PNG for previews) + `resolve_output_path` (clap-free).
   Keep these stable; the GUI links via `path = "../.."`.

@@ -34,7 +34,10 @@ pub fn rasterize_range(
     let mut cmd = Command::new(pdftoppm);
     cmd.arg("-png").arg("-r").arg(dpi.to_string());
     if let Some((first, last)) = range {
-        cmd.arg("-f").arg(first.to_string()).arg("-l").arg(last.to_string());
+        cmd.arg("-f")
+            .arg(first.to_string())
+            .arg("-l")
+            .arg(last.to_string());
     }
     let status = cmd.arg(&pdf_arg).arg(&prefix).status()?;
     if !status.success() {
@@ -67,10 +70,17 @@ pub fn collect_pages(outdir: &Path) -> Vec<PathBuf> {
     pages.into_iter().map(|(_, p)| p).collect()
 }
 
-/// Pull the trailing integer out of a stem like "page-12" -> 12.
-fn trailing_number(path: &Path) -> Option<u64> {
+/// Pull the trailing integer out of a stem like "page-12" -> 12. Pub(crate) so
+/// `render_page` (lib.rs) can pick a specific page file out of a populated preview
+/// cache dir (pdftoppm zero-pads the suffix by total page count, so the exact
+/// filename is not predictable; match by parsed page number instead).
+pub(crate) fn trailing_number(path: &Path) -> Option<u64> {
     let stem = path.file_stem()?.to_str()?;
-    let digits: String = stem.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = stem
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     digits.chars().rev().collect::<String>().parse().ok()
 }
 
@@ -115,8 +125,8 @@ mod tests {
         let pdftoppm = Path::new("pdftoppm");
 
         let out72 = tempfile::tempdir().expect("tmp 72 dir");
-        let pages72 = super::rasterize(pdftoppm, &pdf_path, out72.path(), 72)
-            .expect("rasterize at 72 dpi");
+        let pages72 =
+            super::rasterize(pdftoppm, &pdf_path, out72.path(), 72).expect("rasterize at 72 dpi");
         let out144 = tempfile::tempdir().expect("tmp 144 dir");
         let pages144 = super::rasterize(pdftoppm, &pdf_path, out144.path(), 144)
             .expect("rasterize at 144 dpi");
@@ -172,8 +182,8 @@ mod tests {
 
         let out = tempfile::tempdir().expect("tmp page dir");
         let pdftoppm = Path::new("pdftoppm");
-        let pages = super::rasterize(pdftoppm, &pdf_path, out.path(), 72)
-            .expect("rasterize fixture pdf");
+        let pages =
+            super::rasterize(pdftoppm, &pdf_path, out.path(), 72).expect("rasterize fixture pdf");
 
         // 2 pages, sorted ascending, each one rasterizes to a non-empty PNG whose
         // trailing number parses to 1 then 2.
@@ -200,7 +210,9 @@ mod tests {
             .status()
             .is_err()
         {
-            eprintln!("skipping render_pages_returns_nonempty_pngs_and_caches: pdftoppm not on PATH");
+            eprintln!(
+                "skipping render_pages_returns_nonempty_pngs_and_caches: pdftoppm not on PATH"
+            );
             return;
         }
 
@@ -213,7 +225,12 @@ mod tests {
 
         let pages = crate::render_pages(pdftoppm, &pdf_path, 72, cache.path())
             .expect("render_pages on fixture");
-        assert_eq!(pages.len(), 2, "expected 2 preview PNGs, got {}", pages.len());
+        assert_eq!(
+            pages.len(),
+            2,
+            "expected 2 preview PNGs, got {}",
+            pages.len()
+        );
         for (i, p) in pages.iter().enumerate() {
             assert_eq!(p.extension().unwrap(), "png");
             assert!(p.exists(), "page {} png missing", i + 1);
@@ -228,6 +245,56 @@ mod tests {
         let again = crate::render_pages(pdftoppm, &pdf_path, 72, cache.path())
             .expect("render_pages cache hit");
         assert_eq!(again, pages, "cache hit must return the same page paths");
+    }
+
+    // Lazy preview path: `render_page` renders ONE page on demand (the GUI no longer
+    // rasterizes every page on import). Prove it returns the requested page, reuses
+    // the cache, and Errs for an out-of-range page (the frontend's end-of-doc signal).
+    #[test]
+    fn render_page_single_and_rejects_out_of_range() {
+        if std::process::Command::new("pdftoppm")
+            .arg("-v")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping render_page_single_and_rejects_out_of_range: pdftoppm not on PATH");
+            return;
+        }
+
+        let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
+        let pdf_path = pdf_dir.path().join("fixture.pdf");
+        std::fs::write(&pdf_path, minimal_two_page_pdf()).expect("write fixture pdf");
+
+        let cache = tempfile::tempdir().expect("tmp cache dir");
+        let pdftoppm = Path::new("pdftoppm");
+
+        let p1 = crate::render_page(pdftoppm, &pdf_path, 72, cache.path(), 1).expect("page 1");
+        assert_eq!(
+            trailing_number(&p1),
+            Some(1),
+            "page 1 file should be page-1"
+        );
+        assert!(p1.exists() && std::fs::metadata(&p1).unwrap().len() > 0);
+
+        let p2 = crate::render_page(pdftoppm, &pdf_path, 72, cache.path(), 2).expect("page 2");
+        assert_eq!(
+            trailing_number(&p2),
+            Some(2),
+            "page 2 file should be page-2"
+        );
+
+        // A page beyond the doc must Err even though the cache dir now holds pages 1-2.
+        assert!(
+            crate::render_page(pdftoppm, &pdf_path, 72, cache.path(), 3).is_err(),
+            "page 3 of a 2-page PDF must be out-of-range, not a stale cache hit"
+        );
+
+        // Re-rendering page 1 is a cache hit: same path, no dependence on pdftoppm.
+        let again =
+            crate::render_page(pdftoppm, &pdf_path, 72, cache.path(), 1).expect("cache hit");
+        assert_eq!(again, p1, "cache hit must return the same page path");
     }
 
     // Smallest valid 2-page PDF pdftoppm accepts: a Catalog -> Pages with two

@@ -28,6 +28,12 @@ use unlocr::model::cache_dir;
 /// GGUFs so a single cache dir holds everything the app persists.
 const STORE_FILE: &str = "jobs.json";
 
+/// Cap on retained jobs. The store is rewritten in full on every record and the
+/// Library/Board render every job as a DOM node, so an uncapped history grows both
+/// the file-rewrite cost and the webview node count without bound. Keep the most
+/// recent N (insertion-ordered, so the tail is newest).
+const MAX_JOBS: usize = 500;
+
 /// One OCR run as the Library/Board UI renders it. Field names are camelCase on
 /// the wire so the JS side reads `job.inputPath`, `job.outputPath`, etc. without
 /// a rename layer. `options` mirrors the `OcrOptions` the run actually used.
@@ -157,22 +163,11 @@ pub fn save_jobs(jobs: &[Job]) -> Result<(), String> {
     }
     let file = JobsFile {
         version: 1,
-        jobs: jobs.to_vec(),
+        jobs: crate::jsonstore::cap_to_recent(jobs.to_vec(), MAX_JOBS),
     };
-    let bytes = serde_json::to_vec_pretty(&file)
-        .map_err(|e| format!("could not serialize jobs: {e}"))?;
-    write_atomic(&path, &bytes)
-}
-
-/// Write `bytes` to `path` via a temp file + rename so a partial write never
-/// leaves a half-written store. Falls back to a direct write if the temp path
-/// cannot be constructed (e.g. the cache dir has no name component).
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes)
-        .map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| format!("could not finalize store at {}: {e}", path.display()))
+    let bytes =
+        serde_json::to_vec_pretty(&file).map_err(|e| format!("could not serialize jobs: {e}"))?;
+    crate::jsonstore::write_atomic(&path, &bytes)
 }
 
 /// Append-or-update by id, then persist. Used by both the "record a fresh run"
@@ -216,7 +211,13 @@ pub fn make_id(input_path: &str, created_at: u64) -> String {
     // honoring the "fs-safe" contract.
     let clean: String = stem
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let mut h = DefaultHasher::new();
     input_path.hash(&mut h);
@@ -284,7 +285,10 @@ mod tests {
         assert_eq!(back.jobs[0].input_path, "/tmp/sample.pdf");
         assert_eq!(back.jobs[0].status, "done");
         // camelCase on the wire (regression guard for the serde rename).
-        assert!(json.contains("\"inputPath\""), "expected camelCase inputPath");
+        assert!(
+            json.contains("\"inputPath\""),
+            "expected camelCase inputPath"
+        );
         assert!(json.contains("\"outputPath\""));
         assert!(json.contains("\"maxTokens\""));
         assert!(json.contains("\"keepImages\""));
@@ -299,11 +303,15 @@ mod tests {
         assert_eq!(a, b, "same input+time must be stable");
         // ASCII-only fs-safe: is_ascii_alphanumeric, not the Unicode is_alphanumeric.
         assert!(
-            a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "id must be fs-safe (ASCII): {a}"
         );
         assert!(a.starts_with("12345-"));
-        assert!(a.contains("My_Report"), "stem kept, unsafe chars mapped: {a}");
+        assert!(
+            a.contains("My_Report"),
+            "stem kept, unsafe chars mapped: {a}"
+        );
     }
 
     /// Non-ASCII stems must be sanitized to `_` (the old is_alphanumeric leaked CJK).
@@ -311,7 +319,8 @@ mod tests {
     fn make_id_sanitizes_non_ascii() {
         let id = make_id("/docs/報告.pdf", 999);
         assert!(
-            id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            id.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "non-ASCII must be mapped to '_': {id}"
         );
     }
@@ -322,7 +331,10 @@ mod tests {
     fn make_id_disambiguates_same_stem_different_path() {
         let a = make_id("/a/report.pdf", 100);
         let b = make_id("/b/report.pdf", 100);
-        assert_ne!(a, b, "different paths, same stem+time must differ: {a} == {b}");
+        assert_ne!(
+            a, b,
+            "different paths, same stem+time must differ: {a} == {b}"
+        );
     }
 
     /// `JobOptions::from_opts` must echo each field verbatim.
@@ -334,6 +346,37 @@ mod tests {
         assert_eq!(o.dpi, 300);
         assert_eq!(o.prompt, "<|grounding|>x");
         assert!(o.keep_images);
+    }
+
+    /// The cap keeps exactly MAX_JOBS, drops the OLDEST, and keeps the newest tail.
+    /// Pure helper, so no cache dir is touched.
+    #[test]
+    fn cap_to_recent_keeps_newest_tail() {
+        let mk = |i: u64| Job {
+            id: format!("{i}-x"),
+            input_path: format!("/tmp/{i}.pdf"),
+            options: JobOptions::from_opts("Q8_0", 4096, 144, "p", false),
+            status: "done".into(),
+            output_path: String::new(),
+            error: String::new(),
+            created_at: i,
+            updated_at: i,
+        };
+        // Under the cap: unchanged.
+        let few: Vec<Job> = (0..10).map(mk).collect();
+        assert_eq!(crate::jsonstore::cap_to_recent(few, MAX_JOBS).len(), 10);
+
+        // Over the cap: trimmed to MAX_JOBS, oldest dropped, newest kept. (The cap
+        // logic itself is covered in jsonstore; this asserts MAX_JOBS is wired.)
+        let many: Vec<Job> = (0..(MAX_JOBS as u64 + 50)).map(mk).collect();
+        let capped = crate::jsonstore::cap_to_recent(many, MAX_JOBS);
+        assert_eq!(capped.len(), MAX_JOBS, "must trim to the cap");
+        assert_eq!(capped.first().unwrap().created_at, 50, "oldest 50 dropped");
+        assert_eq!(
+            capped.last().unwrap().created_at,
+            MAX_JOBS as u64 + 49,
+            "newest kept at the tail"
+        );
     }
 
     /// now_secs is monotonic-ish and non-zero on a normal clock.

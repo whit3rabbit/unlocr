@@ -11,7 +11,7 @@
 //! frontend. Transient progress (download percent/speed) is NOT stored here, only
 //! terminal events worth surfacing after the fact. Purely additive module.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +20,11 @@ use unlocr::model::cache_dir;
 /// Co-located with `jobs.json` and the GGUFs so one cache dir holds everything
 /// the app persists.
 const STORE_FILE: &str = "notifications.json";
+
+/// Cap on retained notifications. The list is rewritten in full on every add and
+/// the bell panel renders all of them, so an uncapped store grows unbounded. Keep
+/// the most recent N (insertion-ordered, so the tail is newest).
+const MAX_NOTIFICATIONS: usize = 200;
 
 /// One stored notification. camelCase on the wire so the JS side reads
 /// `n.createdAt` without a rename layer. `kind` is a coarse string
@@ -95,18 +100,11 @@ fn save(items: &[Notification]) -> Result<(), String> {
     }
     let file = NotificationsFile {
         version: 1,
-        notifications: items.to_vec(),
+        notifications: crate::jsonstore::cap_to_recent(items.to_vec(), MAX_NOTIFICATIONS),
     };
     let bytes =
         serde_json::to_vec_pretty(&file).map_err(|e| format!("could not serialize: {e}"))?;
-    write_atomic(&path, &bytes)
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| format!("could not finalize store at {}: {e}", path.display()))
+    crate::jsonstore::write_atomic(&path, &bytes)
 }
 
 /// Next id: `<created_at>-<seq>` where `seq` is one past the largest existing
@@ -199,6 +197,36 @@ mod tests {
         assert_eq!(b, "100-2");
     }
 
+    /// The cap keeps exactly MAX_NOTIFICATIONS, drops the oldest, keeps the newest
+    /// tail. Pure helper, so no cache dir is touched.
+    #[test]
+    fn cap_to_recent_keeps_newest_tail() {
+        let mk = |i: u64| Notification {
+            id: format!("{i}-1"),
+            kind: "info".into(),
+            title: format!("n{i}"),
+            body: String::new(),
+            created_at: i,
+            read: false,
+        };
+        let few: Vec<Notification> = (0..5).map(mk).collect();
+        assert_eq!(
+            crate::jsonstore::cap_to_recent(few, MAX_NOTIFICATIONS).len(),
+            5
+        );
+
+        // Cap logic is covered in jsonstore; this asserts MAX_NOTIFICATIONS is wired.
+        let many: Vec<Notification> = (0..(MAX_NOTIFICATIONS as u64 + 30)).map(mk).collect();
+        let capped = crate::jsonstore::cap_to_recent(many, MAX_NOTIFICATIONS);
+        assert_eq!(capped.len(), MAX_NOTIFICATIONS, "must trim to the cap");
+        assert_eq!(capped.first().unwrap().created_at, 30, "oldest 30 dropped");
+        assert_eq!(
+            capped.last().unwrap().created_at,
+            MAX_NOTIFICATIONS as u64 + 29,
+            "newest kept at the tail"
+        );
+    }
+
     /// Envelope round-trips through serde with camelCase on the wire (regression
     /// guard for the rename the frontend depends on).
     #[test]
@@ -216,7 +244,10 @@ mod tests {
             notifications: vec![n],
         };
         let json = serde_json::to_string(&file).unwrap();
-        assert!(json.contains("\"createdAt\""), "expected camelCase createdAt");
+        assert!(
+            json.contains("\"createdAt\""),
+            "expected camelCase createdAt"
+        );
         assert!(!json.contains("\"created_at\""));
         let back: NotificationsFile = serde_json::from_str(&json).unwrap();
         assert_eq!(back.notifications.len(), 1);

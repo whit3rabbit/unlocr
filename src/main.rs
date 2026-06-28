@@ -26,7 +26,11 @@ const DEEPSEEK_OCR_REPO: &str = "deepseek-ai/DeepSeek-OCR";
 const VLLM_LOCAL_URL: &str = "http://localhost:8000";
 
 #[derive(Parser, Debug)]
-#[command(name = "unlocr", version, about = "OCR PDFs to markdown via Unlimited-OCR + llama.cpp")]
+#[command(
+    name = "unlocr",
+    version,
+    about = "OCR PDFs to markdown via Unlimited-OCR + llama.cpp"
+)]
 struct Args {
     /// Subcommand to execute (e.g. doctor, preflight)
     #[command(subcommand)]
@@ -315,7 +319,16 @@ fn run() -> Res<()> {
 
     if let Some(cmd) = args.command {
         match cmd {
-            Commands::Doctor { llama_bin, model_dir, quant } | Commands::Preflight { llama_bin, model_dir, quant } => {
+            Commands::Doctor {
+                llama_bin,
+                model_dir,
+                quant,
+            }
+            | Commands::Preflight {
+                llama_bin,
+                model_dir,
+                quant,
+            } => {
                 preflight::run_doctor(llama_bin.as_deref(), model_dir, &quant)?;
             }
         }
@@ -375,7 +388,10 @@ fn run() -> Res<()> {
 
     // 2. Ensure model + projector are present (download from HF if missing).
     // Explicit --quant wins; otherwise --quality maps to a quant.
-    let quant = args.quant.clone().unwrap_or_else(|| args.quality.quant().to_string());
+    let quant = args
+        .quant
+        .clone()
+        .unwrap_or_else(|| args.quality.quant().to_string());
     let cache = model::cache_dir(args.model_dir.clone())?;
     // Custom-GGUF mode: route through ensure_with_overrides so override paths are
     // used verbatim (existence-checked in model.rs). The custom model is never
@@ -385,7 +401,10 @@ fn run() -> Res<()> {
     // from model::ensure's CLI output).
     let files = if args.model.is_some() {
         let mut on_progress = |p: unlocr::Progress| {
-            if let unlocr::Progress::Download { pct, done, total, .. } = p {
+            if let unlocr::Progress::Download {
+                pct, done, total, ..
+            } = p
+            {
                 use std::io::Write;
                 print!("\r  {pct:>3}%  ({} / {} MiB)", done >> 20, total >> 20);
                 let _ = std::io::stdout().flush();
@@ -595,11 +614,22 @@ mod tests {
 
         // recursive: includes nested b.pdf
         let deep = expand_inputs(&[root.to_path_buf()], None, true).unwrap();
-        assert_eq!(deep, vec![root.join("UPPER.PDF"), root.join("a.pdf"), root.join("sub/b.pdf")]);
+        assert_eq!(
+            deep,
+            vec![
+                root.join("UPPER.PDF"),
+                root.join("a.pdf"),
+                root.join("sub/b.pdf")
+            ]
+        );
 
         // dedup: a.pdf via both folder and --from-list appears once
         let list = root.join("list.txt");
-        fs::write(&list, format!("# comment\n\n{}\n", root.join("a.pdf").display())).unwrap();
+        fs::write(
+            &list,
+            format!("# comment\n\n{}\n", root.join("a.pdf").display()),
+        )
+        .unwrap();
         let merged = expand_inputs(&[root.to_path_buf()], Some(&list), false).unwrap();
         assert_eq!(merged, vec![root.join("UPPER.PDF"), root.join("a.pdf")]);
 
@@ -617,11 +647,17 @@ mod tests {
 
         // glob pattern: matches a.pdf, skips note.txt (is_pdf filter)
         let pat = PathBuf::from(root.join("*.pdf").to_str().unwrap());
-        assert_eq!(expand_inputs(&[pat], None, false).unwrap(), vec![root.join("a.pdf")]);
+        assert_eq!(
+            expand_inputs(&[pat], None, false).unwrap(),
+            vec![root.join("a.pdf")]
+        );
 
         // literal non-existent path passes through verbatim (run_pdf validates later)
         let lit = PathBuf::from("does-not-exist.pdf");
-        assert_eq!(expand_inputs(&[lit.clone()], None, false).unwrap(), vec![lit]);
+        assert_eq!(
+            expand_inputs(std::slice::from_ref(&lit), None, false).unwrap(),
+            vec![lit]
+        );
     }
 
     #[test]
@@ -637,7 +673,10 @@ mod tests {
         assert_eq!(Task::Figure.prompt(), "Parse the figure.");
         // CLI parity: the default task's prompt must equal the no-flags default so
         // `unlocr file.pdf` behaves identically before and after presets existed.
-        assert_eq!(Task::Markdown.prompt(), unlocr::OcrOptions::default().prompt);
+        assert_eq!(
+            Task::Markdown.prompt(),
+            unlocr::OcrOptions::default().prompt
+        );
     }
 
     #[test]
@@ -674,15 +713,20 @@ mod tests {
         let mut args = Args::parse_from(["unlocr", "x.pdf", "--gpu"]);
         args.apply_gpu_defaults();
         assert_eq!(args.endpoint.as_deref(), Some("http://localhost:8000"));
-        assert_eq!(args.endpoint_model.as_deref(), Some("deepseek-ai/DeepSeek-OCR"));
+        assert_eq!(
+            args.endpoint_model.as_deref(),
+            Some("deepseek-ai/DeepSeek-OCR")
+        );
 
         // An explicit --endpoint wins; --gpu only fills the model default.
-        let mut args = Args::parse_from([
-            "unlocr", "x.pdf", "--gpu", "--endpoint", "http://host:9000",
-        ]);
+        let mut args =
+            Args::parse_from(["unlocr", "x.pdf", "--gpu", "--endpoint", "http://host:9000"]);
         args.apply_gpu_defaults();
         assert_eq!(args.endpoint.as_deref(), Some("http://host:9000"));
-        assert_eq!(args.endpoint_model.as_deref(), Some("deepseek-ai/DeepSeek-OCR"));
+        assert_eq!(
+            args.endpoint_model.as_deref(),
+            Some("deepseek-ai/DeepSeek-OCR")
+        );
 
         // No --gpu = no remote defaults injected (stays local GGUF path).
         let mut args = Args::parse_from(["unlocr", "x.pdf"]);

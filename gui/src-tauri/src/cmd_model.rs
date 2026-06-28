@@ -91,7 +91,13 @@ pub(crate) fn preflight(
 ) -> Result<PreflightReport, String> {
     let llama_override = llama_bin.map(PathBuf::from);
     let quant = quant
-        .map(|q| if q.trim().is_empty() { OcrOptions::default().quant } else { q })
+        .map(|q| {
+            if q.trim().is_empty() {
+                OcrOptions::default().quant
+            } else {
+                q
+            }
+        })
         .unwrap_or_else(|| OcrOptions::default().quant);
 
     // Validate the webview-supplied quant before it reaches check_presence:
@@ -137,8 +143,10 @@ pub(crate) fn preflight(
         Err(e) => {
             // Still report model presence so the UI can show "install llama-server,
             // your model is already downloaded" rather than just the error.
-            let (_, model_present, _, mmproj_present) =
-                unlocr::model::check_presence(&cache, &quant).unwrap_or((Default::default(), false, Default::default(), false));
+            let (_, model_present, _, mmproj_present) = unlocr::model::check_presence(
+                &cache, &quant,
+            )
+            .unwrap_or((Default::default(), false, Default::default(), false));
             return Ok(PreflightReport {
                 ok: false,
                 build_number: None,
@@ -157,8 +165,8 @@ pub(crate) fn preflight(
     // sync command thread.
     let build_number = unlocr::preflight::build_number(&tools.llama_server);
 
-    let (_, model_present, _, mmproj_present) =
-        unlocr::model::check_presence(&cache, &quant).unwrap_or((Default::default(), false, Default::default(), false));
+    let (_, model_present, _, mmproj_present) = unlocr::model::check_presence(&cache, &quant)
+        .unwrap_or((Default::default(), false, Default::default(), false));
 
     Ok(PreflightReport {
         ok: true,
@@ -185,6 +193,8 @@ pub(crate) fn preflight(
 ///
 /// Replaces any currently-loaded model, dropping the old `Server` first so its
 /// RAM is freed before the new one is started.
+// Args are the invoke contract (one per JS field); a struct would not reduce them.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub(crate) async fn load_model(
     app: AppHandle,
@@ -199,13 +209,19 @@ pub(crate) async fn load_model(
     model_file: Option<String>,
     mmproj_file: Option<String>,
 ) -> Result<ModelStatus, String> {
-    let llama_override = llama_bin.filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+    let llama_override = llama_bin
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from);
     // Custom-GGUF mode (local only): when set, the model file is used directly,
     // skipping the HF download and the quant naming convention. mmproj_file is an
     // optional projector override; omit it to use the stock cached/downloaded one.
     // Empty string -> None (same trim pattern as the other path fields).
-    let model_override = model_file.filter(|s| !s.trim().is_empty()).map(PathBuf::from);
-    let mmproj_override = mmproj_file.filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+    let model_override = model_file
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from);
+    let mmproj_override = mmproj_file
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from);
     // Overrides apply to the local spawn only; the remote arm ignores them. Skip the
     // pairing guard in remote mode so a stale projector pick (picker hidden but its
     // dataset persists after switching local->remote) can't spuriously fail a remote load.
@@ -221,7 +237,8 @@ pub(crate) async fn load_model(
         return Err("image_max_tokens must be greater than 0".to_string());
     }
 
-    tauri::async_runtime::spawn_blocking(move || -> Result<ModelStatus, String> {
+    let app_for_join = app.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || -> Result<ModelStatus, String> {
         // Free any already-loaded model BEFORE starting a new one so two models
         // never sit in RAM at once (the whole point of explicit load/unload).
         {
@@ -230,6 +247,10 @@ pub(crate) async fn load_model(
             // `state` at block end. Recover from a poisoned lock rather than skip.
             let mut g = state.model.lock().unwrap_or_else(|p| p.into_inner());
             *g = None; // drops old Server -> kills old llama-server
+                       // Clear the stale pid in the same breath: the old server is now dead, so
+                       // a Stop landing in the window before the new pid is installed below must
+                       // not `kill -9` a recycled pid. The new pid is set after the new Server is up.
+            *state.server_pid.lock().unwrap_or_else(|p| p.into_inner()) = None;
         }
 
         // pdftoppm is always needed (rasterization is local even for remote
@@ -273,10 +294,21 @@ pub(crate) async fn load_model(
                 let cache = unlocr::model::cache_dir(None).map_err(|e| e.to_string())?;
                 let app_dl = app.clone();
                 let mut on_progress = |p: Progress| {
-                    if let Progress::Download { name, pct, done, total } = p {
+                    if let Progress::Download {
+                        name,
+                        pct,
+                        done,
+                        total,
+                    } = p
+                    {
                         let _ = app_dl.emit(
                             "ocr://progress",
-                            DownloadProgress { name, pct, done, total },
+                            DownloadProgress {
+                                name,
+                                pct,
+                                done,
+                                total,
+                            },
                         );
                     }
                 };
@@ -313,7 +345,12 @@ pub(crate) async fn load_model(
                         .unwrap_or_else(|| "custom model".to_string()),
                     None => format!("Unlimited-OCR {quant}"),
                 };
-                (Backend::Local(srv), label, "local".to_string(), tools.pdftoppm)
+                (
+                    Backend::Local(srv),
+                    label,
+                    "local".to_string(),
+                    tools.pdftoppm,
+                )
             }
         };
 
@@ -334,6 +371,10 @@ pub(crate) async fn load_model(
         if let Ok(mut sp) = state.server_pid.lock() {
             *sp = pid;
         }
+        // Start the idle clock at load so the watcher (lib.rs) measures idleness from
+        // a freshly-loaded-but-unused model too, not only from the last run.
+        *state.last_used.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(std::time::Instant::now());
         state.cancel.store(false, Ordering::SeqCst);
         Ok(ModelStatus {
             loaded: true,
@@ -341,17 +382,24 @@ pub(crate) async fn load_model(
             label,
         })
     })
-    .await
-    .map_err(|e| format!("load worker join failed: {e}"))?
+    .await;
+    match res {
+        Ok(val) => val,
+        Err(e) => {
+            let state = app_for_join.state::<AppState>();
+            *state.model.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            *state.server_pid.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            Err(format!("load worker join failed: {e}"))
+        }
+    }
 }
 
 /// Unload the current model: drop the held `Server` (kills llama-server, frees
 /// RAM) or forget the remote endpoint. Run OCR is gated off afterward.
 #[tauri::command]
 pub(crate) fn unload_model(state: State<'_, AppState>) -> ModelStatus {
-    if let Ok(mut g) = state.model.lock() {
-        *g = None;
-    }
+    let mut g = state.model.lock().unwrap_or_else(|p| p.into_inner());
+    *g = None;
     ModelStatus {
         loaded: false,
         mode: String::new(),
@@ -369,38 +417,63 @@ pub(crate) fn unload_model(state: State<'_, AppState>) -> ModelStatus {
 #[tauri::command]
 pub(crate) fn stop_ocr(state: State<'_, AppState>) {
     state.cancel.store(true, Ordering::SeqCst);
-    let pid = state
-        .server_pid
-        .lock()
-        .ok()
-        .and_then(|g| *g);
+    let pid = *state.server_pid.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(pid) = pid {
         // ponytail: shell-kill by pid; the child handle lives inside the Server
         // behind the held model lock, which stop_ocr cannot take mid-run.
-        #[cfg(unix)]
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status();
-        #[cfg(windows)]
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .status();
-        // The server is dead; clear the pid so a stale value can't be re-killed.
-        if let Ok(mut g) = state.server_pid.lock() {
-            *g = None;
+        //
+        // Guard: verify the pid is still OUR llama-server before SIGKILL. If the
+        // server already exited and the OS recycled the pid, killing it blind would
+        // take out an unrelated process the user happens to own. Only kill on a
+        // positive identity match; otherwise just clear the stale pid.
+        if pid_is_llama(pid) {
+            #[cfg(unix)]
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status();
+            #[cfg(windows)]
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .status();
         }
+        // Clear the pid either way so a stale value can't be re-killed next call.
+        *state.server_pid.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
+}
+
+/// True if `pid` is currently a llama-server process. Asks the OS for the process's
+/// command name and matches it; on any spawn/parse failure returns false (fail
+/// closed: do not kill a pid we cannot positively identify). The OS query lives
+/// here; the `pid_names_llama` string predicate is split out for unit tests.
+fn pid_is_llama(pid: u32) -> bool {
+    #[cfg(unix)]
+    let out = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output();
+    #[cfg(windows)]
+    let out = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => pid_names_llama(&String::from_utf8_lossy(&o.stdout)),
+        _ => false,
+    }
+}
+
+/// Whether a `ps -o comm=` / `tasklist` line names a llama-server process. Matches
+/// the basename so a full path (`/opt/homebrew/bin/llama-server`) still counts, and
+/// rejects empty output (no such pid) or an unrelated process (`bash`, `Terminal`).
+fn pid_names_llama(proc_listing: &str) -> bool {
+    proc_listing
+        .lines()
+        .any(|l| l.to_ascii_lowercase().contains("llama-server"))
 }
 
 /// Current load state for the titlebar badge + the Run OCR gate.
 #[tauri::command]
 pub(crate) fn model_status(state: State<'_, AppState>) -> ModelStatus {
-    match state
-        .model
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().map(|lm| (lm.mode.clone(), lm.label.clone())))
-    {
+    let g = state.model.lock().unwrap_or_else(|p| p.into_inner());
+    match g.as_ref().map(|lm| (lm.mode.clone(), lm.label.clone())) {
         Some((mode, label)) => ModelStatus {
             loaded: true,
             mode,
@@ -432,17 +505,34 @@ pub(crate) fn list_local_models() -> Vec<String> {
 pub(crate) struct CacheInfo {
     /// Absolute path of the model cache directory (for display).
     path: String,
-    /// Total size of all .gguf files in the cache, in bytes.
+    /// Total reclaimable size in bytes: all .gguf files PLUS the previews/ dir.
     size_bytes: u64,
+}
+
+/// Recursively sum the byte size of every file under `dir`. Best-effort: unreadable
+/// entries are skipped and a missing dir is 0. Used to report the preview cache size
+/// (rendered page PNGs), which is otherwise invisible disk the Clear button reclaims.
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            match e.metadata() {
+                Ok(m) if m.is_dir() => total += dir_size(&e.path()),
+                Ok(m) => total += m.len(),
+                Err(_) => {}
+            }
+        }
+    }
+    total
 }
 
 #[tauri::command]
 pub(crate) fn get_cache_info() -> Result<CacheInfo, String> {
     let cache = unlocr::model::cache_dir(None).map_err(|e| e.to_string())?;
     let path = cache.display().to_string();
-    // Sum the size of every .gguf file (model + mmproj). Non-.gguf files (logs,
-    // settings.json, jobs.json, previews/) are excluded — they are not model data.
-    let size_bytes = std::fs::read_dir(&cache)
+    // Sum the size of every .gguf file (model + mmproj). Other loose files (logs,
+    // settings.json, jobs.json) are excluded — they are not reclaimable model data.
+    let gguf_bytes: u64 = std::fs::read_dir(&cache)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
                 .filter(|e| {
@@ -457,14 +547,18 @@ pub(crate) fn get_cache_info() -> Result<CacheInfo, String> {
                 .sum()
         })
         .unwrap_or(0);
+    // Add the preview cache (page PNGs under previews/): it grows with every PDF
+    // previewed and is what Clear cache now reclaims, so it must be visible here too.
+    let size_bytes = gguf_bytes + dir_size(&cache.join("previews"));
     Ok(CacheInfo { path, size_bytes })
 }
 
-/// Delete all .gguf files from the model cache (the model and projector GGUFs
-/// for every quant). Non-model files (settings.json, jobs.json, previews/) are
-/// left intact. Any currently-loaded model is NOT unloaded first: the caller is
-/// responsible for unloading before clearing if that matters. Errors are returned
-/// as a string so the frontend can surface them inline.
+/// Delete all .gguf files from the model cache (the model and projector GGUFs for
+/// every quant) AND the previews/ dir (rendered page PNGs, regenerable and otherwise
+/// unbounded). Other files (settings.json, jobs.json) are left intact. Any
+/// currently-loaded model is NOT unloaded first: the caller is responsible for
+/// unloading before clearing if that matters. Errors are returned as a string so the
+/// frontend can surface them inline.
 #[tauri::command]
 pub(crate) fn clear_model_cache() -> Result<(), String> {
     let cache = unlocr::model::cache_dir(None).map_err(|e| e.to_string())?;
@@ -478,9 +572,35 @@ pub(crate) fn clear_model_cache() -> Result<(), String> {
             }
         }
     }
+    // Drop the whole preview cache. NotFound is fine (nothing previewed yet).
+    match std::fs::remove_dir_all(cache.join("previews")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => errors.push(format!("previews/: {e}")),
+    }
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(format!("some files could not be removed: {}", errors.join("; ")))
+        Err(format!(
+            "some files could not be removed: {}",
+            errors.join("; ")
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pid_names_llama;
+
+    /// The kill guard must fire only on a real llama-server listing: match the bare
+    /// name and a full path, reject empty (recycled/dead pid) and unrelated procs.
+    #[test]
+    fn pid_names_llama_matches_only_the_server() {
+        assert!(pid_names_llama("llama-server\n"));
+        assert!(pid_names_llama("/opt/homebrew/bin/llama-server\n"));
+        assert!(pid_names_llama("LLAMA-SERVER")); // case-insensitive
+        assert!(!pid_names_llama("")); // no such pid
+        assert!(!pid_names_llama("bash\n"));
+        assert!(!pid_names_llama("Terminal\n"));
     }
 }

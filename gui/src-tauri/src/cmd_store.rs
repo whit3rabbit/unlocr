@@ -43,6 +43,8 @@ pub(crate) fn jobs_store_path() -> Result<String, String> {
 /// an in-memory list without a full reload. A store write failure is surfaced as
 /// Err rather than swallowed, but the OCR result it accompanies has already been
 /// delivered to the user, so this never rolls back a successful run.
+// Each arg is an invoke field (the JS contract); a struct would not reduce them.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub(crate) fn record_job(
     input_path: String,

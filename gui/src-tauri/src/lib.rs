@@ -17,6 +17,9 @@
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager, RunEvent};
 
+// Shared helpers for the JSON-under-cache stores (atomic write + history cap),
+// used by store.rs / notifications.rs / settings.rs so the logic lives once.
+mod jsonstore;
 // Persisted job store (EH-0006 bite 1). Purely additive: a new module exposing
 // `list_jobs` / `record_job` commands. No existing command changes.
 mod store;
@@ -41,7 +44,7 @@ use cmd_model::{
     clear_model_cache, get_cache_info, list_local_models, load_model, model_status, preflight,
     stop_ocr, unload_model,
 };
-use cmd_run::{read_text_file, render_pages, run_ocr};
+use cmd_run::{read_text_file, render_page, render_pages, run_ocr};
 use cmd_store::{
     add_notification, clear_all_notifications, clear_notification, get_settings, jobs_store_path,
     list_jobs, list_notifications, mark_notifications_read, record_job, save_settings,
@@ -61,10 +64,65 @@ pub fn run() {
             if let Ok(cache) = unlocr::model::cache_dir(None) {
                 let previews = cache.join("previews");
                 let _ = std::fs::create_dir_all(&previews);
+                // SECURITY: scope is the `previews` SUBDIR only, never the cache root.
+                // Widening this to `cache` would expose every cached file (the GGUF
+                // weights, jobs.json, settings.json with the remote API key) to the
+                // renderer via `asset:` (img-src allows it in tauri.conf.json). Keep
+                // it pinned to previews; do not loosen this casually.
+                debug_assert!(
+                    previews.ends_with("previews"),
+                    "asset scope must stay the previews subdir, not the cache root"
+                );
                 if let Err(e) = app.asset_protocol_scope().allow_directory(&previews, true) {
                     eprintln!("[setup] asset scope allow_directory failed: {e}");
                 }
             }
+
+            // Idle-unload watcher: the warm model (a held llama-server) is the app's
+            // dominant footprint (~6-8 GB GGUF). A walk-away user keeps it resident
+            // forever otherwise, so drop it after `idle_unload_minutes` of no load/run
+            // to reclaim that RAM (reload is required before the next run). A plain
+            // thread (60s tick) avoids assuming a tokio runtime; the model lock makes
+            // it safe (try_lock fails while a run holds it, so it never unloads mid-run).
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                let minutes = settings::load_settings().idle_unload_minutes;
+                if minutes == 0 {
+                    continue; // disabled: model stays warm until explicit unload / exit
+                }
+                let state = handle.state::<AppState>();
+                // None = never loaded -> nothing to unload. Otherwise idle = time
+                // since the last load or run-end (stamped in cmd_model / cmd_run).
+                let idle = state
+                    .last_used
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .map(|t| t.elapsed());
+                let Some(idle) = idle else { continue };
+                if idle < std::time::Duration::from_secs(minutes as u64 * 60) {
+                    continue;
+                }
+                // try_lock, NOT lock: a run holds the model lock for its whole batch,
+                // so a failed try_lock means a run is in flight — skip this tick rather
+                // than block (and never unload mid-run). Tight inner scope so the
+                // try_lock guard drops before `state` is reused below.
+                let unloaded = {
+                    match state.model.try_lock() {
+                        Ok(mut g) if g.is_some() => {
+                            *g = None; // drops Server -> kills llama-server, frees RAM
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if unloaded {
+                    *state.server_pid.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                    *state.last_used.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                    // Tell the UI so the titlebar badge + Run gate reflect the unload.
+                    let _ = handle.emit("model://unloaded", ());
+                }
+            });
 
             // Native File menu. The action items just emit one event; the
             // frontend reuses the existing toolbar buttons (no logic forked
@@ -107,6 +165,7 @@ pub fn run() {
             preflight,
             run_ocr,
             render_pages,
+            render_page,
             read_text_file,
             list_jobs,
             jobs_store_path,
@@ -135,9 +194,8 @@ pub fn run() {
             // llama-server; clear it explicitly here instead.
             if let RunEvent::Exit = event {
                 if let Some(state) = app_handle.try_state::<AppState>() {
-                    if let Ok(mut g) = state.model.lock() {
-                        *g = None; // drops Server -> kills llama-server
-                    }
+                    let mut g = state.model.lock().unwrap_or_else(|p| p.into_inner());
+                    *g = None; // drops Server -> kills llama-server
                 }
             }
         });

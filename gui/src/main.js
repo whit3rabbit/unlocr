@@ -24,6 +24,15 @@ import { wireSettings, wireCacheControls } from "./settings.js";
 import { initNotifications } from "./toasts.js";
 import { wirePageSelection, renderEffectiveSummary } from "./options.js";
 import { preflightOnLoad } from "./ocr-events.js";
+import { parentDirOf, splitPath } from "./paths.js";
+
+// Derive the default output filename for a single PDF: <stem>.md (mirrors the
+// backend's blank-filename default). Strips the last extension off the basename.
+function mdName(path) {
+  const r = splitPath(path);
+  if (!r) return "";
+  return r.name.replace(/\.[^.]+$/, "") + ".md";
+}
 
 window.addEventListener("DOMContentLoaded", () => {
   const library = makeLibrary();
@@ -66,6 +75,12 @@ window.addEventListener("DOMContentLoaded", () => {
   markCachedQuants();
   wireCacheControls();
   refreshModelStatus(ui);
+  // The backend idle-unload watcher drops the warm model after N idle minutes and
+  // emits model://unloaded; refresh the badge + Run gate so the UI reflects it.
+  const unloadEv = window.__TAURI__ && window.__TAURI__.event;
+  if (unloadEv && unloadEv.listen) {
+    unloadEv.listen("model://unloaded", () => refreshModelStatus(ui));
+  }
   // Notification bell + panel + download toasts. Self-contained; silent in a
   // plain browser (no Tauri). Seeds the unread badge from the persisted store.
   initNotifications();
@@ -99,11 +114,44 @@ window.addEventListener("DOMContentLoaded", () => {
   // otherwise disable + clear so a stale name can't apply to a batch (the backend
   // also rejects out_file with >1 input). Called on every queue change.
   const outFileEl = document.getElementById("outFile");
+  const outFolderEl = document.getElementById("outFolder");
   function updateOutFileState() {
     if (!outFileEl) return;
     const single = queuedPaths.length === 1;
     outFileEl.disabled = !single;
-    if (!single) outFileEl.value = "";
+    // Clear for batches; also drop the autofill flag so a later single selection
+    // re-fills cleanly (a user-typed name would already have cleared the flag).
+    if (!single) {
+      outFileEl.value = "";
+      delete outFileEl.dataset.autofilled;
+    }
+  }
+
+  // Autofill a field with a default WITHOUT clobbering a user-typed value: write
+  // only when the field is empty or still holds a previous autofill (data-autofilled).
+  // A keystroke in the field clears the flag (see listeners below), so once the user
+  // edits it we never overwrite. Lets folder/filename follow the selected PDF until
+  // the user takes ownership of the value.
+  function autofill(el, value) {
+    if (!el || el.disabled) return;
+    const owned = el.value && !el.dataset.autofilled;
+    if (owned) return;
+    el.value = value;
+    if (value) el.dataset.autofilled = "1";
+    else delete el.dataset.autofilled;
+  }
+  [outFolderEl, outFileEl].forEach((el) => {
+    if (el) el.addEventListener("input", () => delete el.dataset.autofilled);
+  });
+
+  // Prefill the output folder + filename from the single queued PDF (folder = its
+  // directory, filename = <stem>.md, matching the backend's blank defaults). No-op
+  // for 0/2+ files: folder is left as-is, filename is gated by updateOutFileState.
+  function autofillOutputs() {
+    if (queuedPaths.length !== 1) return;
+    const path = queuedPaths[0];
+    autofill(outFolderEl, parentDirOf(path));
+    autofill(outFileEl, mdName(path));
   }
 
   // Apply queuedPaths to the file-rail display and clear the text field
@@ -115,6 +163,7 @@ window.addEventListener("DOMContentLoaded", () => {
     // this is the first item only (the rail shows the full list).
     if (pathInput) pathInput.value = queuedPaths.length === 1 ? queuedPaths[0] : "";
     updateOutFileState();
+    autofillOutputs();
   }
 
   if (pathInput) {
@@ -124,6 +173,7 @@ window.addEventListener("DOMContentLoaded", () => {
       queuedPaths = v ? [v] : [];
       rail.renderFiles(queuedPaths);
       updateOutFileState();
+      autofillOutputs();
     };
     // Preview render shells out to pdftoppm; only refresh on blur/Enter/change,
     // not per keystroke.
@@ -170,7 +220,6 @@ window.addEventListener("DOMContentLoaded", () => {
   // Output-folder picker: native folder dialog (same plugin as the PDF/GGUF
   // pickers). Sets the #outFolder field; blank field = write beside the input.
   const outFolderBtn = document.getElementById("outFolderBtn");
-  const outFolderEl = document.getElementById("outFolder");
   if (outFolderBtn && outFolderEl) {
     outFolderBtn.addEventListener("click", async () => {
       const dialog = window.__TAURI__ && window.__TAURI__.dialog;
@@ -180,7 +229,12 @@ window.addEventListener("DOMContentLoaded", () => {
       }
       try {
         const dir = await dialog.open({ directory: true, multiple: false });
-        if (typeof dir === "string" && dir.trim()) outFolderEl.value = dir;
+        // A picked folder is a deliberate user choice: set it and drop the autofill
+        // flag so a later PDF selection does not overwrite it.
+        if (typeof dir === "string" && dir.trim()) {
+          outFolderEl.value = dir;
+          delete outFolderEl.dataset.autofilled;
+        }
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("[output] folder picker failed:", err.message);

@@ -19,6 +19,7 @@ export function makeUi() {
   // Run popup: a dismissible panel mirroring the progress bar + live token log,
   // with a Stop button. Closing it minimizes to a clickable toast that reopens.
   const popup = document.getElementById("runPopup");
+  const backdrop = document.getElementById("runPopupBackdrop");
   const popupFill = document.getElementById("runPopupFill");
   const popupStatus = document.getElementById("runPopupStatus");
   const popupLog = document.getElementById("runPopupLog");
@@ -29,6 +30,50 @@ export function makeUi() {
   // subscribeOcrEvents) so the partial-text handler routes through ui.appendPartial
   // and shares state with reset()/clearPartial().
   let streamPre = null;
+  // Live-transcript flow control. A repetition-looping model streams tokens faster
+  // than the DOM can absorb one write+reflow per token, which starves the JS event
+  // loop (the Stop click never runs) and grows memory without bound. So buffer the
+  // chunks and flush once per animation frame, and cap the rendered text length.
+  let pendingChunk = "";
+  let pendingPage = null;
+  let rafHandle = 0;
+  const STREAM_CAP = 100000;
+  const STREAM_KEEP = 80000;
+  function flushPartial() {
+    rafHandle = 0;
+    const chunk = pendingChunk;
+    const page = pendingPage;
+    pendingChunk = "";
+    if (!chunk) return;
+    if (body) {
+      if (streamPre === null || streamPre.dataset.page !== String(page)) {
+        if (placeholder) placeholder.hidden = true;
+        streamPre = document.createElement("pre");
+        streamPre.dataset.page = String(page);
+        body.appendChild(streamPre);
+      }
+      streamPre.textContent += chunk;
+      if (streamPre.textContent.length > STREAM_CAP) {
+        streamPre.textContent = streamPre.textContent.slice(-STREAM_KEEP);
+      }
+      body.scrollTop = body.scrollHeight;
+    }
+    if (popupLog) {
+      popupLog.textContent += chunk;
+      if (popupLog.textContent.length > STREAM_CAP) {
+        popupLog.textContent = popupLog.textContent.slice(-STREAM_KEEP);
+      }
+      popupLog.scrollTop = popupLog.scrollHeight;
+    }
+  }
+  function cancelPendingFlush() {
+    if (rafHandle) {
+      cancelAnimationFrame(rafHandle);
+      rafHandle = 0;
+    }
+    pendingChunk = "";
+    pendingPage = null;
+  }
   // Controls greyed out during a run so a second run can't be launched and run
   // options can't change mid-flight. loadModelBtn + importBtn + every #runOpts input.
   function setControlsDisabled(on) {
@@ -107,9 +152,11 @@ export function makeUi() {
     },
     openPopup() {
       if (popup) popup.hidden = false;
+      if (backdrop) backdrop.hidden = false;
     },
     closePopup() {
       if (popup) popup.hidden = true;
+      if (backdrop) backdrop.hidden = true;
     },
     isRunning() {
       return running;
@@ -119,30 +166,20 @@ export function makeUi() {
      *  does not reach for body/placeholder it cannot see in its scope. */
     appendPartial(page, chunk) {
       if (typeof chunk !== "string") return;
-      if (body) {
-        if (streamPre === null || streamPre.dataset.page !== String(page)) {
-          if (placeholder) placeholder.hidden = true;
-          streamPre = document.createElement("pre");
-          streamPre.dataset.page = String(page);
-          body.appendChild(streamPre);
-        }
-        streamPre.textContent += chunk;
-        body.scrollTop = body.scrollHeight;
+      // A new page's chunk flushes the previous page's buffer first, so a page
+      // boundary never gets merged into the wrong <pre>.
+      if (pendingPage !== null && pendingPage !== page && pendingChunk) {
+        flushPartial();
       }
-      if (popupLog) {
-        popupLog.textContent += chunk;
-        // ponytail: the popup log accumulates every page of a batch; cap it so a
-        // long run can't grow it without bound (keep the most recent tail).
-        if (popupLog.textContent.length > 100000) {
-          popupLog.textContent = popupLog.textContent.slice(-80000);
-        }
-        popupLog.scrollTop = popupLog.scrollHeight;
-      }
+      pendingPage = page;
+      pendingChunk += chunk;
+      if (!rafHandle) rafHandle = requestAnimationFrame(flushPartial);
     },
     /** Drop the provisional per-page <pre>s (ocr://done renders the assembled
      *  markdown instead) and reset the stream cursor. Popup log is left intact so
      *  the user can still scroll the streamed output after completion. */
     clearPartial() {
+      cancelPendingFlush();
       if (body) body.querySelectorAll("pre[data-page]").forEach((n) => n.remove());
       streamPre = null;
     },
@@ -155,6 +192,7 @@ export function makeUi() {
       }
     },
     reset() {
+      cancelPendingFlush();
       if (placeholder) placeholder.hidden = false;
       if (body) body.innerHTML = "";
       if (body && placeholder) body.appendChild(placeholder);
@@ -256,6 +294,11 @@ export function makeUi() {
         }
       }
     });
+  }
+
+  // Clicking the dim backdrop minimizes, same as the × button.
+  if (backdrop && popupClose) {
+    backdrop.addEventListener("click", () => popupClose.click());
   }
 
   return api;

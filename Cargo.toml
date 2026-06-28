@@ -43,6 +43,7 @@ ureq = { version = "2", features = ["json"] }   # pin 2.x: rustls default, no sy
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+sha2 = "0.10"   # verify downloaded GGUFs against pinned sha256 digests (supply-chain)
 tempfile = "3"
 glob = "0.3"   # in-binary glob expansion (PowerShell does not glob unquoted args)
 

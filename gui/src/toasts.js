@@ -11,6 +11,10 @@ import { requireTauri } from "./tauri.js";
 
 /** Compact human byte size, e.g. 1503238553 -> "1.4 GB". */
 function fmtBytes(n) {
+  if (n < 0) {
+    // eslint-disable-next-line no-console
+    console.error("[toasts] fmtBytes: negative size:", n);
+  }
   if (!n || n < 0) return "0 B";
   const u = ["B", "KB", "MB", "GB", "TB"];
   let i = 0;

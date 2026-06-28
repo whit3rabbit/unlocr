@@ -84,7 +84,12 @@ pub enum Progress {
     /// Model/projector download underway. `pct` is 0..=100. `done`/`total` are the
     /// byte counts (total = 0 when the server omits Content-Length) so a UI can show
     /// size and compute transfer speed from successive events.
-    Download { name: String, pct: u8, done: u64, total: u64 },
+    Download {
+        name: String,
+        pct: u8,
+        done: u64,
+        total: u64,
+    },
     /// Server became healthy on this port.
     ServerReady { port: u16 },
     /// One page rasterized+OCR'd. `page` is 1-based, `total` is the page count.
@@ -157,7 +162,7 @@ where
     )?;
     on_progress(Progress::ServerReady { port: srv.port });
 
-    let (md, kept) = ocr_pages(&srv, &tools.pdftoppm, input, opts, on_progress)?;
+    let (md, kept) = ocr_pages(&srv, &tools.pdftoppm, input, opts, on_progress, &|| false)?;
 
     // Drop kills llama-server. `kept` is Some(dir) only when keep_images is set;
     // bubble it up so the caller can report where the PNGs went.
@@ -175,12 +180,7 @@ where
 /// unlocr cache dir; previews live under `<cache_root>/previews/<key>/`.
 // ponytail: unbounded cache (no eviction). It is under the OS cache dir, so the
 // user/OS can clear it; add an LRU/size cap here if the previews dir grows.
-pub fn render_pages(
-    pdftoppm: &Path,
-    pdf: &Path,
-    dpi: u32,
-    cache_root: &Path,
-) -> Res<Vec<PathBuf>> {
+pub fn render_pages(pdftoppm: &Path, pdf: &Path, dpi: u32, cache_root: &Path) -> Res<Vec<PathBuf>> {
     let dir = preview_cache_dir(pdf, dpi, cache_root);
 
     // Cache hit: a prior render left page PNGs here. Reuse them (pdftoppm is
@@ -218,6 +218,51 @@ fn preview_cache_dir(pdf: &Path, dpi: u32, cache_root: &Path) -> PathBuf {
         .join(format!("{:016x}", h.finish()))
 }
 
+/// Render and cache a SINGLE page (1-based) of a PDF to a PNG, returning its path.
+/// Backs the GUI preview pane's lazy per-page load: importing a large PDF no longer
+/// rasterizes every page up front (the all-pages `render_pages`), only the page the
+/// user actually views. Shares `render_pages`' on-disk cache dir, so a page rendered
+/// here is reused by a later full render and vice versa. Returns Err when `page` is
+/// out of range (pdftoppm produces no file for it), which the GUI treats as "past
+/// the last page" to bound navigation without a separate page-count probe.
+pub fn render_page(
+    pdftoppm: &Path,
+    pdf: &Path,
+    dpi: u32,
+    cache_root: &Path,
+    page: u32,
+) -> Res<PathBuf> {
+    let dir = preview_cache_dir(pdf, dpi, cache_root);
+    let want = page as u64;
+    // Cache hit: this exact page was rendered before (by render_page or render_pages).
+    // collect_pages returns the whole dir, so match the specific page by number.
+    if let Some(p) = pdf::collect_pages(&dir)
+        .into_iter()
+        .find(|p| pdf::trailing_number(p) == Some(want))
+    {
+        return Ok(p);
+    }
+    std::fs::create_dir_all(&dir)?;
+    // Render just this page, then re-scan for the specific page file (so a cache dir
+    // already holding OTHER pages cannot mask an out-of-range request).
+    //
+    // Distinguish the two reasons rasterize_range can fail:
+    //   - "produced no pages": pdftoppm ran cleanly but emitted nothing -> the page is
+    //     past the end. This is the out-of-range signal the GUI uses to bound nav.
+    //   - any other error (non-zero exit, spawn failure, malformed PDF): a REAL failure
+    //     that must surface, not be silently reported as end-of-document (which the GUI
+    //     would treat as "past the last page" and truncate navigation).
+    if let Err(e) = pdf::rasterize_range(pdftoppm, pdf, &dir, dpi, Some((page, page))) {
+        if !e.to_string().contains("produced no pages") {
+            return Err(e);
+        }
+    }
+    pdf::collect_pages(&dir)
+        .into_iter()
+        .find(|p| pdf::trailing_number(p) == Some(want))
+        .ok_or_else(|| format!("page {page} is out of range").into())
+}
+
 /// Rasterize one PDF to PNGs and OCR each page in order, emitting a Page
 /// progress event per page. Returns the page-delimited markdown and, when
 /// `opts.keep_images` is set, the directory the page PNGs were kept in (so the
@@ -229,6 +274,7 @@ pub fn ocr_pages<S, P>(
     input: &Path,
     opts: &OcrOptions,
     on_progress: &mut P,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Res<(String, Option<PathBuf>)>
 where
     S: server::ImageOcr,
@@ -245,8 +291,18 @@ where
 
     let mut md = String::new();
     for (i, page) in pages.iter().enumerate() {
+        // Stop (GUI) sets this; the local backend also kills llama-server so an
+        // in-flight stream errors out, but checking here stops the remote backend
+        // (no pid to kill) at the next page boundary. Err is remapped to "stopped"
+        // by the GUI's run_ocr (cmd_run.rs); the CLI never cancels (|| false).
+        if should_cancel() {
+            return Err("stopped".into());
+        }
         let page_num = base + i;
-        on_progress(Progress::Page { page: page_num, total: n });
+        on_progress(Progress::Page {
+            page: page_num,
+            total: n,
+        });
 
         let bytes = std::fs::read(page)?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -340,7 +396,10 @@ mod tests {
     fn resolve_output_path_cases() {
         let dir = Path::new("/out");
         // Default: {stem}.md under out_dir.
-        assert_eq!(resolve_output_path(dir, None, "doc"), Path::new("/out/doc.md"));
+        assert_eq!(
+            resolve_output_path(dir, None, "doc"),
+            Path::new("/out/doc.md")
+        );
         // Relative name, no extension -> append .md, joined under out_dir.
         assert_eq!(
             resolve_output_path(dir, Some(Path::new("report")), "doc"),
@@ -453,9 +512,16 @@ mod tests {
         let pdftoppm_bin = std::path::Path::new("pdftoppm");
         let opts = OcrOptions::default();
         let mut events: Vec<Progress> = Vec::new();
-        let result = ocr_pages(&srv, pdftoppm_bin, &pdf_path, &opts, &mut |p: Progress| {
-            events.push(p);
-        });
+        let result = ocr_pages(
+            &srv,
+            pdftoppm_bin,
+            &pdf_path,
+            &opts,
+            &mut |p: Progress| {
+                events.push(p);
+            },
+            &|| false,
+        );
         assert!(result.is_ok(), "ocr_pages failed: {:?}", result.err());
 
         // --- 5. Assert ordering -----------------------------------------------
@@ -473,7 +539,12 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(page_events.len(), 2, "expected 2 Page events, got {:?}", page_events);
+        assert_eq!(
+            page_events.len(),
+            2,
+            "expected 2 Page events, got {:?}",
+            page_events
+        );
         assert_eq!(
             page_events[0],
             (1, 2),
@@ -557,8 +628,10 @@ mod tests {
         let pdf_path = pdf_dir.path().join("fixture.pdf");
         std::fs::write(&pdf_path, two_page_pdf_bytes()).expect("write fixture pdf");
 
-        let mut opts = OcrOptions::default();
-        opts.pages = Some((2, 2));
+        let opts = OcrOptions {
+            pages: Some((2, 2)),
+            ..OcrOptions::default()
+        };
         let mut events: Vec<Progress> = Vec::new();
         let (md, _kept) = ocr_pages(
             &srv,
@@ -566,6 +639,7 @@ mod tests {
             &pdf_path,
             &opts,
             &mut |p: Progress| events.push(p),
+            &|| false,
         )
         .expect("ocr_pages with range");
 
@@ -577,9 +651,64 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(page_events, vec![(2, 1)], "should OCR only page 2 of 1 selected");
-        assert!(md.contains("<!-- page 2 -->"), "markdown must carry the real page number: {md}");
-        assert!(!md.contains("<!-- page 1 -->"), "page 1 must not be OCR'd: {md}");
+        assert_eq!(
+            page_events,
+            vec![(2, 1)],
+            "should OCR only page 2 of 1 selected"
+        );
+        assert!(
+            md.contains("<!-- page 2 -->"),
+            "markdown must carry the real page number: {md}"
+        );
+        assert!(
+            !md.contains("<!-- page 1 -->"),
+            "page 1 must not be OCR'd: {md}"
+        );
+    }
+
+    /// A `should_cancel` that is true on entry aborts before OCRing any page: no Page
+    /// events, and an Err the GUI's run_ocr remaps to "stopped". Guards the page-loop
+    /// cancellation check that makes Stop responsive (esp. for the remote backend,
+    /// which has no llama-server pid to kill).
+    #[test]
+    fn ocr_pages_aborts_when_cancelled() {
+        if std::process::Command::new("pdftoppm")
+            .arg("-v")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping ocr_pages_aborts_when_cancelled: pdftoppm not on PATH");
+            return;
+        }
+
+        let stub_port = spawn_stub_ocr_server();
+        let srv = server::Server::for_test(stub_port).expect("for_test");
+
+        let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
+        let pdf_path = pdf_dir.path().join("fixture.pdf");
+        std::fs::write(&pdf_path, two_page_pdf_bytes()).expect("write fixture pdf");
+
+        let opts = OcrOptions::default();
+        let mut events: Vec<Progress> = Vec::new();
+        let result = ocr_pages(
+            &srv,
+            std::path::Path::new("pdftoppm"),
+            &pdf_path,
+            &opts,
+            &mut |p: Progress| events.push(p),
+            &|| true,
+        );
+
+        assert!(
+            result.is_err(),
+            "cancelled run must return Err, got {result:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, Progress::Page { .. })),
+            "no page should be OCR'd when cancelled on entry: {events:?}"
+        );
     }
 
     /// Spawn a throwaway HTTP server that returns a valid OpenAI chat-completion for
@@ -610,12 +739,12 @@ mod tests {
                     if reader.read_line(&mut line).unwrap_or(0) == 0 {
                         break;
                     }
-                    let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
                     if trimmed.is_empty() {
                         break;
                     }
                     if trimmed.to_ascii_lowercase().starts_with("content-length:") {
-                        if let Some(v) = trimmed.splitn(2, ':').nth(1) {
+                        if let Some(v) = trimmed.split_once(':').map(|x| x.1) {
                             content_length = v.trim().parse().unwrap_or(0);
                         }
                     }

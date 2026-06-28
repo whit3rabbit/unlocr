@@ -51,8 +51,8 @@ pub fn run_pdf<S: ImageOcr>(backend: &S, pdftoppm: &Path, input: &Path, args: &A
     // Progress closure reproduces the original CLI output exactly:
     //   "<input>: N page(s)\n" before the first page line, then
     //   "\r  page i/N" per page.
-    let mut on_progress = |p: Progress| match p {
-        Progress::Page { page, total } => {
+    let mut on_progress = |p: Progress| {
+        if let Progress::Page { page, total } = p {
             if !header_printed {
                 println!("{input_display}: {total} page(s)");
                 header_printed = true;
@@ -60,10 +60,9 @@ pub fn run_pdf<S: ImageOcr>(backend: &S, pdftoppm: &Path, input: &Path, args: &A
             print!("\r  page {page}/{total}");
             let _ = std::io::stdout().flush();
         }
-        _ => {}
     };
 
-    let (md, kept) = ocr_pages(backend, pdftoppm, input, &opts, &mut on_progress)?;
+    let (md, kept) = ocr_pages(backend, pdftoppm, input, &opts, &mut on_progress, &|| false)?;
     println!(); // newline after the last "\r  page N/N" line, matching the original
 
     // Resolve where to write: --output (single-input only; validated in main::run)

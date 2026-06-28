@@ -10,6 +10,84 @@ use std::time::Duration;
 const REPO: &str = "sahilchachra/Unlimited-OCR-GGUF";
 const MMPROJ: &str = "mmproj-Unlimited-OCR-F16.gguf";
 
+/// Pinned model revision (a commit sha, NOT the mutable `main` ref). Downloads use
+/// this in the URL so an upstream force-push or branch move cannot silently change
+/// the bytes we fetch. Bump together with DIGESTS when intentionally upgrading.
+const REV: &str = "028d04678db356095d0015b70f0803f2179180f4";
+
+/// sha256 of each shipped GGUF at REV. On Hugging Face the LFS object id IS the
+/// file's sha256, so these came straight from the repo's LFS metadata at REV. A
+/// completed download whose hash does not match is rejected and deleted: this is
+/// the supply-chain defense (a malicious upstream push, a compromised mirror, or a
+/// TLS-MITM via a trusted corporate proxy all serve different bytes for the same
+/// URL, which the revision pin alone cannot catch). Quants NOT listed here (a
+/// custom `--quant`) download unverified with a warning; the revision pin still
+/// applies. Update REV and these together when bumping the model.
+const DIGESTS: &[(&str, &str)] = &[
+    (
+        "Unlimited-OCR-BF16.gguf",
+        "731b7d1f56c94198607e08cec6f11ed62e6493b8539f9f4ed337ddd1ab3a1896",
+    ),
+    (
+        "Unlimited-OCR-Q8_0.gguf",
+        "234c36f679a3768f5564e9e02c2c1deacbd5677b9c8558a57133f1813f6dd3b8",
+    ),
+    (
+        "Unlimited-OCR-Q4_K_M.gguf",
+        "c8461bded976eac709a33f6b26e1414efcd2124a203f2ee93ee984a4c9e9265b",
+    ),
+    (
+        "mmproj-Unlimited-OCR-F16.gguf",
+        "4f28c295e1fcf67a97488e356f2b4372da4702b77fdfad0fa138b5821325743c",
+    ),
+];
+
+/// Outcome of comparing a downloaded file's sha256 to the pinned DIGESTS table.
+enum DigestCheck {
+    /// Hash matches the pinned digest for this filename.
+    Match,
+    /// Hash does NOT match the pinned digest; reject the download.
+    Mismatch { expected: String },
+    /// No digest pinned for this filename (a custom quant); caller warns and proceeds.
+    Unpinned,
+}
+
+/// Pure comparison of an `actual` sha256 hex against the pinned digest for `name`.
+/// No IO, so it is unit-testable without a network or a real file. Case-insensitive
+/// because hex casing is cosmetic.
+fn check_digest(name: &str, actual_hex: &str) -> DigestCheck {
+    match DIGESTS.iter().find(|(n, _)| *n == name) {
+        Some((_, expected)) if expected.eq_ignore_ascii_case(actual_hex) => DigestCheck::Match,
+        Some((_, expected)) => DigestCheck::Mismatch {
+            expected: (*expected).to_string(),
+        },
+        None => DigestCheck::Unpinned,
+    }
+}
+
+/// sha256 of a file as lowercase hex, streamed so a multi-GB GGUF never loads into
+/// memory. Hashing the finished `.part` (rather than incrementally during the
+/// stream) keeps the resume path correct: the bytes already on disk are included.
+fn file_sha256(path: &Path) -> Res<String> {
+    use sha2::{Digest, Sha256};
+    let mut f = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20]; // 1 MiB
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let mut hex = String::with_capacity(64);
+    for b in hasher.finalize() {
+        use std::fmt::Write;
+        let _ = write!(hex, "{b:02x}");
+    }
+    Ok(hex)
+}
+
 pub struct ModelFiles {
     pub model: PathBuf,
     pub mmproj: PathBuf,
@@ -63,7 +141,9 @@ pub fn validate_quant(quant: &str) -> Res<()> {
     // `.` is allowed (e.g. tag forms), so reject `..` explicitly: it passes the
     // charset check but is a path-traversal component.
     if !charset_ok || quant.contains("..") {
-        return Err(format!("invalid quant {quant:?}: allowed characters are [A-Za-z0-9_.-]").into());
+        return Err(
+            format!("invalid quant {quant:?}: allowed characters are [A-Za-z0-9_.-]").into(),
+        );
     }
     Ok(())
 }
@@ -210,7 +290,7 @@ where
     if path.is_file() {
         return Ok(());
     }
-    let url = format!("https://huggingface.co/{REPO}/resolve/main/{name}");
+    let url = format!("https://huggingface.co/{REPO}/resolve/{REV}/{name}");
     download(&url, path, name, progress)?;
     Ok(())
 }
@@ -290,6 +370,28 @@ where
         }
     }
 
+    // Integrity gate: verify the completed `.part` against the pinned sha256 before
+    // it becomes the cached model. A mismatch means the bytes are not what we pinned
+    // (upstream change, mirror/MITM tampering, or silent corruption); delete and
+    // refuse rather than cache a tampered multi-GB weight that loads into llama-server.
+    match check_digest(name, &file_sha256(&part)?) {
+        DigestCheck::Match => {}
+        DigestCheck::Unpinned => {
+            eprintln!(
+                "warning: {name} downloaded without an integrity check \
+                 (no pinned digest for this quant); the revision pin still applies"
+            );
+        }
+        DigestCheck::Mismatch { expected } => {
+            let _ = fs::remove_file(&part);
+            return Err(format!(
+                "integrity check failed for {name}: its sha256 does not match the pinned \
+                 digest (expected {expected}). The download was rejected and deleted."
+            )
+            .into());
+        }
+    }
+
     fs::rename(&part, dest)?;
     Ok(())
 }
@@ -345,8 +447,7 @@ where
         }
         out.write_all(&buf[..n])?;
         done += n as u64;
-        if total > 0 {
-            let pct = done * 100 / total;
+        if let Some(pct) = (done * 100).checked_div(total) {
             if pct != last_pct {
                 progress(name, Some(pct as u8), total, done);
                 last_pct = pct;
@@ -395,7 +496,12 @@ pub fn check_presence(cache: &Path, quant: &str) -> Res<(PathBuf, bool, PathBuf,
     validate_quant(quant)?;
     let model = cache.join(model_filename(quant));
     let mmproj = cache.join(MMPROJ);
-    Ok((model.clone(), model.is_file(), mmproj.clone(), mmproj.is_file()))
+    Ok((
+        model.clone(),
+        model.is_file(),
+        mmproj.clone(),
+        mmproj.is_file(),
+    ))
 }
 
 /// Quant tags whose GGUF is already cached on disk, e.g. ["Q8_0", "Q4_K_M"].
@@ -424,8 +530,9 @@ pub fn list_cached_quants(cache: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_dir, check_presence, ensure_with_overrides, ensure_with_progress, list_cached_quants,
-        model_filename, stream_to_part, validate_quant, MMPROJ,
+        cache_dir, check_digest, check_presence, ensure_with_overrides, ensure_with_progress,
+        file_sha256, list_cached_quants, model_filename, stream_to_part, validate_quant,
+        DigestCheck, DIGESTS, MMPROJ,
     };
     use crate::Progress;
     use std::io::Cursor;
@@ -443,6 +550,39 @@ mod tests {
         assert_eq!(list_cached_quants(dir), vec!["Q4_K_M", "Q8_0"]);
         // Missing dir -> empty, no panic.
         assert!(list_cached_quants(&dir.join("nope")).is_empty());
+    }
+
+    #[test]
+    fn check_digest_match_mismatch_and_unpinned() {
+        // A pinned name with its exact digest matches (case-insensitively); a wrong
+        // hash is a Mismatch; an unknown filename is Unpinned (custom quant).
+        let (name, hex) = DIGESTS[0];
+        assert!(matches!(check_digest(name, hex), DigestCheck::Match));
+        assert!(matches!(
+            check_digest(name, &hex.to_uppercase()),
+            DigestCheck::Match
+        ));
+        assert!(matches!(
+            check_digest(name, "deadbeef"),
+            DigestCheck::Mismatch { .. }
+        ));
+        assert!(matches!(
+            check_digest("Unlimited-OCR-CUSTOM.gguf", "deadbeef"),
+            DigestCheck::Unpinned
+        ));
+    }
+
+    #[test]
+    fn file_sha256_matches_known_vector() {
+        // sha256("abc") is a fixed NIST test vector; proves the sha2 wiring + hex
+        // encoding are correct end to end (the streaming read path included).
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("abc.bin");
+        std::fs::write(&p, b"abc").unwrap();
+        assert_eq!(
+            file_sha256(&p).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]
@@ -512,8 +652,8 @@ mod tests {
         stream_to_part(
             &part,
             "model",
-            10,    // full total
-            6,     // resume offset = bytes already present
+            10,                            // full total
+            6,                             // resume offset = bytes already present
             Cursor::new(b"BBBB".to_vec()), // the remaining 4 bytes
             &mut |_, pct, _, done| {
                 // The "started" event (pct=None) must report cumulative progress,
@@ -525,7 +665,11 @@ mod tests {
         )
         .expect("resume must succeed");
         assert_eq!(first_done, Some(6), "started event must report done==start");
-        assert_eq!(std::fs::read(&part).unwrap(), b"AAAAAABBBB", "seed kept, tail appended");
+        assert_eq!(
+            std::fs::read(&part).unwrap(),
+            b"AAAAAABBBB",
+            "seed kept, tail appended"
+        );
     }
 
     #[test]
@@ -605,12 +749,12 @@ mod tests {
 
         let mut events: Vec<Progress> = Vec::new();
         let files = ensure_with_progress(cache, "Q8_0", &mut |p| events.push(p)).unwrap();
-        assert!(events.is_empty(), "no download events expected, got {events:?}");
-        assert_eq!(files.model, cache.join("Unlimited-OCR-Q8_0.gguf"));
-        assert_eq!(
-            files.mmproj,
-            cache.join("mmproj-Unlimited-OCR-F16.gguf")
+        assert!(
+            events.is_empty(),
+            "no download events expected, got {events:?}"
         );
+        assert_eq!(files.model, cache.join("Unlimited-OCR-Q8_0.gguf"));
+        assert_eq!(files.mmproj, cache.join("mmproj-Unlimited-OCR-F16.gguf"));
     }
 
     #[test]
@@ -658,13 +802,9 @@ mod tests {
         std::fs::write(&mmproj, b"stub").unwrap();
 
         let mut events: Vec<Progress> = Vec::new();
-        let files = ensure_with_overrides(
-            cache,
-            "Q8_0",
-            Some(&model),
-            Some(&mmproj),
-            &mut |p| events.push(p),
-        )
+        let files = ensure_with_overrides(cache, "Q8_0", Some(&model), Some(&mmproj), &mut |p| {
+            events.push(p)
+        })
         .unwrap();
         assert!(events.is_empty(), "no download expected, got {events:?}");
         assert_eq!(files.model, model);

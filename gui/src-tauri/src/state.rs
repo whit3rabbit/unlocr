@@ -2,6 +2,7 @@
 // `cmd_*` modules; this module holds the managed state they all touch (the warm
 // model, the resolved pdftoppm, the cancel flag, and the held server pid).
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
@@ -43,4 +44,14 @@ pub(crate) struct AppState {
     // WITHOUT taking the `model` lock (the run loop holds that lock for the whole
     // batch). None for the remote backend (nothing local to kill).
     pub(crate) server_pid: Mutex<Option<u32>>,
+    // Last time the model was loaded or a run finished, for the idle-unload watcher
+    // (lib.rs): it drops the warm model after the configured idle window to reclaim
+    // the GGUF RAM. None until first load (treated as "no model / not idle"). Option
+    // keeps the Default derive (Instant has no Default). Never held across a run.
+    pub(crate) last_used: Mutex<Option<std::time::Instant>>,
+    // Canonicalized output paths this session's runs wrote. `read_text_file` only
+    // serves files in this set (plus those recorded in the job store), so the
+    // review pane's read scope is backend-derived, not supplied by the renderer:
+    // a compromised webview cannot point it at an arbitrary .md on disk.
+    pub(crate) read_allow: Mutex<HashSet<PathBuf>>,
 }

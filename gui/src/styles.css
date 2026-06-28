@@ -1686,14 +1686,25 @@ button {
   }
 }
 
-/* Run popup: dismissible progress panel (bottom-right, above the toast stack).
-   Reuses .run-progress__bar/__fill for the bar; adds a scrollable token log. */
+/* Run popup: centered modal progress panel (over a dim backdrop) shown while OCR
+   runs. Reuses .run-progress__bar/__fill for the bar; the token log fills the body. */
+.run-popup-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 89;
+  background: rgba(0, 0, 0, 0.5);
+}
+.run-popup-backdrop[hidden] {
+  display: none;
+}
 .run-popup {
   position: fixed;
-  bottom: 16px;
-  right: 16px;
-  z-index: 85;
-  width: 360px;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 90;
+  width: min(900px, 92vw);
+  height: min(80vh, 760px);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1734,13 +1745,14 @@ button {
 }
 .run-popup__log {
   margin: 0;
-  max-height: 220px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   padding: 8px;
   border-radius: 7px;
   background: var(--track);
   color: var(--tx);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;

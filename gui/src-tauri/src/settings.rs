@@ -12,7 +12,7 @@
 //! matters: the OS keychain (adds a `keyring`-style dep). The Settings UI shows
 //! a one-line warning so the storage location is not a surprise.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +54,13 @@ pub struct Settings {
     pub default_max_tokens: u32,
     #[serde(default = "default_prompt")]
     pub default_prompt: String,
+    /// Drop the warm model after this many idle minutes to reclaim the GGUF RAM
+    /// (~6-8 GB). 0 disables (model stays warm until explicit unload / app exit).
+    /// The watcher in lib.rs reads this each tick; an in-flight run is protected by
+    /// the model lock (try_lock fails while a run holds it), so it never unloads
+    /// mid-run. Default 15.
+    #[serde(default = "default_idle_unload_minutes")]
+    pub idle_unload_minutes: u32,
 }
 
 fn default_mode() -> String {
@@ -76,6 +83,9 @@ fn default_max_tokens() -> u32 {
 fn default_prompt() -> String {
     OcrOptions::default().prompt
 }
+fn default_idle_unload_minutes() -> u32 {
+    15
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -89,6 +99,7 @@ impl Default for Settings {
             default_dpi: default_dpi(),
             default_max_tokens: default_max_tokens(),
             default_prompt: default_prompt(),
+            idle_unload_minutes: default_idle_unload_minutes(),
         }
     }
 }
@@ -136,16 +147,9 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
         version: 1,
         settings: settings.clone(),
     };
-    let bytes =
-        serde_json::to_vec_pretty(&file).map_err(|e| format!("could not serialize settings: {e}"))?;
-    write_atomic(&path, &bytes)
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| format!("could not finalize settings at {}: {e}", path.display()))
+    let bytes = serde_json::to_vec_pretty(&file)
+        .map_err(|e| format!("could not serialize settings: {e}"))?;
+    crate::jsonstore::write_atomic(&path, &bytes)
 }
 
 #[cfg(test)]
