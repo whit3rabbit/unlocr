@@ -19,6 +19,16 @@ Thin wrapper. Full usage/benchmarks in README.md.
 - `./install.sh`                  # macOS/Linux build+install+depcheck
 - `packaging/windows/install.ps1` # Windows
 
+## Releasing
+- Before any release follow `docs/RELEASE.md`. Bump the version in ONE place only:
+  `[workspace.package].version` in root `Cargo.toml`. CLI (`CARGO_PKG_VERSION`),
+  gui crate (`version.workspace`), and the Tauri bundle (no `version` in
+  tauri.conf.json -> falls back to the crate) all derive from it.
+- Always run the gates first: `cargo fmt --all`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace`, `cargo doc --workspace
+  --no-deps`, `cargo build --workspace`. Then `./release.sh` tags; after the release
+  populates, run the `update-tap` workflow with the tag.
+
 ## Runtime deps (external, NOT bundled)
 - `pdftoppm` <- poppler-utils. Declared in deb/rpm.
 - `llama-server` <- llama.cpp, build >= b8530 (PR #17400). NOT in apt/dnf; cannot

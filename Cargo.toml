@@ -1,6 +1,6 @@
 [package]
 name = "unlocr"
-version = "0.1.0"
+version.workspace = true   # single source of truth: [workspace.package] below
 edition = "2021"
 description = "OCR PDFs to markdown via Unlimited-OCR (DeepSeek-OCR) + llama.cpp"
 license = "MIT"
@@ -29,6 +29,13 @@ path = "src/lib.rs"
 [workspace]
 resolver = "2"
 members = ["gui/src-tauri"]
+
+# THE version. Bump here on release; the CLI (clap `version` -> CARGO_PKG_VERSION),
+# the gui crate (version.workspace), and the Tauri bundle (tauri.conf.json has no
+# `version`, so it falls back to the gui crate's Cargo.toml) all derive from this.
+# release.sh + Makefile read this line via sed.
+[workspace.package]
+version = "0.1.0"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

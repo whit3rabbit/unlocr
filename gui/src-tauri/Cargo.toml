@@ -1,6 +1,6 @@
 [package]
 name = "unlocr-gui"
-version = "0.1.0"
+version.workspace = true   # inherits the root [workspace.package] version
 description = "Tauri GUI for unlocr"
 authors = ["whit3rabbit"]
 edition = "2021"

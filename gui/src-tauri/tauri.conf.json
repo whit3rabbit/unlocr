@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "unlocr",
-  "version": "0.1.0",
   "identifier": "com.unlocr.gui",
   "build": {
     "frontendDist": "../src"
