@@ -1,0 +1,165 @@
+//! Persisted GUI settings (provider mode + defaults).
+//!
+//! Same dependency-free pattern as `store.rs`: one JSON file (`settings.json`)
+//! under the model cache dir, atomic write via temp + rename, missing/corrupt
+//! file falls back to defaults so a first launch or a hand-deleted file never
+//! wedges the app. Holds what the Settings panel persists: the local/remote
+//! provider mode, the remote endpoint, and the engine-option defaults the
+//! Workspace controls seed from.
+//!
+//! ponytail: `remoteApiKey` is stored as plaintext in this JSON under the OS
+//! cache dir (same trust level as the GGUF cache). Upgrade path if it ever
+//! matters: the OS keychain (adds a `keyring`-style dep). The Settings UI shows
+//! a one-line warning so the storage location is not a surprise.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use unlocr::model::cache_dir;
+use unlocr::OcrOptions;
+
+const SETTINGS_FILE: &str = "settings.json";
+
+/// Persisted settings. camelCase on the wire so the JS side reads
+/// `settings.remoteBaseUrl` etc. without a rename layer. Every field has a
+/// default so an older/partial file still deserializes (serde `default`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    /// "local" | "remote": which provider the Load button targets.
+    #[serde(default = "default_mode")]
+    pub mode: String,
+    /// Remote OpenAI-compatible base URL (no trailing slash needed).
+    #[serde(default)]
+    pub remote_base_url: String,
+    /// Optional bearer token for the remote endpoint. Plaintext (see module note).
+    #[serde(default)]
+    pub remote_api_key: String,
+    /// Default quant the Workspace + local Load use.
+    #[serde(default = "default_quant")]
+    pub default_quant: String,
+    /// Optional explicit llama-server path (empty = resolve from PATH/Homebrew).
+    #[serde(default)]
+    pub llama_bin: String,
+    #[serde(default = "default_dpi")]
+    pub default_dpi: u32,
+    #[serde(default = "default_max_tokens")]
+    pub default_max_tokens: u32,
+    #[serde(default = "default_prompt")]
+    pub default_prompt: String,
+}
+
+fn default_mode() -> String {
+    "local".to_string()
+}
+fn default_quant() -> String {
+    OcrOptions::default().quant
+}
+fn default_dpi() -> u32 {
+    OcrOptions::default().dpi
+}
+fn default_max_tokens() -> u32 {
+    OcrOptions::default().max_tokens
+}
+fn default_prompt() -> String {
+    OcrOptions::default().prompt
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            mode: default_mode(),
+            remote_base_url: String::new(),
+            remote_api_key: String::new(),
+            default_quant: default_quant(),
+            llama_bin: String::new(),
+            default_dpi: default_dpi(),
+            default_max_tokens: default_max_tokens(),
+            default_prompt: default_prompt(),
+        }
+    }
+}
+
+/// On-disk envelope, versioned so a future migration can detect an older schema.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SettingsFile {
+    version: u32,
+    settings: Settings,
+}
+
+/// Resolve `<model cache dir>/settings.json`. Surfaces the cache-dir error like
+/// `store::store_path` does.
+pub fn settings_path() -> Result<PathBuf, String> {
+    let cache = cache_dir(None).map_err(|e| format!("could not resolve model cache dir: {e}"))?;
+    Ok(cache.join(SETTINGS_FILE))
+}
+
+/// Load settings, falling back to defaults on a missing or corrupt file.
+pub fn load_settings() -> Settings {
+    let path = match settings_path() {
+        Ok(p) => p,
+        Err(_) => return Settings::default(),
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice::<SettingsFile>(&bytes) {
+            Ok(file) => file.settings,
+            Err(e) => {
+                eprintln!("[settings] settings.json parse failed, using defaults: {e}");
+                Settings::default()
+            }
+        },
+        Err(_) => Settings::default(),
+    }
+}
+
+/// Persist settings via temp + rename so a crash mid-write never truncates the file.
+pub fn save_settings(settings: &Settings) -> Result<(), String> {
+    let path = settings_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create settings dir {}: {e}", parent.display()))?;
+    }
+    let file = SettingsFile {
+        version: 1,
+        settings: settings.clone(),
+    };
+    let bytes =
+        serde_json::to_vec_pretty(&file).map_err(|e| format!("could not serialize settings: {e}"))?;
+    write_atomic(&path, &bytes)
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| format!("could not finalize settings at {}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A partial file (only `mode`) must fill the rest from defaults, not fail.
+    #[test]
+    fn partial_file_fills_defaults() {
+        let json = r#"{ "version": 1, "settings": { "mode": "remote" } }"#;
+        let file: SettingsFile = serde_json::from_str(json).unwrap();
+        assert_eq!(file.settings.mode, "remote");
+        assert_eq!(file.settings.default_quant, OcrOptions::default().quant);
+        assert_eq!(file.settings.default_dpi, OcrOptions::default().dpi);
+    }
+
+    /// camelCase on the wire (regression guard for the serde rename).
+    #[test]
+    fn serializes_camel_case() {
+        let json = serde_json::to_string(&SettingsFile {
+            version: 1,
+            settings: Settings::default(),
+        })
+        .unwrap();
+        assert!(json.contains("\"remoteBaseUrl\""));
+        assert!(json.contains("\"defaultMaxTokens\""));
+        assert!(!json.contains("\"remote_base_url\""));
+    }
+}

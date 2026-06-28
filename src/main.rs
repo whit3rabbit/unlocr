@@ -170,8 +170,10 @@ fn run() -> Res<()> {
     std::fs::create_dir_all(&args.out)?;
 
     // 3. Start llama-server once; it stays up for every page of every PDF.
-    let port = if args.port == 0 { server::free_port()? } else { args.port };
-    let srv = server::Server::start(&tools.llama_server, &files.model, &files.mmproj, port)?;
+    // Pass the raw port (0 = auto) so Server::start owns free-port resolution and
+    // the bind-race retry; read the actual bound port back from srv.port.
+    let srv = server::Server::start(&tools.llama_server, &files.model, &files.mmproj, args.port)?;
+    let port = srv.port;
     println!("llama-server ready on 127.0.0.1:{port}");
 
     // 4. OCR each PDF.
@@ -199,8 +201,18 @@ fn is_pdf(p: &Path) -> bool {
 /// Collect *.pdf under `dir`, one level deep or recursively.
 fn collect_pdfs(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> Res<()> {
     for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
+        let entry = entry?;
+        // file_type() from the dir entry does NOT follow symlinks (unlike
+        // Path::is_dir). Skip symlinked entries so a cycle (e.g. a/ -> ..) cannot
+        // recurse into a stack overflow, which `panic = "abort"` turns into a hard
+        // abort. ponytail: skips symlinked dirs entirely; switch to a visited
+        // canonical-path set if real symlinked trees must be followed.
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if ft.is_dir() {
             if recursive {
                 collect_pdfs(&path, recursive, out)?;
             }
@@ -268,23 +280,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         fs::write(root.join("a.pdf"), b"").unwrap();
+        fs::write(root.join("UPPER.PDF"), b"").unwrap(); // is_pdf must be case-insensitive
         fs::write(root.join("not.txt"), b"").unwrap();
         fs::create_dir(root.join("sub")).unwrap();
         fs::write(root.join("sub/b.pdf"), b"").unwrap();
 
-        // non-recursive: only top-level a.pdf, .txt excluded
+        // non-recursive: top-level pdfs (any case), .txt excluded; sorted
         let flat = expand_inputs(&[root.to_path_buf()], None, false).unwrap();
-        assert_eq!(flat, vec![root.join("a.pdf")]);
+        assert_eq!(flat, vec![root.join("UPPER.PDF"), root.join("a.pdf")]);
 
         // recursive: includes nested b.pdf
         let deep = expand_inputs(&[root.to_path_buf()], None, true).unwrap();
-        assert_eq!(deep, vec![root.join("a.pdf"), root.join("sub/b.pdf")]);
+        assert_eq!(deep, vec![root.join("UPPER.PDF"), root.join("a.pdf"), root.join("sub/b.pdf")]);
 
         // dedup: a.pdf via both folder and --from-list appears once
         let list = root.join("list.txt");
         fs::write(&list, format!("# comment\n\n{}\n", root.join("a.pdf").display())).unwrap();
         let merged = expand_inputs(&[root.to_path_buf()], Some(&list), false).unwrap();
-        assert_eq!(merged, vec![root.join("a.pdf")]);
+        assert_eq!(merged, vec![root.join("UPPER.PDF"), root.join("a.pdf")]);
 
         // empty folder errors
         let empty = tempfile::tempdir().unwrap();

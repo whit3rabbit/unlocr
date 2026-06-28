@@ -4,32 +4,403 @@
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Ferrum OCR</title>
+    <title>unlocr</title>
     <script type="module" src="/main.js" defer></script>
   </head>
 
   <body>
-    <!-- Ferrum OCR shell frame: header bar + empty sidebar + single pane.
-         Placeholder only; the real port of the mockup is a later card. -->
+    <!-- unlocr shell, reproduced from the rendered mockup as static HTML/CSS.
+         No template engine; placeholder panes hold the views until later cards
+         wire preflight / ocr / ocr://page. The activity rail (left icons) is the
+         nav; its routing is wired in the next bite (main.js). -->
     <div class="app">
-      <header class="app__header">
-        <div class="app__brand">Ferrum OCR</div>
-        <div class="app__header-meta">unlocr &middot; DeepSeek-OCR + llama.cpp</div>
+      <!-- titlebar -->
+      <!-- titleBarStyle:Overlay (tauri.conf.json) draws the native macOS traffic
+           lights over the webview top-left; the bar is left-padded in CSS to
+           clear them. data-tauri-drag-region makes the empty bar draggable;
+           interactive children opt out via -webkit-app-region:no-drag. -->
+      <header class="titlebar" data-tauri-drag-region>
+        <div class="titlebar__brand">
+          <div class="brand__mark">un</div>
+          <div class="brand__name">unlocr</div>
+        </div>
+        <div class="titlebar__divider"></div>
+        <div class="titlebar__screen" id="screenTitle">Workspace</div>
+        <div class="titlebar__spacer"></div>
+        <div class="titlebar__search">
+          <span class="titlebar__search-text">Search files, prompts, OCR jobs</span>
+          <span class="titlebar__search-kbd">&#8984;K</span>
+        </div>
+        <!-- driven by main.js refreshModelStatus(): dot color + label reflect
+             whether a local/remote model is loaded (the Run OCR gate). -->
+        <div class="titlebar__mode" id="modeBadge">
+          <span class="titlebar__mode-dot"></span>No model
+        </div>
       </header>
 
+      <!-- body: activity rail + screen area -->
       <div class="app__body">
-        <nav class="app__sidebar" aria-label="Views">
-          <ul>
-            <li class="is-active" data-route="workspace">Workspace</li>
-            <li data-route="library">Library</li>
-            <li data-route="board">Board</li>
-            <li data-route="review">Review</li>
-            <li data-route="settings">Settings</li>
-          </ul>
+        <!-- activity rail (icon nav) -->
+        <nav class="rail" aria-label="Views">
+          <button class="rail__btn is-active" data-route="workspace" title="Workspace">
+            <svg width="19" height="19" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="3" width="14" height="13" rx="2"></rect><line x1="7.5" y1="3" x2="7.5" y2="16"></line></svg>
+          </button>
+          <button class="rail__btn" data-route="library" title="Library">
+            <svg width="19" height="19" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="3" width="14" height="13" rx="2"></rect><line x1="2.5" y1="7.5" x2="16.5" y2="7.5"></line><line x1="2.5" y1="11.5" x2="16.5" y2="11.5"></line></svg>
+          </button>
+          <button class="rail__btn" data-route="board" title="Workflow board">
+            <svg width="19" height="19" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="3" width="4" height="13" rx="1.3"></rect><rect x="7.8" y="3" width="4" height="9" rx="1.3"></rect><rect x="13.1" y="3" width="4" height="11" rx="1.3"></rect></svg>
+          </button>
+          <button class="rail__btn" data-route="review" title="Markdown review">
+            <svg width="19" height="19" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="2.5" width="13" height="14" rx="2"></rect><line x1="6" y1="6.5" x2="13" y2="6.5"></line><line x1="6" y1="9.5" x2="13" y2="9.5"></line><line x1="6" y1="12.5" x2="10.5" y2="12.5"></line></svg>
+          </button>
+          <div class="rail__spacer"></div>
+          <button class="rail__btn" data-route="settings" title="Settings">
+            <svg width="19" height="19" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><line x1="3" y1="5.5" x2="16" y2="5.5"></line><circle cx="7" cy="5.5" r="2" fill="var(--panel)"></circle><line x1="3" y1="13" x2="16" y2="13"></line><circle cx="12" cy="13" r="2" fill="var(--panel)"></circle></svg>
+          </button>
         </nav>
 
-        <main class="app__pane" id="pane">
-          <p class="app__placeholder">Shell ready. Views are wired in later cards.</p>
+        <!-- screen area: one pane per view, toggled by main.js -->
+        <main class="screen" id="screen">
+
+          <!-- WORKSPACE -->
+          <section class="view view--workspace is-shown" data-view="workspace">
+            <div class="view__cols">
+              <!-- file rail -->
+              <aside class="panel file-rail">
+                <div class="panel__head">
+                  <span class="panel__label">Files</span>
+                  <!-- EH-0004 bite 2: file count is derived state (the input
+                       queued for the next run), updated by main.js. -->
+                  <span class="panel__count" id="fileCount">0</span>
+                </div>
+                <button class="import-btn" id="importBtn" type="button">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="7" y1="2.5" x2="7" y2="11.5"></line><line x1="2.5" y1="7" x2="11.5" y2="7"></line></svg>
+                  Import PDF / image
+                </button>
+                <!-- Manual path entry. The Import button also opens a native
+                     file picker (tauri-plugin-dialog) that seeds this field;
+                     users can still type/paste an absolute PDF path. The Run
+                     button uses this value. -->
+                <input
+                  class="path-input"
+                  id="pdfPath"
+                  type="text"
+                  placeholder="/absolute/path/to/file.pdf"
+                  spellcheck="false"
+                />
+                <!-- EH-0004 bite 2: file list is a real component. It reflects
+                     the input queued for the next run (driven by the path field
+                     and the Import button) plus the preflight env readout, so the
+                     pane is bound to live state, not a static placeholder. -->
+                <div class="file-list" id="fileList" aria-live="polite">
+                  <p class="placeholder" id="fileListEmpty">No files imported yet.</p>
+                </div>
+                <!-- pipeline: rendered from the preflight report (main.js),
+                     not a hardcoded label. Each stage lights up green/amber/red
+                     from the report's tool + model flags. -->
+                <div class="pipeline" id="pipeline" aria-live="polite">
+                  <div class="panel__head"><span class="panel__label">OCR Pipeline</span></div>
+                  <div class="pipeline__engine" id="pipelineEngine">Unlimited-OCR &middot; —</div>
+                  <ul class="pipeline__stages" id="pipelineStages">
+                    <li class="stage" data-stage="tools">
+                      <span class="stage__dot"></span><span class="stage__name">Tools (llama-server, pdftoppm)</span>
+                    </li>
+                    <li class="stage" data-stage="model">
+                      <span class="stage__dot"></span><span class="stage__name">Model GGUF</span>
+                    </li>
+                    <li class="stage" data-stage="mmproj">
+                      <span class="stage__dot"></span><span class="stage__name">Projector (mmproj)</span>
+                    </li>
+                  </ul>
+                </div>
+              </aside>
+
+              <!-- center: PDF preview -->
+              <div class="panel preview">
+                <div class="preview__head">
+                  <span class="preview__title">PDF Preview</span>
+                  <div class="preview__spacer"></div>
+                  <span class="chip chip--soft">Page 1</span>
+                  <span class="chip chip--ghost">Layout regions</span>
+                </div>
+                <div class="preview__stage">
+                  <p class="placeholder">Import a PDF to see a page preview here.</p>
+                </div>
+                <div class="preview__foot">
+                  <div class="zoom">128%</div>
+                  <div class="preview__spacer"></div>
+                  <span class="preview__pagecount">page 0 / 0</span>
+                </div>
+              </div>
+
+              <!-- right: live transcript -->
+              <div class="panel transcript">
+                <div class="transcript__head">
+                  <span class="transcript__title">Live Transcript</span>
+                  <div class="transcript__spacer"></div>
+                  <span class="status-pill status-pill--idle"><span class="status-dot"></span>Idle</span>
+                </div>
+                <div class="transcript__engine">
+                  <span class="panel__label">OCR engine</span>
+                  <div class="seg" id="engineTabs">
+                    <button class="seg__btn is-active" type="button" data-engine="local">Unlimited-OCR</button>
+                    <button class="seg__btn" type="button" data-engine="remote">Remote</button>
+                  </div>
+                </div>
+                <!-- Model load bar (litellm-style). A model must be loaded before
+                     Run OCR is enabled; loading holds it warm in RAM, Unload frees
+                     it. Remote fields appear only for the Remote engine tab. The
+                     local quant is read from the Quant control in Engine options. -->
+                <div class="model-bar" id="modelBar">
+                  <div class="model-bar__remote" id="remoteFields" hidden>
+                    <input class="path-input" id="remoteUrl" type="text" spellcheck="false"
+                      placeholder="https://host:8080  (OpenAI-compatible base URL)" />
+                    <input class="path-input" id="remoteKey" type="password" spellcheck="false"
+                      placeholder="API key (optional)" />
+                  </div>
+                  <div class="model-bar__row">
+                    <button class="model-btn" id="loadModelBtn" type="button">Load model</button>
+                    <button class="model-btn model-btn--ghost" id="unloadModelBtn" type="button" disabled>Unload</button>
+                    <span class="model-bar__status" id="modelStatusText">No model loaded</span>
+                  </div>
+                </div>
+                <!-- EH-0005 bite 1: engine/options controls that drive the run.
+                     Each control defaults to unlocr::OcrOptions::default()
+                     (quant=Q8_0, max_tokens=4096, dpi=144, keep_images=false) so a
+                     user who touches nothing gets CLI-parity behavior. main.js reads
+                     these and forwards them into the run_ocr invoke payload. The
+                     editable prompt lives in bite 2 (it gets its own row here). -->
+                <div class="opts" id="runOpts">
+                  <div class="panel__head"><span class="panel__label">Engine options</span></div>
+                  <div class="opts__grid">
+                    <label class="opts__field">
+                      <span class="opts__label">Quant</span>
+                      <select class="opts__select" id="optQuant">
+                        <option value="Q8_0" selected>Q8_0</option>
+                        <option value="Q4_K_M">Q4_K_M</option>
+                        <option value="BF16">BF16</option>
+                      </select>
+                    </label>
+                    <label class="opts__field">
+                      <span class="opts__label">DPI</span>
+                      <input class="opts__num" id="optDpi" type="number" min="72" max="600" step="1" value="144" />
+                    </label>
+                    <label class="opts__field">
+                      <span class="opts__label">Max tokens</span>
+                      <input class="opts__num" id="optMaxTokens" type="number" min="256" max="32768" step="1" value="4096" />
+                    </label>
+                    <label class="opts__toggle">
+                      <input class="opts__check" id="optKeepImages" type="checkbox" />
+                      <span class="opts__toggle-label">Keep page images</span>
+                    </label>
+                  </div>
+                  <!-- EH-0005 bite 2: editable prompt. Seeded with the exact
+                       unlocr::OcrOptions::default().prompt string so a user who
+                       leaves it alone gets CLI-parity behavior. main.js forwards
+                       the (possibly edited) value into the run_ocr payload.
+                       spellcheck off because the grounding tag is code, not prose. -->
+                  <label class="opts__field opts__field--full">
+                    <span class="opts__label">Prompt</span>
+                    <textarea
+                      class="opts__textarea"
+                      id="optPrompt"
+                      rows="2"
+                      spellcheck="false"
+                    >&lt;|grounding|&gt;Convert the document to markdown.</textarea>
+                  </label>
+                </div>
+                <div class="transcript__body" id="transcriptBody">
+                  <p class="placeholder" id="transcriptPlaceholder">Run OCR to stream the recognized markdown here.</p>
+                </div>
+                <!-- progress bar + status text for the current run. Driven by the
+                     ocr://progress / server-ready / page / done event listeners in
+                     main.js. Single bar: indeterminate until a page total is known,
+                     then determinate. -->
+                <div class="run-progress" id="runProgress" hidden>
+                  <div class="run-progress__bar"><div class="run-progress__fill" id="runProgressFill"></div></div>
+                  <span class="run-progress__status" id="runProgressStatus">Idle</span>
+                </div>
+                <!-- EH-0005 bite 2: a live "effective values" summary so the user
+                     sees exactly what the next Run will send before clicking it.
+                     Driven from the same controls readRunOptions() reads, so it can
+                     never drift from the actual payload. Updated on every control
+                     change + once on load. -->
+                <div class="effective" id="effectiveSummary" aria-live="polite">
+                  <span class="effective__label">Effective</span>
+                  <span class="effective__vals" id="effectiveVals">Q8_0 &middot; 144 DPI &middot; 4096 tok &middot; keep images off</span>
+                </div>
+                <div class="transcript__run">
+                  <button class="run-btn" id="runBtn" type="button">Run OCR</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- LIBRARY -->
+          <!-- EH-0006 bite 2: a grid of completed OCR runs read from the persisted
+               job store via the list_jobs command. Each card shows status, source
+               name, output path, timestamps, and the effective options. The head
+               count + refresh are bound by main.js makeLibrary(). Empty store ->
+               placeholder. EH-0006 bite 4: the grid is also a PDF drop target;
+               dropping PDF files here enqueues a run_ocr job per file (handled in
+               main.js wireLibraryDrop via the tauri://drag-drop event channel). -->
+          <section class="view" data-view="library">
+            <div class="panel panel--full library">
+              <div class="library__head">
+                <span class="panel__label">Library</span>
+                <span class="panel__count" id="libraryCount">0</span>
+                <div class="library__spacer"></div>
+                <!-- EH-0006 bite 4: hint that the grid accepts dropped PDFs. The
+                     actual import runs through the OS-level drag-drop event, so
+                     this is affordance only (not an HTML5 dropzone). -->
+                <span class="library__drop-hint">Drop PDFs to import</span>
+                <button class="library__refresh" id="libraryRefresh" type="button" title="Reload from store">Reload</button>
+              </div>
+              <!-- grid of job cards. main.js rebuilds .job-card children here from
+                   list_jobs(); aria-live so a screen reader announces a new run.
+                   data-drop-zone marks this as the drag-drop target so main.js can
+                   scope the highlight to the Library view. -->
+              <div class="library__grid" id="libraryGrid" data-drop-zone="library" aria-live="polite" aria-label="OCR jobs; drop PDF files here to import and run them">
+                <p class="placeholder placeholder--centered" id="libraryEmpty">No OCR jobs yet. Run OCR to populate the library.</p>
+              </div>
+            </div>
+          </section>
+
+          <!-- BOARD -->
+          <!-- EH-0006 bite 3: a kanban of OCR jobs grouped by status column
+               (queued / running / done / failed), read from the same persisted
+               store as the Library grid. Each column lists the jobs that share
+               its status (newest-first). main.js makeBoard() owns this DOM and
+               reloads it on app start, after a Run, and on Board tab switch. -->
+          <section class="view" data-view="board">
+            <div class="panel panel--full board">
+              <div class="board__head">
+                <span class="panel__label">Workflow board</span>
+                <span class="panel__count" id="boardCount">0</span>
+                <div class="board__spacer"></div>
+                <button class="board__refresh" id="boardRefresh" type="button" title="Reload from store">Reload</button>
+              </div>
+              <!-- columns. Each .board__col renders one .board__col-list of
+                   .job-card children (the same card the Library grid uses). aria-live
+                   so a screen reader announces a job moving between columns. -->
+              <div class="board__cols">
+                <div class="board__col board__col--queued">
+                  <div class="board__col-head">
+                    <span class="board__col-dot board__col-dot--queued"></span>
+                    <span class="board__col-name">Queued</span>
+                    <span class="board__col-count" id="boardColQueued">0</span>
+                  </div>
+                  <div class="board__col-list" id="boardColQueuedList" aria-live="polite"></div>
+                </div>
+                <div class="board__col board__col--running">
+                  <div class="board__col-head">
+                    <span class="board__col-dot board__col-dot--running"></span>
+                    <span class="board__col-name">Running</span>
+                    <span class="board__col-count" id="boardColRunning">0</span>
+                  </div>
+                  <div class="board__col-list" id="boardColRunningList" aria-live="polite"></div>
+                </div>
+                <div class="board__col board__col--done">
+                  <div class="board__col-head">
+                    <span class="board__col-dot board__col-dot--done"></span>
+                    <span class="board__col-name">Done</span>
+                    <span class="board__col-count" id="boardColDone">0</span>
+                  </div>
+                  <div class="board__col-list" id="boardColDoneList" aria-live="polite"></div>
+                </div>
+                <div class="board__col board__col--failed">
+                  <div class="board__col-head">
+                    <span class="board__col-dot board__col-dot--failed"></span>
+                    <span class="board__col-name">Failed</span>
+                    <span class="board__col-count" id="boardColFailed">0</span>
+                  </div>
+                  <div class="board__col-list" id="boardColFailedList" aria-live="polite"></div>
+                </div>
+              </div>
+              <p class="placeholder placeholder--centered" id="boardEmpty" hidden>No OCR jobs yet. Run OCR to populate the board.</p>
+            </div>
+          </section>
+
+          <!-- REVIEW -->
+          <section class="view" data-view="review">
+            <div class="panel panel--full md-pane">
+              <div class="md-pane__head">
+                <span class="panel__label">Markdown review</span>
+                <div class="md-pane__spacer"></div>
+                <!-- read-only: the produced stem.md lives on disk; this pane shows
+                     its contents after a run (EH-0004 bite 2). No edit affordance. -->
+                <span class="chip chip--soft md-pane__source" id="mdSource" hidden></span>
+              </div>
+              <!-- read-only rendered output. populated by main.js after a run: it
+                   fetches the written {stem}.md (path returned by the ocr command)
+                   and renders the markdown source here. contenteditable=false so the
+                   pane is visibly non-editable (a dedicated read-only surface). -->
+              <div class="md-pane__body" id="mdBody" contenteditable="false" spellcheck="false">
+                <p class="placeholder placeholder--centered" id="mdPlaceholder">Run OCR, then open this view to read the produced markdown.</p>
+              </div>
+            </div>
+          </section>
+
+          <!-- SETTINGS -->
+          <!-- Persisted via get_settings/save_settings (settings.json under the
+               model cache dir). Seeds the provider mode + engine-option defaults. -->
+          <section class="view" data-view="settings">
+            <div class="panel panel--full settings">
+              <div class="panel__head">
+                <span class="panel__label">Settings</span>
+                <div class="settings__spacer"></div>
+                <button class="model-btn" id="settingsSave" type="button">Save settings</button>
+              </div>
+              <div class="settings__form">
+                <label class="opts__field">
+                  <span class="opts__label">Provider mode</span>
+                  <select class="opts__select" id="setMode">
+                    <option value="local">Local (llama-server)</option>
+                    <option value="remote">Remote (OpenAI-compatible)</option>
+                  </select>
+                </label>
+                <label class="opts__field">
+                  <span class="opts__label">Default quant</span>
+                  <select class="opts__select" id="setQuant">
+                    <option value="Q8_0">Q8_0</option>
+                    <option value="Q4_K_M">Q4_K_M</option>
+                    <option value="BF16">BF16</option>
+                  </select>
+                </label>
+                <label class="opts__field opts__field--full">
+                  <span class="opts__label">Remote base URL</span>
+                  <input class="path-input" id="setRemoteUrl" type="text" spellcheck="false"
+                    placeholder="https://host:8080" />
+                </label>
+                <label class="opts__field opts__field--full">
+                  <span class="opts__label">Remote API key</span>
+                  <input class="path-input" id="setRemoteKey" type="password" spellcheck="false"
+                    placeholder="optional bearer token" />
+                </label>
+                <label class="opts__field opts__field--full">
+                  <span class="opts__label">llama-server path (optional override)</span>
+                  <input class="path-input" id="setLlamaBin" type="text" spellcheck="false"
+                    placeholder="leave empty to resolve from PATH / Homebrew" />
+                </label>
+                <label class="opts__field">
+                  <span class="opts__label">Default DPI</span>
+                  <input class="opts__num" id="setDpi" type="number" min="72" max="600" step="1" value="144" />
+                </label>
+                <label class="opts__field">
+                  <span class="opts__label">Default max tokens</span>
+                  <input class="opts__num" id="setMaxTokens" type="number" min="256" max="32768" step="1" value="4096" />
+                </label>
+                <label class="opts__field opts__field--full">
+                  <span class="opts__label">Default prompt</span>
+                  <textarea class="opts__textarea" id="setPrompt" rows="2" spellcheck="false"></textarea>
+                </label>
+              </div>
+              <p class="settings__note">API key is stored in plaintext in settings.json under the model cache dir. Use a key scoped to this device.</p>
+              <span class="settings__saved" id="settingsSaved" hidden>Saved.</span>
+            </div>
+          </section>
+
         </main>
       </div>
     </div>

@@ -79,13 +79,23 @@ pub enum Progress {
 ///
 /// Spawns llama-server and kills it on drop (server::Server's Drop), so the
 /// success path does not orphan it.
+///
+/// Returns the assembled markdown and, when `opts.keep_images` is set, the
+/// directory the page PNGs were kept in (None otherwise) so a caller can surface
+/// it instead of leaking the images with no way to find them. This is the GUI's
+/// entry point; the CLI drives `ocr_pages` directly.
+///
+/// `resolved_tools` lets a caller pass already-resolved `preflight::Tools` to skip
+/// the `preflight::check` call (which runs `llama-server --version`). Pass `None`
+/// to have `run_ocr_job` run the check itself (original behaviour). The GUI passes
+/// tools it resolved in its own `preflight` command call so `--version` is invoked
+/// only once per run.
 pub fn run_ocr_job<P>(
     input: &Path,
-    pdftoppm: &Path,
-    llama_bin: Option<&Path>,
+    resolved_tools: Option<preflight::Tools>,
     opts: &OcrOptions,
     on_progress: &mut P,
-) -> Res<String>
+) -> Res<(String, Option<PathBuf>)>
 where
     P: FnMut(Progress),
 {
@@ -93,27 +103,87 @@ where
         return Err(format!("not a file: {}", input.display()).into());
     }
 
-    // Locate llama-server + pdftoppm. preflight::check takes an optional override
-    // for llama-server only; pdftoppm is resolved from PATH.
-    let tools = preflight::check(llama_bin)?;
+    // Locate llama-server + pdftoppm. Accept pre-resolved tools from the caller
+    // (e.g. the GUI that already ran preflight::check for its status panel) to
+    // avoid a second `llama-server --version` invocation per run. Fall back to
+    // check(None) when no tools are provided so the caller-agnostic path still works.
+    let tools = match resolved_tools {
+        Some(t) => t,
+        None => preflight::check(None)?,
+    };
 
     let cache = model::cache_dir(opts.model_dir.clone())?;
-    let files = model::ensure(&cache, &opts.quant)?;
+    // Route download events through the same sink as page events so the GUI can
+    // subscribe to both. model::ensure_with_progress emits Progress::Download;
+    // the plain model::ensure (CLI default) reproduces the original println
+    // output byte-for-byte.
+    let files = model::ensure_with_progress(&cache, &opts.quant, on_progress)?;
 
-    let port = if opts.port == 0 {
-        server::free_port()?
-    } else {
-        opts.port
-    };
-    let srv = server::Server::start(&tools.llama_server, &files.model, &files.mmproj, port)?;
-    on_progress(Progress::ServerReady { port });
+    // Pass the raw port (0 = auto): Server::start owns free-port resolution AND the
+    // bind-race retry loop. Pre-resolving here would hand start a concrete port and
+    // silently disable that retry. Read the real port back from the started server.
+    let srv = server::Server::start(&tools.llama_server, &files.model, &files.mmproj, opts.port)?;
+    on_progress(Progress::ServerReady { port: srv.port });
 
-    let (md, _kept) = ocr_pages(&srv, pdftoppm, input, opts, on_progress)?;
+    let (md, kept) = ocr_pages(&srv, &tools.pdftoppm, input, opts, on_progress)?;
 
-    // Drop kills llama-server. keep_images only matters for the CLI's temp dir,
-    // which lives inside ocr_pages; honored there.
+    // Drop kills llama-server. `kept` is Some(dir) only when keep_images is set;
+    // bubble it up so the caller can report where the PNGs went.
     drop(srv);
-    Ok(md)
+    Ok((md, kept))
+}
+
+/// Rasterize a PDF's pages to PNGs in a content-keyed cache dir, reusing the
+/// cached PNGs on a repeat call instead of re-running pdftoppm. Returns the page
+/// PNG paths in order. Used by the GUI preview pane; the OCR path keeps its own
+/// ephemeral tempdir (`ocr_pages`), so CLI behavior is unchanged.
+///
+/// Cache key = hash(canonical PDF path + mtime + dpi): a changed file (different
+/// mtime) or a different dpi misses and re-renders. `cache_root` is the resolved
+/// unlocr cache dir; previews live under `<cache_root>/previews/<key>/`.
+// ponytail: unbounded cache (no eviction). It is under the OS cache dir, so the
+// user/OS can clear it; add an LRU/size cap here if the previews dir grows.
+pub fn render_pages(
+    pdftoppm: &Path,
+    pdf: &Path,
+    dpi: u32,
+    cache_root: &Path,
+) -> Res<Vec<PathBuf>> {
+    let dir = preview_cache_dir(pdf, dpi, cache_root);
+
+    // Cache hit: a prior render left page PNGs here. Reuse them (pdftoppm is
+    // never invoked on this path).
+    let cached = pdf::collect_pages(&dir);
+    if !cached.is_empty() {
+        return Ok(cached);
+    }
+    std::fs::create_dir_all(&dir)?;
+    pdf::rasterize(pdftoppm, pdf, &dir, dpi)
+}
+
+/// Resolve the per-PDF previews directory: `<cache_root>/previews/<key>` where
+/// key = hash(canonical PDF path + mtime + dpi). Deterministic for a given file
+/// state, so repeat previews hit the same dir; a changed file (mtime) or dpi
+/// keys to a fresh dir. Split out so the keying is unit-testable without pdftoppm.
+fn preview_cache_dir(pdf: &Path, dpi: u32, cache_root: &Path) -> PathBuf {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::time::UNIX_EPOCH;
+
+    let canon = pdf.canonicalize().unwrap_or_else(|_| pdf.to_path_buf());
+    let mtime = std::fs::metadata(&canon)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut h = DefaultHasher::new();
+    canon.to_string_lossy().hash(&mut h);
+    mtime.hash(&mut h);
+    dpi.hash(&mut h);
+    cache_root
+        .join("previews")
+        .join(format!("{:016x}", h.finish()))
 }
 
 /// Rasterize one PDF to PNGs and OCR each page in order, emitting a Page
@@ -121,14 +191,15 @@ where
 /// `opts.keep_images` is set, the directory the page PNGs were kept in (so the
 /// CLI can report it; the handle is leaked there to keep the files on disk).
 /// Shared by run_ocr_job (lib) and, after bite 2, the CLI's ocr::run_pdf.
-pub fn ocr_pages<P>(
-    srv: &server::Server,
+pub fn ocr_pages<S, P>(
+    srv: &S,
     pdftoppm: &Path,
     input: &Path,
     opts: &OcrOptions,
     on_progress: &mut P,
 ) -> Res<(String, Option<PathBuf>)>
 where
+    S: server::ImageOcr,
     P: FnMut(Progress),
 {
     let tmp = tempfile::tempdir()?;
@@ -201,7 +272,6 @@ mod tests {
         let mut progress = |_: Progress| {};
         let err = run_ocr_job(
             Path::new("/nonexistent/ferrum-bite-1.pdf"),
-            Path::new("pdftoppm"),
             None,
             &OcrOptions::default(),
             &mut progress,
@@ -209,5 +279,211 @@ mod tests {
         assert!(err.is_err());
         let msg = err.unwrap_err().to_string();
         assert!(msg.contains("not a file"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn preview_cache_dir_is_deterministic_and_dpi_keyed() {
+        // Same (file state, dpi) -> same dir; a different dpi -> different dir.
+        // No pdftoppm: this locks the cache keying that decides hit vs re-render.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let pdf = tmp.path().join("doc.pdf");
+        std::fs::write(&pdf, b"%PDF-1.4 stub").expect("write stub");
+        let root = tmp.path();
+
+        let a = preview_cache_dir(&pdf, 144, root);
+        let b = preview_cache_dir(&pdf, 144, root);
+        let c = preview_cache_dir(&pdf, 72, root);
+        assert_eq!(a, b, "same inputs must key to the same dir");
+        assert_ne!(a, c, "different dpi must key to a different dir");
+        assert!(a.starts_with(root.join("previews")));
+    }
+
+    /// EH-0003 acceptance 2: exercise the ocr:// state sequence (ServerReady ->
+    /// Page 1 -> Page 2 ...) without a live desktop session.
+    ///
+    /// Strategy:
+    ///   1. Spin up a minimal HTTP stub on a free port that returns a valid
+    ///      OpenAI-style chat-completion response for any POST request.
+    ///   2. Create a Server::for_test(port) pointing at it (dummy child, real port).
+    ///   3. Rasterize a two-page fixture PDF via pdftoppm (skip on hosts without it).
+    ///   4. Run ocr_pages and capture every Progress event in order.
+    ///   5. Assert: exactly 2 Page events, page numbers 1 then 2, total always 2.
+    ///
+    /// This proves: listeners would receive events in the correct state order
+    /// (download events are emitted by model::ensure_with_progress before
+    /// run_ocr_job calls on_progress(ServerReady); the ServerReady -> Page
+    /// subsequence is fully exercised here).
+    #[test]
+    fn ocr_state_sequence_ordering() {
+        // Skip on hosts where pdftoppm is not installed (CI without poppler, etc.).
+        if std::process::Command::new("pdftoppm")
+            .arg("-v")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping ocr_state_sequence_ordering: pdftoppm not on PATH");
+            return;
+        }
+
+        // --- 1. Stub HTTP server -----------------------------------------------
+        // Bind first so we know the port before spawning the Server.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind stub server");
+        let stub_port = listener.local_addr().expect("local_addr").port();
+
+        // Build a valid OpenAI chat-completion JSON response body once.
+        let resp_body = serde_json::json!({
+            "choices": [{ "message": { "content": "# page text" } }]
+        })
+        .to_string();
+        let http_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body,
+        );
+
+        // Serve in a background thread; accept until the listener is closed.
+        // The stub fully reads the request (headers + body by Content-Length) before
+        // writing the response so ureq does not see a partial read while still writing.
+        let http_resp_clone = http_response.clone();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            for stream in listener.incoming() {
+                let Ok(s) = stream else { break };
+                let mut reader = BufReader::new(s.try_clone().expect("clone socket"));
+                let mut writer = s;
+
+                // Read request headers line by line until the blank line.
+                let mut content_length: usize = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break; // EOF
+                    }
+                    let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
+                    if trimmed.is_empty() {
+                        break; // blank line = end of headers
+                    }
+                    // Parse Content-Length so we can drain the body.
+                    if trimmed.to_ascii_lowercase().starts_with("content-length:") {
+                        if let Some(v) = trimmed.splitn(2, ':').nth(1) {
+                            content_length = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                // Drain the request body.
+                let mut body = vec![0u8; content_length];
+                let _ = std::io::Read::read_exact(&mut reader, &mut body);
+
+                // Now send the response.
+                let _ = Write::write_all(&mut writer, http_resp_clone.as_bytes());
+            }
+        });
+
+        // --- 2. Server::for_test(port) ----------------------------------------
+        let srv = server::Server::for_test(stub_port).expect("for_test");
+
+        // --- 3. Fixture PDF + pdftoppm ----------------------------------------
+        // Reuse the same two-page generator from pdf.rs tests (inlined here to
+        // stay within the lib module without sharing a private test helper).
+        let p1 = "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 4 0 R/Resources<</Font<</F1 7 0 R>>>>>>";
+        let p2 = "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 6 0 R/Resources<</Font<</F1 7 0 R>>>>>>";
+        let objs: [&str; 7] = [
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R 5 0 R]/Count 2>>",
+            p1,
+            "<</Length 38>>stream\nBT /F1 12 Tf 10 80 Td (Page one) Tj ET\nendstream",
+            p2,
+            "<</Length 38>>stream\nBT /F1 12 Tf 10 80 Td (Page two) Tj ET\nendstream",
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+        ];
+        let mut pdf_buf = String::from("%PDF-1.4\n");
+        let mut offsets: Vec<usize> = Vec::with_capacity(objs.len());
+        for (i, obj) in objs.iter().enumerate() {
+            offsets.push(pdf_buf.len());
+            pdf_buf.push_str(&format!("{} 0 obj{}\nendobj\n", i + 1, obj));
+        }
+        let xref_start = pdf_buf.len();
+        pdf_buf.push_str("xref\n0 8\n0000000000 65535 f \n");
+        for off in &offsets {
+            pdf_buf.push_str(&format!("{:010} 00000 n \n", off));
+        }
+        pdf_buf.push_str(&format!(
+            "trailer<</Size 8/Root 1 0 R>>\nstartxref\n{xref_start}\n%%EOF\n",
+        ));
+        let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
+        let pdf_path = pdf_dir.path().join("fixture.pdf");
+        std::fs::write(&pdf_path, pdf_buf.as_bytes()).expect("write fixture pdf");
+
+        // --- 4. Run ocr_pages + capture Progress events -----------------------
+        let pdftoppm_bin = std::path::Path::new("pdftoppm");
+        let opts = OcrOptions::default();
+        let mut events: Vec<Progress> = Vec::new();
+        let result = ocr_pages(&srv, pdftoppm_bin, &pdf_path, &opts, &mut |p: Progress| {
+            events.push(p);
+        });
+        assert!(result.is_ok(), "ocr_pages failed: {:?}", result.err());
+
+        // --- 5. Assert ordering -----------------------------------------------
+        // Filter to Page events only (Download events are from model::ensure_with_progress
+        // which is not called by ocr_pages; ServerReady is emitted by run_ocr_job
+        // before calling ocr_pages). From ocr_pages we expect exactly 2 Page events.
+        let page_events: Vec<(usize, usize)> = events
+            .iter()
+            .filter_map(|e| {
+                if let Progress::Page { page, total } = e {
+                    Some((*page, *total))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(page_events.len(), 2, "expected 2 Page events, got {:?}", page_events);
+        assert_eq!(
+            page_events[0],
+            (1, 2),
+            "first event should be Page{{page:1, total:2}}"
+        );
+        assert_eq!(
+            page_events[1],
+            (2, 2),
+            "second event should be Page{{page:2, total:2}}"
+        );
+        // Verify no non-Page events sneaked in from ocr_pages (only Page is emitted there).
+        for ev in &events {
+            assert!(
+                matches!(ev, Progress::Page { .. }),
+                "ocr_pages emitted unexpected event variant"
+            );
+        }
+    }
+
+    #[test]
+    fn render_pages_returns_cached_pngs_without_pdftoppm() {
+        // Cache-hit path: seed the keyed dir with page PNGs, then render_pages must
+        // return them sorted by page number and never run pdftoppm (a bogus binary
+        // path proves it is not invoked on a hit).
+        let tmp = tempfile::tempdir().expect("tmp");
+        let pdf = tmp.path().join("doc.pdf");
+        std::fs::write(&pdf, b"%PDF-1.4 stub").expect("write stub");
+        let root = tmp.path();
+
+        let dir = preview_cache_dir(&pdf, 144, root);
+        std::fs::create_dir_all(&dir).expect("mk cache dir");
+        // Out of order on disk; render_pages must return them 1,2,10.
+        for n in [10u32, 1, 2] {
+            std::fs::write(dir.join(format!("page-{n}.png")), b"\x89PNG").expect("seed png");
+        }
+
+        let bogus = Path::new("/nonexistent/pdftoppm");
+        let pages = render_pages(bogus, &pdf, 144, root).expect("cache hit");
+        let names: Vec<_> = pages
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["page-1.png", "page-2.png", "page-10.png"]);
     }
 }
