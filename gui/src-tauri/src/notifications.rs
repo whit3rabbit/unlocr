@@ -125,52 +125,60 @@ fn next_id(items: &[Notification], created_at: u64) -> String {
 /// can push it into its in-memory list without a reload.
 pub fn add(kind: &str, title: &str, body: &str) -> Result<Notification, String> {
     let created_at = crate::store::now_secs();
-    let mut items = load();
-    let n = Notification {
-        id: next_id(&items, created_at),
-        kind: kind.to_string(),
-        title: title.to_string(),
-        body: body.to_string(),
-        created_at,
-        read: false,
-    };
-    items.push(n.clone());
-    save(&items)?;
-    Ok(n)
+    // Serialize load-mutate-save so concurrent adds cannot lose one (see jsonstore).
+    crate::jsonstore::with_write_lock(|| {
+        let mut items = load();
+        let n = Notification {
+            id: next_id(&items, created_at),
+            kind: kind.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            created_at,
+            read: false,
+        };
+        items.push(n.clone());
+        save(&items)?;
+        Ok(n)
+    })
 }
 
 /// Remove one notification by id. A missing id is a no-op success (the UI may
 /// clear a stale row); the store is only rewritten when something changed.
 pub fn clear(id: &str) -> Result<(), String> {
-    let mut items = load();
-    let before = items.len();
-    items.retain(|n| n.id != id);
-    if items.len() != before {
-        save(&items)?;
-    }
-    Ok(())
+    crate::jsonstore::with_write_lock(|| {
+        let mut items = load();
+        let before = items.len();
+        items.retain(|n| n.id != id);
+        if items.len() != before {
+            save(&items)?;
+        }
+        Ok(())
+    })
 }
 
 /// Mark every notification read and persist. Returns the updated list so the
 /// frontend can re-render without a reload. Cheap full rewrite (small list).
 pub fn mark_all_read() -> Result<Vec<Notification>, String> {
-    let mut items = load();
-    let mut changed = false;
-    for n in items.iter_mut() {
-        if !n.read {
-            n.read = true;
-            changed = true;
+    crate::jsonstore::with_write_lock(|| {
+        let mut items = load();
+        let mut changed = false;
+        for n in items.iter_mut() {
+            if !n.read {
+                n.read = true;
+                changed = true;
+            }
         }
-    }
-    if changed {
-        save(&items)?;
-    }
-    Ok(items)
+        if changed {
+            save(&items)?;
+        }
+        Ok(items)
+    })
 }
 
 /// Drop every notification (Clear all). Writes an empty list.
 pub fn clear_all() -> Result<(), String> {
-    save(&[])
+    // Under the lock so it cannot interleave with an in-flight add's load/save.
+    crate::jsonstore::with_write_lock(|| save(&[]))
 }
 
 #[cfg(test)]

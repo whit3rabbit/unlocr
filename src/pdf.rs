@@ -11,17 +11,19 @@ pub fn rasterize(pdftoppm: &Path, pdf: &Path, outdir: &Path, dpi: u32) -> Res<Ve
 }
 
 /// Like `rasterize`, but when `range` is `Some((first, last))` (1-based inclusive)
-/// passes `-f`/`-l` so pdftoppm renders only that page span. pdftoppm preserves the
-/// real page number in the filename suffix (e.g. `-f 5` -> `page-5.png`), so
-/// `collect_pages`/`trailing_number` keep working and the caller can recover the
-/// true page number. pdftoppm zero-pads the suffix based on page count, so we sort
-/// by the parsed trailing integer rather than lexically.
+/// passes `-f`/`-l` so pdftoppm renders only that page span. An open upper bound
+/// (`last == None`) emits `-f first` with no `-l`, which pdftoppm renders to the
+/// end of the document. pdftoppm preserves the real page number in the filename
+/// suffix (e.g. `-f 5` -> `page-5.png`), so `collect_pages`/`trailing_number` keep
+/// working and the caller can recover the true page number. pdftoppm zero-pads the
+/// suffix based on page count, so we sort by the parsed trailing integer rather
+/// than lexically.
 pub fn rasterize_range(
     pdftoppm: &Path,
     pdf: &Path,
     outdir: &Path,
     dpi: u32,
-    range: Option<(u32, u32)>,
+    range: Option<(u32, Option<u32>)>,
 ) -> Res<Vec<PathBuf>> {
     let prefix = outdir.join("page");
     // pdftoppm has no `--` end-of-options guard, so a relative path that begins
@@ -34,10 +36,11 @@ pub fn rasterize_range(
     let mut cmd = Command::new(pdftoppm);
     cmd.arg("-png").arg("-r").arg(dpi.to_string());
     if let Some((first, last)) = range {
-        cmd.arg("-f")
-            .arg(first.to_string())
-            .arg("-l")
-            .arg(last.to_string());
+        cmd.arg("-f").arg(first.to_string());
+        // Open upper bound (last == None) omits -l: pdftoppm renders to EOF.
+        if let Some(last) = last {
+            cmd.arg("-l").arg(last.to_string());
+        }
     }
     let status = cmd.arg(&pdf_arg).arg(&prefix).status()?;
     if !status.success() {
@@ -194,6 +197,54 @@ mod tests {
             assert!(meta.len() > 0, "page {} png is empty", i + 1);
             assert_eq!(trailing_number(p), Some((i + 1) as u64));
         }
+    }
+
+    // Open upper bound (`Some((first, None))`) must render `first..EOF`, not a
+    // single page: this is the fix for the GUI "pages N-end" path that previously
+    // collapsed to one page. On the 2-page fixture, `(2, None)` yields exactly page
+    // 2 (the last), and `(1, None)` yields both, proving `-f first` with no `-l`
+    // reaches the end of the document. Skips without pdftoppm.
+    #[test]
+    fn rasterize_open_upper_bound_renders_to_end() {
+        if std::process::Command::new("pdftoppm")
+            .arg("-v")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping rasterize_open_upper_bound_renders_to_end: pdftoppm not on PATH");
+            return;
+        }
+
+        let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
+        let pdf_path = pdf_dir.path().join("fixture.pdf");
+        std::fs::write(&pdf_path, minimal_two_page_pdf()).expect("write fixture pdf");
+        let pdftoppm = Path::new("pdftoppm");
+
+        // (2, None) = from page 2 to end -> just page 2 on a 2-page PDF.
+        let out_tail = tempfile::tempdir().expect("tmp tail dir");
+        let tail =
+            super::rasterize_range(pdftoppm, &pdf_path, out_tail.path(), 72, Some((2, None)))
+                .expect("rasterize open tail");
+        assert_eq!(
+            tail.len(),
+            1,
+            "expected 1 page from (2, None), got {}",
+            tail.len()
+        );
+        assert_eq!(trailing_number(&tail[0]), Some(2));
+
+        // (1, None) = whole document -> both pages.
+        let out_all = tempfile::tempdir().expect("tmp all dir");
+        let all = super::rasterize_range(pdftoppm, &pdf_path, out_all.path(), 72, Some((1, None)))
+            .expect("rasterize open all");
+        assert_eq!(
+            all.len(),
+            2,
+            "expected 2 pages from (1, None), got {}",
+            all.len()
+        );
     }
 
     // GUI-12 (EH-0011) acceptance evidence, headless: the preview pane calls

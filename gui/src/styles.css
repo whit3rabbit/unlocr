@@ -1049,24 +1049,109 @@ button {
   white-space: nowrap;
 }
 
+/* Holds the EasyMDE editor; the editor itself fills the height (overrides below). */
 .md-pane__body {
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  padding: 16px 18px;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 12.5px;
-  line-height: 1.55;
-  color: var(--tx);
-  white-space: pre-wrap;
-  word-break: break-word;
+  display: flex;
 }
 
-/* The rendered markdown source block inside the review pane. */
-.md-pane__body pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
+/* Save button in the review pane head. */
+.md-pane__save {
+  flex: none;
+  padding: 6px 14px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--accent-bg);
+  color: var(--hi);
+  font-size: 12px;
+  cursor: pointer;
+}
+.md-pane__save:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.md-pane__save:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Export menu (a <select> acting as a format menu) in the review pane head. */
+.md-pane__export {
+  flex: none;
+  padding: 6px 10px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--panel2);
+  color: var(--hi);
+  font-size: 12px;
+  cursor: pointer;
+}
+.md-pane__export:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ---------- EasyMDE dark-theme overrides ----------
+   EasyMDE ships its own (light) CSS (assets/easymde.min.css). These rules retheme it
+   to the app palette and make it fill the review pane. The toolbar uses text-label
+   buttons (no FontAwesome; see panes.js), so buttons are styled as text. */
+.md-pane__body .EasyMDEContainer {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+.md-pane__body .editor-toolbar {
+  flex: none;
+  border: none;
+  border-bottom: 1px solid var(--bd);
+  background: var(--panel2);
+  opacity: 1;
+}
+.md-pane__body .editor-toolbar button {
+  color: var(--tx);
+  border: none;
+  font-weight: 600;
+  min-width: 30px;
+}
+.md-pane__body .editor-toolbar button:hover,
+.md-pane__body .editor-toolbar button.active {
+  background: var(--accent-bg);
+  border: none;
+  color: var(--hi);
+}
+.md-pane__body .CodeMirror {
+  flex: 1;
+  min-height: 0;
+  border: none;
+  background: var(--panel);
+  color: var(--tx);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12.5px;
+}
+.md-pane__body .CodeMirror-cursor {
+  border-left-color: var(--hi);
+}
+.md-pane__body .CodeMirror-selected {
+  background: var(--accent-bg);
+}
+/* Preview (full + side-by-side): dark surface, app text. */
+.md-pane__body .editor-preview,
+.md-pane__body .editor-preview-side {
+  background: var(--panel);
+  color: var(--tx);
+}
+.md-pane__body .editor-preview a,
+.md-pane__body .editor-preview-side a {
+  color: var(--accent);
+}
+.md-pane__body .editor-preview pre,
+.md-pane__body .editor-preview code,
+.md-pane__body .editor-preview-side pre,
+.md-pane__body .editor-preview-side code {
+  background: var(--panel2);
+  color: var(--hi);
 }
 
 /* ---------- library grid (EH-0006 bite 2) ----------
@@ -1103,6 +1188,37 @@ button {
 }
 
 .library__refresh:hover {
+  background: var(--bg);
+}
+
+/* Danger-tinted bulk action (Remove all + delete) and per-card delete button. */
+.library__refresh--danger,
+.job-card__action--danger {
+  border-color: var(--danger, #c0392b);
+  color: var(--danger, #c0392b);
+}
+
+/* Per-card action footer: right-aligned small buttons, separated from the meta. */
+.job-card__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.job-card__action {
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--bd);
+  background: var(--panel2);
+  color: var(--tx);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.job-card__action:hover {
   background: var(--bg);
 }
 

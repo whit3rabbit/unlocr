@@ -60,8 +60,13 @@ export async function openInReview(outputPath, mdPane, buttons) {
  *  EH-0015: `mdPane` and `railButtons` are optional. When provided, cards for done
  *  jobs with an outputPath are clickable: clicking opens the .md in the review pane
  *  (via openInReview). The pointer cursor and a "Open in review" aria-label signal
- *  the affordance. Board column cards do not receive these so they stay inert. */
-export function renderJobCard(job, mdPane, railButtons) {
+ *  the affordance. Board column cards do not receive these so they stay inert.
+ *
+ *  `actions` is optional (Library only). When provided, the card grows a footer
+ *  row with "Remove" (record-only) and, for done jobs with an output, "Remove +
+ *  delete" (record + the .md on disk). Both stopPropagation so a click on a button
+ *  does not also trigger the card's open-in-review. Board cards omit `actions`. */
+export function renderJobCard(job, mdPane, railButtons, actions) {
   const card = document.createElement("div");
   const status = (job && job.status) || "queued";
   card.className = "job-card job-card--" + status;
@@ -126,7 +131,55 @@ export function renderJobCard(job, mdPane, railButtons) {
     });
   }
 
+  // Library-only action footer: remove (record) / remove + delete (record + .md).
+  if (actions) {
+    const row = document.createElement("div");
+    row.className = "job-card__actions";
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "job-card__action";
+    remove.textContent = "Remove";
+    remove.title = "Remove from library (leaves the file on disk)";
+    remove.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      actions.remove(job && job.id);
+    });
+    row.appendChild(remove);
+
+    if (status === "done" && outputPath) {
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "job-card__action job-card__action--danger";
+      del.textContent = "Remove + delete";
+      del.title = "Remove from library and delete the .md file from disk";
+      del.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        actions.removeDelete(job && job.id, outputPath);
+      });
+      row.appendChild(del);
+    }
+
+    card.appendChild(row);
+  }
+
   return card;
+}
+
+/** Native confirm via tauri-plugin-dialog (exposed at window.__TAURI__.dialog by
+ *  withGlobalTauri). Returns true only on an explicit confirm; fail-soft to false
+ *  (treat as cancel) when the dialog API is unavailable, so a destructive action
+ *  never proceeds without a confirmation. */
+async function confirmDestructive(message) {
+  try {
+    const dialog = window.__TAURI__ && window.__TAURI__.dialog;
+    if (!dialog || typeof dialog.ask !== "function") return false;
+    return await dialog.ask(message, { title: "unlocr", kind: "warning" });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("[library] confirm dialog failed", err);
+    return false;
+  }
 }
 
 /** EH-0006 bite 2: controller over the Library grid. Reads the persisted job
@@ -148,6 +201,8 @@ export function makeLibrary() {
   const count = document.getElementById("libraryCount");
   const empty = document.getElementById("libraryEmpty");
   const refresh = document.getElementById("libraryRefresh");
+  const removeAllBtn = document.getElementById("libraryRemoveAll");
+  const removeAllDeleteBtn = document.getElementById("libraryRemoveAllDelete");
   // Set by setReviewHooks() once mdPane + rail buttons are available.
   let _mdPane = null;
   let _railButtons = null;
@@ -168,9 +223,62 @@ export function makeLibrary() {
     }
     if (empty) empty.hidden = true;
     for (const job of list) {
-      grid.appendChild(renderJobCard(job, _mdPane, _railButtons));
+      grid.appendChild(renderJobCard(job, _mdPane, _railButtons, actions));
     }
   }
+
+  /** Per-card and bulk delete actions, wired to the delete_job / clear_jobs
+   *  commands. Record-only removals act immediately; file-deleting variants
+   *  confirm first (irreversible). Each refreshes the grid via load() after. */
+  const actions = {
+    async remove(id) {
+      if (!id) return;
+      try {
+        const t = requireTauri();
+        await t.core.invoke("delete_job", { id, deleteFile: false });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[library] delete_job failed", err);
+      }
+      load();
+    },
+    async removeDelete(id, outputPath) {
+      if (!id) return;
+      const name = jobBaseName(outputPath) || "this file";
+      if (!(await confirmDestructive("Delete " + name + " from disk? This cannot be undone.")))
+        return;
+      try {
+        const t = requireTauri();
+        await t.core.invoke("delete_job", { id, deleteFile: true });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[library] delete_job (with file) failed", err);
+      }
+      load();
+    },
+    async removeAll() {
+      try {
+        const t = requireTauri();
+        await t.core.invoke("clear_jobs", { deleteFiles: false });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[library] clear_jobs failed", err);
+      }
+      load();
+    },
+    async removeAllDelete() {
+      if (!(await confirmDestructive("Delete every OCR output file from disk? This cannot be undone.")))
+        return;
+      try {
+        const t = requireTauri();
+        await t.core.invoke("clear_jobs", { deleteFiles: true });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[library] clear_jobs (with files) failed", err);
+      }
+      load();
+    },
+  };
 
   /** Fetch jobs from the store and render. Failures log + render empty rather than
    *  throw so a first launch (no store) never breaks the Library view. */
@@ -197,6 +305,12 @@ export function makeLibrary() {
   if (refresh) {
     refresh.addEventListener("click", load);
   }
+  if (removeAllBtn) {
+    removeAllBtn.addEventListener("click", () => actions.removeAll());
+  }
+  if (removeAllDeleteBtn) {
+    removeAllDeleteBtn.addEventListener("click", () => actions.removeAllDelete());
+  }
 
   /** EH-0015: inject the review-pane controller and rail buttons so done job
    *  cards become clickable. Call once in DOMContentLoaded after both are live.
@@ -208,7 +322,7 @@ export function makeLibrary() {
     load();
   }
 
-  return { load, render, setReviewHooks };
+  return { load, render, setReviewHooks, actions };
 }
 
 /** EH-0006: record a run's outcome to the job store after run_ocr completes or

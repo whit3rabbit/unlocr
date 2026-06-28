@@ -4,6 +4,24 @@
 //! Kept in one place so a durability or retention fix lands once, not three times.
 
 use std::path::Path;
+use std::sync::Mutex;
+
+/// One process-wide lock for ALL json-store read-modify-write sequences. `write_atomic`
+/// stops a *torn* file, but not a *lost update*: two writers that each load N records,
+/// mutate, and save N+1 would clobber one. Serializing the whole load-mutate-save
+/// through this lock closes that window. ponytail: a single coarse lock across all
+/// three stores; fine because writes are rare (one per OCR run / settings save /
+/// notification) and the blobs are tiny. Switch to per-file locks only if write
+/// throughput ever matters.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Run `f` while holding the global store write lock. Wrap each store's full
+/// load-mutate-save in this. Recovers from a poisoned lock (a panic in a prior
+/// critical section) because the state lives on disk, not behind the mutex.
+pub(crate) fn with_write_lock<R>(f: impl FnOnce() -> R) -> R {
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    f()
+}
 
 /// Atomically replace `path` with `bytes`: write a sibling `.json.tmp` then rename
 /// over the target (rename is atomic on the same filesystem). A partial write can

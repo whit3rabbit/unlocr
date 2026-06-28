@@ -3,8 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="styles.css" />
+    <!-- EasyMDE markdown editor (vendored, no bundler). CSS here, UMD globals below. -->
+    <link rel="stylesheet" href="assets/easymde.min.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>unlocr</title>
+    <!-- Classic (non-module) scripts: run before the deferred main.js module, so the
+         globals DOMPurify + EasyMDE exist when makeMarkdownPane() instantiates the
+         editor. DOMPurify first: EasyMDE's preview sanitizerFunction uses it. -->
+    <script src="assets/purify.min.js"></script>
+    <script src="assets/easymde.min.js"></script>
     <script type="module" src="/main.js" defer></script>
   </head>
 
@@ -164,7 +171,6 @@
                   <p class="placeholder">Import a PDF to see a page preview here.</p>
                 </div>
                 <div class="preview__foot">
-                  <div class="zoom">128%</div>
                   <div class="preview__spacer"></div>
                   <button class="preview__nav" id="prevPage" type="button" aria-label="Previous page" title="Previous page">◀</button>
                   <span class="preview__pagecount">page 0 / 0</span>
@@ -197,7 +203,7 @@
                   <div class="transcript__engine-row">
                     <select class="opts__select" id="enginePreset">
                       <option value="llamacpp" selected>llama.cpp (managed local)</option>
-                      <option value="gpu">GPU full model (vLLM · DeepSeek-OCR)</option>
+                      <option value="gpu">GPU full model (vLLM · Unlimited-OCR)</option>
                       <option value="vllm">vLLM (http://127.0.0.1:8000)</option>
                       <option value="sglang">SGLang (http://127.0.0.1:30000)</option>
                       <option value="custom">Custom endpoint</option>
@@ -206,10 +212,10 @@
                   </div>
                   <!-- The full (non-GGUF) model runs on vLLM, not llama.cpp. This
                        preset just points the remote endpoint at a local vLLM serving
-                       deepseek-ai/DeepSeek-OCR; you must start that server yourself
+                       baidu/Unlimited-OCR; you must start that server yourself
                        (16GB+ VRAM). See the Colab notebook / README for the command. -->
                   <span class="opts__hint" id="gpuHint" hidden>
-                    Needs a local <code>vllm serve deepseek-ai/DeepSeek-OCR</code> (16GB+ VRAM).
+                    Needs a local <code>vllm serve baidu/Unlimited-OCR</code> (16GB+ VRAM).
                     See the README "Run the full model on GPU" section and the Colab notebook.
                   </span>
                 </div>
@@ -382,6 +388,8 @@
                      this is affordance only (not an HTML5 dropzone). -->
                 <span class="library__drop-hint">Drop PDFs to import</span>
                 <button class="library__refresh" id="libraryRefresh" type="button" title="Reload from store">Reload</button>
+                <button class="library__refresh" id="libraryRemoveAll" type="button" title="Remove all entries from the library (leaves files on disk)">Remove all</button>
+                <button class="library__refresh library__refresh--danger" id="libraryRemoveAllDelete" type="button" title="Remove all entries and delete their .md files from disk">Remove all + delete</button>
               </div>
               <!-- grid of job cards. main.js rebuilds .job-card children here from
                    list_jobs(); aria-live so a screen reader announces a new run.
@@ -454,16 +462,31 @@
               <div class="md-pane__head">
                 <span class="panel__label">Markdown review</span>
                 <div class="md-pane__spacer"></div>
-                <!-- read-only: the produced stem.md lives on disk; this pane shows
-                     its contents after a run (EH-0004 bite 2). No edit affordance. -->
+                <!-- the produced/opened stem.md lives on disk; this pane edits it via
+                     EasyMDE and saves back in place (write_text_file). -->
                 <span class="chip chip--soft md-pane__source" id="mdSource" hidden></span>
+                <!-- Save overwrites the loaded .md on disk. Disabled until a file is
+                     loaded (no path = in-memory result, nothing to overwrite). -->
+                <button class="md-pane__save" id="mdSave" type="button" disabled title="Save changes to the .md on disk">Save</button>
+                <!-- Export the loaded .md to another format via pandoc (export_markdown).
+                     Acts as a menu: picking a format fires the export, then resets. The
+                     written file is a sibling of the source. Needs pandoc on PATH (a
+                     missing-pandoc error is surfaced as a toast). Disabled until loaded. -->
+                <select class="md-pane__export" id="mdExport" disabled title="Export to another format (requires pandoc)">
+                  <option value="">Export…</option>
+                  <option value="html">HTML (.html)</option>
+                  <option value="docx">Word (.docx)</option>
+                  <option value="odt">OpenDocument (.odt)</option>
+                  <option value="rtf">Rich Text (.rtf)</option>
+                  <option value="txt">Plain text (.txt)</option>
+                </select>
               </div>
-              <!-- read-only rendered output. populated by main.js after a run: it
-                   fetches the written {stem}.md (path returned by the ocr command)
-                   and renders the markdown source here. contenteditable=false so the
-                   pane is visibly non-editable (a dedicated read-only surface). -->
-              <div class="md-pane__body" id="mdBody" contenteditable="false" spellcheck="false">
-                <p class="placeholder placeholder--centered" id="mdPlaceholder">Run OCR, then open this view to read the produced markdown.</p>
+              <!-- Editor surface: EasyMDE wraps this textarea (toolbar + undo/redo +
+                   live preview), instantiated in panes.js makeMarkdownPane(). The
+                   empty-state hint ("select a file in the Library") is the EasyMDE
+                   placeholder, not a separate node. -->
+              <div class="md-pane__body">
+                <textarea id="mdEditor"></textarea>
               </div>
             </div>
           </section>

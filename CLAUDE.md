@@ -35,11 +35,9 @@ Thin wrapper. Full usage/benchmarks in README.md.
   declare as a package dep. deb postinst / rpm %post warn if missing.
 
 ## Gotchas
-- `cargo clippy --workspace --all-targets -- -D warnings` currently FAILS on
-  pre-existing debt (~14 errors in untouched code: server.rs tests, main.rs,
-  ocr.rs match). The release gate lists clippy but the tree is already red. For an
-  unrelated change, verify YOUR diff adds no NEW lints (stash + compare error sets);
-  don't try to make the whole gate green.
+- `cargo clippy --workspace --all-targets -- -D warnings` is GREEN; the old
+  pre-existing debt was cleared. It is a real release gate (docs/RELEASE.md), so
+  keep it green: your diff must add no new lints.
 - Public lib API (consumed by gui crate): `run_ocr_job` + `OcrOptions` + `Progress`
   + `render_pages` (cached PDF->PNG for previews) + `resolve_output_path` (clap-free).
   Keep these stable; the GUI links via `path = "../.."`.
@@ -60,6 +58,17 @@ Thin wrapper. Full usage/benchmarks in README.md.
   Install hints in preflight.rs are macOS-only.
 - Model GGUFs download from HF on first run, cached at per-OS dir + `/unlocr`
   (model.rs). Renaming the binary changed this path: old `uocr` caches are orphaned.
+- TWO distinct model repos, do not conflate them:
+  - Local llama.cpp (managed-local path): the quantized GGUF build
+    `sahilchachra/Unlimited-OCR-GGUF` (`REPO` in model.rs). Downloaded + cached;
+    this is what `--quant`/the GUI quality tiers select.
+  - Remote GPU (`--gpu` / GUI "gpu" preset -> vLLM/SGLang): the full-precision
+    original `baidu/Unlimited-OCR` (`UNLIMITED_OCR_REPO` in main.rs), sent as the
+    `--endpoint-model` / request-body served name. NOT downloaded by us; the user
+    runs `vllm serve baidu/Unlimited-OCR` themselves.
+  Both names are wired in the GUI too (model.js gpu preset = baidu; quality tiers =
+  GGUF quants). Architecture-family comments may still say "DeepSeek-OCR" (the base
+  arch) and are intentionally not renamed.
 - Two independent "resolutions": `--dpi` is the PNG pixel size pdftoppm renders;
   `--image-max-tokens` is llama-server's vision-token budget (DeepSeek-OCR base/large
   detail). They stack. image-max-tokens + `--chat-template` are llama-server *startup*

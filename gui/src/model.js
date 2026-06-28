@@ -83,11 +83,14 @@ async function updateLoadLabel() {
 // (possibly prefilled) #remoteUrl, so presets need no extra plumbing.
 export const ENGINE_PRESETS = {
   llamacpp: { mode: "local", url: null },
-  // Full (non-GGUF) DeepSeek-OCR on GPU: same remote path as vllm, but also
-  // prefills the model name so the user does not have to know the repo id.
-  gpu: { mode: "remote", url: "http://127.0.0.1:8000", model: "deepseek-ai/DeepSeek-OCR" },
-  vllm: { mode: "remote", url: "http://127.0.0.1:8000" },
-  sglang: { mode: "remote", url: "http://127.0.0.1:30000" },
+  // Full (non-GGUF) Unlimited-OCR on GPU: same remote path as vllm, but also
+  // prefills the served model name so the user does not have to know the repo id.
+  gpu: { mode: "remote", url: "http://127.0.0.1:8000", model: "baidu/Unlimited-OCR" },
+  // model: "" = clear the field (so a stale gpu name is not sent); user types their
+  // own served name. custom/llamacpp omit `model` entirely = leave the field as-is
+  // (preserves a value restored from saved settings).
+  vllm: { mode: "remote", url: "http://127.0.0.1:8000", model: "" },
+  sglang: { mode: "remote", url: "http://127.0.0.1:30000", model: "" },
   custom: { mode: "remote", url: null },
 };
 
@@ -106,9 +109,10 @@ export function applyPreset(name) {
     const url = document.getElementById("remoteUrl");
     if (url) url.value = p.url;
   }
-  // The GPU preset also prefills the served model name (vLLM needs it in the
-  // request body); other presets leave #remoteModel as the user set it.
-  if (p.model) {
+  // gpu prefills the served model name (vLLM needs it in the request body); vllm/
+  // sglang set "" to clear a stale gpu name; custom/llamacpp omit `model` so a
+  // saved value restored into the field is preserved (undefined = leave as-is).
+  if (p.model !== undefined) {
     const modelEl = document.getElementById("remoteModel");
     if (modelEl) modelEl.value = p.model;
   }

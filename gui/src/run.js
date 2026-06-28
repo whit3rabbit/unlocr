@@ -100,36 +100,27 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, boar
       lastPage: opts.lastPage,
     });
 
-    // run_ocr's return contract depends on out_dir: a non-empty out_dir yields
-    // WRITTEN FILE PATHS, an empty out_dir yields in-memory markdown strings.
-    // We must never render a path string as markdown text. Resolve which case we
-    // are in from the same out_dir we sent, then drive the two surfaces:
-    //   - markdown review pane: always from the on-disk file when out_dir was set
-    //     (fetch via read_text_file), or from results[0] directly when in-memory
-    //   - transcript pane: only the ocr://done event writes there (bite 4); here
-    //     we populate it from the same resolved content as a fallback so a Run
-    //     that completes before any event subscriber warms up still shows output.
-    const haveFile = outDir.length > 0;
+    // run_ocr always returns WRITTEN FILE PATHS here: outDir is never empty (it
+    // falls back to the input's parent dir, else "."), so the backend always writes
+    // {stem}.md and returns its path. results[0] is therefore a path to read via
+    // read_text_file, never inline markdown. The transcript pane is driven solely by
+    // the ocr://done event (its listener is attached before invoke); the review pane
+    // is populated from the on-disk file below.
     let resolvedMd = "";
     let mdPath = "";
     let readError = null;
     if (results && results.length) {
-      if (haveFile) {
-        mdPath = results[0];
-        try {
-          // The backend authorizes reads from its own record of files run_ocr just
-          // wrote (AppState.read_allow); no client-supplied allowlist is needed.
-          resolvedMd = await t.core.invoke("read_text_file", { path: mdPath });
-        } catch (readErr) {
-          // File read failed (rare: written then removed). Surface in the review
-          // pane so the user sees why no markdown is shown, but keep the run green.
-          if (mdPane) mdPane.render("could not read " + mdPath + ": " + String(readErr), mdPath);
-          resolvedMd = "";
-          readError = String(readErr);
-        }
-      } else {
-        // In-memory mode: results[0] IS the markdown content.
-        resolvedMd = results[0];
+      mdPath = results[0];
+      try {
+        // The backend authorizes reads from its own record of files run_ocr just
+        // wrote (AppState.read_allow); no client-supplied allowlist is needed.
+        resolvedMd = await t.core.invoke("read_text_file", { path: mdPath });
+      } catch (readErr) {
+        // File read failed (rare: written then removed). Surface in the review
+        // pane so the user sees why no markdown is shown, but keep the run green.
+        if (mdPane) mdPane.render("could not read " + mdPath + ": " + String(readErr), mdPath);
+        resolvedMd = "";
+        readError = String(readErr);
       }
     }
 

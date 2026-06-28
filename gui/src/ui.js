@@ -77,7 +77,9 @@ export function makeUi() {
   // Controls greyed out during a run so a second run can't be launched and run
   // options can't change mid-flight. loadModelBtn + importBtn + every #runOpts input.
   function setControlsDisabled(on) {
-    const ids = ["loadModelBtn", "importBtn", "engineModifyBtn"];
+    // unloadModelBtn lives in .model-bar (not #runOpts); without it here, an Unload
+    // mid-run blocks on the model lock the batch holds and freezes the UI.
+    const ids = ["loadModelBtn", "unloadModelBtn", "importBtn", "engineModifyBtn"];
     ids.forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.disabled = on;
@@ -239,7 +241,7 @@ export function makeUi() {
       gate();
       if (ok) {
         if (!modelLoaded) this.setStatus("Idle");
-        setPill("idle", modelLoaded ? "Idle" : "Idle");
+        setPill("idle", modelLoaded ? "Idle" : "No model");
       } else {
         const reason = (report && report.error) || "environment not ready";
         this.setStatus("env warning: " + reason);

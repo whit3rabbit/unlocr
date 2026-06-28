@@ -72,6 +72,85 @@ pub(crate) fn read_text_file(path: String, state: State<'_, AppState>) -> Result
         .map_err(|e| format!("failed to read {}: {e}", canonical.display()))
 }
 
+/// Overwrite a `.md` the review-pane editor is editing. Write scope is the SAME
+/// backend-derived allowlist as `read_text_file`: the renderer may only overwrite a
+/// file the app itself produced (this session's runs or a job-store `output_path`),
+/// never a path it chooses. Overwrite-only -> the target always pre-exists, so the read
+/// guard (`check_readable`: `.md` ext + canonicalize + exact allowlist match) applies
+/// verbatim; there is no new arg the renderer could use to widen scope.
+#[tauri::command]
+pub(crate) fn write_text_file(
+    path: String,
+    content: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let allowed = allowed_output_paths(&state);
+    let canonical = check_readable(&path, &allowed)?;
+    std::fs::write(&canonical, content)
+        .map_err(|e| format!("failed to write {}: {e}", canonical.display()))
+}
+
+/// Map a frontend export format to the pandoc writer name and output file extension.
+/// Restricting to this fixed set (not an arbitrary string) keeps the renderer from
+/// passing pandoc an unexpected writer. `txt` uses pandoc's `plain` writer (strips
+/// markdown syntax); the others share their name with the extension.
+fn pandoc_target(format: &str) -> Option<(&'static str, &'static str)> {
+    match format {
+        "html" => Some(("html", "html")),
+        "txt" => Some(("plain", "txt")),
+        "docx" => Some(("docx", "docx")),
+        "odt" => Some(("odt", "odt")),
+        "rtf" => Some(("rtf", "rtf")),
+        _ => None,
+    }
+}
+
+/// Export the loaded review-pane markdown to another document format via pandoc
+/// (docx / odt / rtf / html / plain-txt). `src_path` must be an app-produced `.md`
+/// (same allowlist as read/write). The output is a SIBLING file (same dir + stem, new
+/// extension), so the write target is BACKEND-DERIVED from the allowlisted source, not
+/// renderer-chosen. Requires pandoc on PATH (resolved with the same lookup as the CLI's
+/// other tools); a clear install hint is returned when missing. Shells out on
+/// spawn_blocking (no shell: args are passed to Command directly, paths are not
+/// interpreted). Returns the written path.
+#[tauri::command]
+pub(crate) async fn export_markdown(
+    app: AppHandle,
+    src_path: String,
+    format: String,
+) -> Result<String, String> {
+    let (writer, ext) =
+        pandoc_target(&format).ok_or_else(|| format!("unsupported export format: {format}"))?;
+    let pandoc = unlocr::preflight::locate("pandoc").ok_or_else(|| {
+        "pandoc not found on PATH. Install it (e.g. `brew install pandoc`) to export.".to_string()
+    })?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        // Validate the source against the app-produced allowlist (same guard as read),
+        // then derive the output path from the canonical source so it cannot escape.
+        let state = app.state::<AppState>();
+        let allowed = allowed_output_paths(&state);
+        let canonical = check_readable(&src_path, &allowed)?;
+        let out = canonical.with_extension(ext);
+        // `-s` (standalone) so html/rtf get a complete document, not a fragment; it is
+        // a no-op for the always-standalone docx/odt writers.
+        let output = std::process::Command::new(&pandoc)
+            .arg(&canonical)
+            .args(["-f", "markdown", "-t", writer, "-s", "-o"])
+            .arg(&out)
+            .output()
+            .map_err(|e| format!("failed to run pandoc: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "pandoc failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(out.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("export worker join failed: {e}"))?
+}
+
 /// Canonicalized set of files `read_text_file` may serve: the paths written this
 /// session plus the non-empty `output_path`s persisted in the job store. Paths that
 /// no longer resolve (deleted output) are simply absent, so a stale store entry
@@ -246,20 +325,23 @@ pub(crate) async fn run_ocr(
         }
     }
     // Page selection: both None = all pages (default). Otherwise build a 1-based
-    // inclusive range, defaulting a missing bound (first->1, last->first). Validate
-    // here too: a direct invoke bypasses the HTML form's min= clamp.
+    // range, defaulting a missing first to 1. A missing last is an OPEN upper bound
+    // (first..end of document), preserved as None so the UI's "pages N-end" actually
+    // OCRs to EOF rather than collapsing to a single page. Validate here too: a
+    // direct invoke bypasses the HTML form's min= clamp.
     opts.pages = match (first_page, last_page) {
         (None, None) => None,
         (f, l) => {
             let first = f.unwrap_or(1);
-            let last = l.unwrap_or(first);
             if first == 0 {
                 return Err("first_page is 1-based; 0 is not valid".to_string());
             }
-            if last < first {
-                return Err(format!("page range is reversed: {first}-{last}"));
+            if let Some(last) = l {
+                if last < first {
+                    return Err(format!("page range is reversed: {first}-{last}"));
+                }
             }
-            Some((first, last))
+            Some((first, l))
         }
     };
 
@@ -563,6 +645,44 @@ mod tests {
         // An existing .md that the app did not produce is refused.
         let err = check_readable(other.to_str().unwrap(), &set).unwrap_err();
         assert!(err.contains("did not produce"), "unexpected error: {err}");
+    }
+
+    /// The write path shares `check_readable`'s guard: an allowed `.md` overwrites,
+    /// an existing-but-unlisted `.md` is refused (cannot widen scope to write).
+    #[test]
+    fn write_guard_overwrites_only_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let allow = tmp.path().join("allowed.md");
+        let other = tmp.path().join("other.md");
+        std::fs::write(&allow, b"# old").unwrap();
+        std::fs::write(&other, b"# secret").unwrap();
+
+        let mut set = HashSet::new();
+        set.insert(std::fs::canonicalize(&allow).unwrap());
+
+        // Allowed: resolve then overwrite.
+        let canonical = check_readable(allow.to_str().unwrap(), &set).unwrap();
+        std::fs::write(&canonical, b"# new").unwrap();
+        assert_eq!(std::fs::read_to_string(&allow).unwrap(), "# new");
+
+        // Unlisted: refused before any write; file is untouched.
+        let err = check_readable(other.to_str().unwrap(), &set).unwrap_err();
+        assert!(err.contains("did not produce"), "unexpected error: {err}");
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "# secret");
+    }
+
+    /// Export format mapping: known formats resolve to (writer, ext); unknown is None
+    /// (rejected before pandoc runs, so the renderer can't pass an arbitrary writer).
+    #[test]
+    fn pandoc_target_maps_known_formats_only() {
+        use super::pandoc_target;
+        assert_eq!(pandoc_target("html"), Some(("html", "html")));
+        assert_eq!(pandoc_target("txt"), Some(("plain", "txt")));
+        assert_eq!(pandoc_target("docx"), Some(("docx", "docx")));
+        assert_eq!(pandoc_target("odt"), Some(("odt", "odt")));
+        assert_eq!(pandoc_target("rtf"), Some(("rtf", "rtf")));
+        assert_eq!(pandoc_target("pdf"), None);
+        assert_eq!(pandoc_target(""), None);
     }
 
     /// Non-.md paths are rejected before any filesystem access.

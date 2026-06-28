@@ -7,6 +7,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+// Local llama.cpp path: the quantized GGUF build of Unlimited-OCR. This is a
+// SEPARATE repo from the remote/GPU served model (`UNLIMITED_OCR_REPO =
+// "baidu/Unlimited-OCR"` in main.rs), which vLLM/SGLang serve in full precision.
+// GGUF here = local llama-server; baidu/Unlimited-OCR there = remote --gpu path.
 const REPO: &str = "sahilchachra/Unlimited-OCR-GGUF";
 const MMPROJ: &str = "mmproj-Unlimited-OCR-F16.gguf";
 
@@ -310,12 +314,15 @@ fn download<F>(url: &str, dest: &Path, name: &str, progress: &mut F) -> Res<()>
 where
     F: FnMut(&str, Option<u8>, u64, u64),
 {
-    // Connect timeout only, NOT an overall timeout: the body is a multi-GB GGUF
-    // and a slow-but-healthy transfer must not be killed. A hung *connect*
-    // (HF unreachable) would otherwise block forever, unlike ocr_image (600s
-    // overall) and the health poll (2s).
+    // Connect timeout, plus a per-read watchdog, but NO overall timeout: the body
+    // is a multi-GB GGUF and a slow-but-healthy transfer must not be killed. A hung
+    // *connect* (HF unreachable) would block forever otherwise. `timeout_read` is
+    // per socket read and resets on each chunk, so a transfer that keeps making
+    // progress survives indefinitely while a wedged stream (no bytes for 120s)
+    // fails into the existing `.part`-resume path instead of hanging the app.
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(30))
+        .timeout_read(Duration::from_secs(120))
         .build();
 
     let part = dest.with_extension("part");

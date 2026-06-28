@@ -10,7 +10,7 @@
 // Layout (commands split out of this file so each stays navigable):
 //   - state.rs      AppState + the held backend (Backend/LoadedModel).
 //   - cmd_model.rs  preflight, load/unload/stop, status, cache info/clear.
-//   - cmd_run.rs    render_pages, read_text_file, run_ocr.
+//   - cmd_run.rs    render_pages, read_text_file, write_text_file, export_markdown, run_ocr.
 //   - cmd_store.rs  job store, settings, and notification command wrappers.
 // This file keeps only the module wiring and the `run()` builder.
 
@@ -44,10 +44,13 @@ use cmd_model::{
     clear_model_cache, get_cache_info, list_local_models, load_model, model_status, preflight,
     stop_ocr, unload_model,
 };
-use cmd_run::{read_text_file, render_page, render_pages, run_ocr};
+use cmd_run::{
+    export_markdown, read_text_file, render_page, render_pages, run_ocr, write_text_file,
+};
 use cmd_store::{
-    add_notification, clear_all_notifications, clear_notification, get_settings, jobs_store_path,
-    list_jobs, list_notifications, mark_notifications_read, record_job, save_settings,
+    add_notification, clear_all_notifications, clear_jobs, clear_notification, delete_job,
+    get_settings, jobs_store_path, list_jobs, list_notifications, mark_notifications_read,
+    record_job, save_settings,
 };
 use state::AppState;
 
@@ -167,9 +170,13 @@ pub fn run() {
             render_pages,
             render_page,
             read_text_file,
+            write_text_file,
+            export_markdown,
             list_jobs,
             jobs_store_path,
             record_job,
+            delete_job,
+            clear_jobs,
             load_model,
             unload_model,
             model_status,

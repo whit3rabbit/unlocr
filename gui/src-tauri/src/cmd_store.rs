@@ -86,6 +86,44 @@ pub(crate) fn record_job(
     )
 }
 
+/// Remove one job from the Library by id. With `delete_file == Some(true)`, also
+/// delete the run's `.md` output from disk (guarded to `.md` only in
+/// `store::delete_output_file`); otherwise the record is dropped but the file is
+/// left in place. A missing id is a no-op success. The frontend confirms the
+/// file-deleting variant with a native dialog before invoking.
+#[tauri::command]
+pub(crate) fn delete_job(id: String, delete_file: Option<bool>) -> Result<(), String> {
+    let output_path = store::remove_job(&id)?;
+    if delete_file == Some(true) {
+        if let Some(path) = output_path {
+            store::delete_output_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Clear the entire Library. With `delete_files == Some(true)`, also delete every
+/// recorded `.md` output from disk; otherwise only the records are dropped. The
+/// records are cleared first, so a file-delete failure is reported but never
+/// leaves stale records behind. The frontend confirms the file-deleting variant.
+#[tauri::command]
+pub(crate) fn clear_jobs(delete_files: Option<bool>) -> Result<(), String> {
+    let outputs = store::clear_jobs()?;
+    if delete_files == Some(true) {
+        let errors: Vec<String> = outputs
+            .iter()
+            .filter_map(|p| store::delete_output_file(p).err())
+            .collect();
+        if !errors.is_empty() {
+            return Err(format!(
+                "some files could not be deleted: {}",
+                errors.join("; ")
+            ));
+        }
+    }
+    Ok(())
+}
+
 // --- notification store commands -------------------------------------------
 //
 // Thin wrappers over `notifications.rs`. The frontend records a notification on

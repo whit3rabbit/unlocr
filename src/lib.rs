@@ -51,10 +51,12 @@ pub struct OcrOptions {
     /// default). >1.0 (e.g. 1.1) discourages the infinite-loop output some quants
     /// (notably Q4_K_M) fall into on dense pages.
     pub repeat_penalty: Option<f32>,
-    /// Page span to OCR, 1-based inclusive `(first, last)`. None = all pages. Maps
-    /// to pdftoppm `-f`/`-l`, so a subset rasterizes only those pages (not the whole
-    /// PDF then filtered). Caller validates `first >= 1` and `last >= first`.
-    pub pages: Option<(u32, u32)>,
+    /// Page span to OCR, 1-based inclusive `(first, last)`. None = all pages. An
+    /// open upper bound (`last == None`) means "first..end of document": pdftoppm
+    /// renders `-f first` with no `-l` to the last page natively. Maps to pdftoppm
+    /// `-f`/`-l`, so a subset rasterizes only those pages (not the whole PDF then
+    /// filtered). Caller validates `first >= 1` and `last >= first` when `last` is set.
+    pub pages: Option<(u32, Option<u32>)>,
 }
 
 impl Default for OcrOptions {
@@ -252,7 +254,7 @@ pub fn render_page(
     //   - any other error (non-zero exit, spawn failure, malformed PDF): a REAL failure
     //     that must surface, not be silently reported as end-of-document (which the GUI
     //     would treat as "past the last page" and truncate navigation).
-    if let Err(e) = pdf::rasterize_range(pdftoppm, pdf, &dir, dpi, Some((page, page))) {
+    if let Err(e) = pdf::rasterize_range(pdftoppm, pdf, &dir, dpi, Some((page, Some(page)))) {
         if !e.to_string().contains("produced no pages") {
             return Err(e);
         }
@@ -629,7 +631,7 @@ mod tests {
         std::fs::write(&pdf_path, two_page_pdf_bytes()).expect("write fixture pdf");
 
         let opts = OcrOptions {
-            pages: Some((2, 2)),
+            pages: Some((2, Some(2))),
             ..OcrOptions::default()
         };
         let mut events: Vec<Progress> = Vec::new();

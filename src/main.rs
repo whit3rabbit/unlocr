@@ -21,7 +21,7 @@ pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
 /// HF repo of the full (non-GGUF) DeepSeek-OCR model. Served by vLLM, not
 /// llama.cpp; `--gpu` points the remote endpoint at a local vLLM instance
 /// serving this. See README "Run the full model on GPU" + colab/ notebook.
-const DEEPSEEK_OCR_REPO: &str = "deepseek-ai/DeepSeek-OCR";
+const UNLIMITED_OCR_REPO: &str = "baidu/Unlimited-OCR";
 /// Default base URL of a local `vllm serve` OpenAI server (`--gpu` shortcut).
 const VLLM_LOCAL_URL: &str = "http://localhost:8000";
 
@@ -153,11 +153,11 @@ struct Args {
     #[arg(long)]
     endpoint_model: Option<String>,
 
-    /// Run the full (non-GGUF) DeepSeek-OCR model on GPU via a local vLLM server.
+    /// Run the full (non-GGUF) Unlimited-OCR model on GPU via a local vLLM server.
     /// Shortcut: when set and --endpoint is unset, defaults --endpoint to
-    /// http://localhost:8000 and --endpoint-model to deepseek-ai/DeepSeek-OCR.
+    /// http://localhost:8000 and --endpoint-model to baidu/Unlimited-OCR.
     /// Start the server first (see README "Run the full model on GPU"): vllm serve
-    /// deepseek-ai/DeepSeek-OCR. A Colab notebook (colab/) wires this end to end.
+    /// baidu/Unlimited-OCR. A Colab notebook (colab/) wires this end to end.
     #[arg(long)]
     gpu: bool,
 }
@@ -257,7 +257,7 @@ impl Args {
             self.endpoint = Some(VLLM_LOCAL_URL.to_string());
         }
         if self.endpoint_model.is_none() {
-            self.endpoint_model = Some(DEEPSEEK_OCR_REPO.to_string());
+            self.endpoint_model = Some(UNLIMITED_OCR_REPO.to_string());
         }
     }
 
@@ -265,7 +265,7 @@ impl Args {
     /// the flag is absent (= all pages). Accepts "5" (single) and "5-9" (range).
     /// Rejects 0, reversed ranges, and non-numeric input so a bad flag fails before
     /// any spawn rather than silently OCR'ing the wrong pages.
-    fn resolved_pages(&self) -> Res<Option<(u32, u32)>> {
+    fn resolved_pages(&self) -> Res<Option<(u32, Option<u32>)>> {
         Ok(match &self.pages {
             None => None,
             Some(s) => Some(parse_pages(s)?),
@@ -273,8 +273,10 @@ impl Args {
     }
 }
 
-/// Pure parser for the `--pages` value. Split out for unit testing.
-fn parse_pages(s: &str) -> Res<(u32, u32)> {
+/// Pure parser for the `--pages` value. Split out for unit testing. The CLI always
+/// yields a closed range (last is `Some`); the open upper bound only exists in the
+/// GUI path. Single "5" -> (5, Some(5)); "5-9" -> (5, Some(9)).
+fn parse_pages(s: &str) -> Res<(u32, Option<u32>)> {
     let s = s.trim();
     let parse_one = |p: &str| -> Res<u32> {
         let n: u32 = p
@@ -296,7 +298,7 @@ fn parse_pages(s: &str) -> Res<(u32, u32)> {
     if last < first {
         return Err(format!("page range is reversed: {first}-{last}").into());
     }
-    Ok((first, last))
+    Ok((first, Some(last)))
 }
 
 fn main() -> ExitCode {
@@ -514,15 +516,19 @@ fn collect_pdfs(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> Res<()> 
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         // file_type() from the dir entry does NOT follow symlinks (unlike
-        // Path::is_dir). Skip symlinked entries so a cycle (e.g. a/ -> ..) cannot
-        // recurse into a stack overflow, which `panic = "abort"` turns into a hard
-        // abort. ponytail: skips symlinked dirs entirely; switch to a visited
-        // canonical-path set if real symlinked trees must be followed.
+        // Path::is_dir). Skip only symlinked *directories* so a cycle (e.g. a/ -> ..)
+        // cannot recurse into a stack overflow, which `panic = "abort"` turns into a
+        // hard abort. A symlinked PDF *file* is legitimate and must NOT be dropped, so
+        // it falls through to the is_pdf branch. ponytail: skips symlinked dirs
+        // entirely; switch to a visited canonical-path set if symlinked dir trees
+        // must be followed.
         let ft = entry.file_type()?;
-        if ft.is_symlink() {
+        let path = entry.path();
+        // path.is_dir() follows the symlink; combined with is_symlink() it skips
+        // only links that point at a directory.
+        if ft.is_symlink() && path.is_dir() {
             continue;
         }
-        let path = entry.path();
         if ft.is_dir() {
             if recursive {
                 collect_pdfs(&path, recursive, out)?;
@@ -690,10 +696,10 @@ mod tests {
 
     #[test]
     fn parse_pages_accepts_single_and_range() {
-        assert_eq!(parse_pages("5").unwrap(), (5, 5));
-        assert_eq!(parse_pages("5-9").unwrap(), (5, 9));
-        assert_eq!(parse_pages(" 5 - 9 ").unwrap(), (5, 9)); // whitespace tolerant
-        assert_eq!(parse_pages("3-3").unwrap(), (3, 3)); // degenerate range
+        assert_eq!(parse_pages("5").unwrap(), (5, Some(5)));
+        assert_eq!(parse_pages("5-9").unwrap(), (5, Some(9)));
+        assert_eq!(parse_pages(" 5 - 9 ").unwrap(), (5, Some(9))); // whitespace tolerant
+        assert_eq!(parse_pages("3-3").unwrap(), (3, Some(3))); // degenerate range
     }
 
     #[test]
@@ -709,24 +715,18 @@ mod tests {
     #[test]
     fn gpu_flag_fills_remote_defaults() {
         // --gpu with nothing else points the remote path at a local vLLM serving
-        // the full DeepSeek-OCR model. Mirrors the normalization in run().
+        // the full Unlimited-OCR model. Mirrors the normalization in run().
         let mut args = Args::parse_from(["unlocr", "x.pdf", "--gpu"]);
         args.apply_gpu_defaults();
         assert_eq!(args.endpoint.as_deref(), Some("http://localhost:8000"));
-        assert_eq!(
-            args.endpoint_model.as_deref(),
-            Some("deepseek-ai/DeepSeek-OCR")
-        );
+        assert_eq!(args.endpoint_model.as_deref(), Some("baidu/Unlimited-OCR"));
 
         // An explicit --endpoint wins; --gpu only fills the model default.
         let mut args =
             Args::parse_from(["unlocr", "x.pdf", "--gpu", "--endpoint", "http://host:9000"]);
         args.apply_gpu_defaults();
         assert_eq!(args.endpoint.as_deref(), Some("http://host:9000"));
-        assert_eq!(
-            args.endpoint_model.as_deref(),
-            Some("deepseek-ai/DeepSeek-OCR")
-        );
+        assert_eq!(args.endpoint_model.as_deref(), Some("baidu/Unlimited-OCR"));
 
         // No --gpu = no remote defaults injected (stays local GGUF path).
         let mut args = Args::parse_from(["unlocr", "x.pdf"]);
@@ -740,6 +740,6 @@ mod tests {
         let args = Args::parse_from(["unlocr", "x.pdf"]);
         assert_eq!(args.resolved_pages().unwrap(), None);
         let args = Args::parse_from(["unlocr", "x.pdf", "--pages", "2-3"]);
-        assert_eq!(args.resolved_pages().unwrap(), Some((2, 3)));
+        assert_eq!(args.resolved_pages().unwrap(), Some((2, Some(3))));
     }
 }

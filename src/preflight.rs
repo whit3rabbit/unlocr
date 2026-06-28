@@ -380,8 +380,10 @@ pub fn generate_install_hint() -> String {
     hint
 }
 
-/// Look up a binary on PATH, then in the known Homebrew prefixes.
-fn locate(bin: &str) -> Option<PathBuf> {
+/// Look up a binary on PATH, then in the known Homebrew prefixes. Public so the GUI
+/// can resolve optional tools (e.g. pandoc for the review-pane export) using the same
+/// PATH + Homebrew-prefix search the CLI uses, instead of duplicating the logic.
+pub fn locate(bin: &str) -> Option<PathBuf> {
     let mut names = vec![bin.to_string()];
     if cfg!(target_os = "windows") && !bin.ends_with(".exe") {
         names.insert(0, format!("{bin}.exe"));

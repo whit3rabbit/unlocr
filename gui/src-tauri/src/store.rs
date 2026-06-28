@@ -174,14 +174,18 @@ pub fn save_jobs(jobs: &[Job]) -> Result<(), String> {
 /// command (insert) and a future "mark a queued job done" update. Returns the
 /// updated job so the caller can echo it to the frontend.
 fn upsert(job: Job) -> Result<Job, String> {
-    let mut jobs = load_jobs();
-    if let Some(existing) = jobs.iter_mut().find(|j| j.id == job.id) {
-        *existing = job.clone();
-    } else {
-        jobs.push(job.clone());
-    }
-    save_jobs(&jobs)?;
-    Ok(job)
+    // Serialize the whole load-mutate-save so two concurrent record_job calls
+    // cannot lose one record (read N -> append -> write N+1, racing).
+    crate::jsonstore::with_write_lock(|| {
+        let mut jobs = load_jobs();
+        if let Some(existing) = jobs.iter_mut().find(|j| j.id == job.id) {
+            *existing = job.clone();
+        } else {
+            jobs.push(job.clone());
+        }
+        save_jobs(&jobs)?;
+        Ok(job)
+    })
 }
 
 /// Current unix epoch seconds. Factored out so the `record_job` command and any
@@ -253,6 +257,93 @@ pub fn record_outcome(
         updated_at,
     };
     upsert(job)
+}
+
+// --- deletion (EH: Library remove / remove-and-delete) ---------------------
+
+/// Pure list filter: drop the job whose id matches, returning the kept list and
+/// the removed job's `output_path` (if any). No IO, so the command path can load,
+/// call this, and save, while a test exercises the logic without the cache dir.
+fn filter_out(jobs: Vec<Job>, id: &str) -> (Vec<Job>, Option<String>) {
+    let mut removed = None;
+    let kept = jobs
+        .into_iter()
+        .filter(|j| {
+            if j.id == id {
+                removed = Some(j.output_path.clone());
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (kept, removed)
+}
+
+/// Remove one job by id and persist the rest. Returns the removed job's
+/// `output_path` so the command can optionally delete the file. `Ok(None)` when
+/// the id is not present (a no-op success, matching the "missing is fine" theme).
+pub fn remove_job(id: &str) -> Result<Option<String>, String> {
+    let (kept, removed) = filter_out(load_jobs(), id);
+    save_jobs(&kept)?;
+    Ok(removed)
+}
+
+/// Clear every job and persist an empty store. Returns the non-empty
+/// `output_path`s that were recorded so the caller can optionally delete those
+/// files (the "remove all and delete" variant).
+pub fn clear_jobs() -> Result<Vec<String>, String> {
+    let outs: Vec<String> = load_jobs()
+        .into_iter()
+        .map(|j| j.output_path)
+        .filter(|p| !p.is_empty())
+        .collect();
+    save_jobs(&[])?;
+    Ok(outs)
+}
+
+/// Returns true iff the path's extension is `md` (case-insensitive).
+fn is_md(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("md"))
+        .unwrap_or(false)
+}
+
+/// Guarded file removal: the single sink for deleting a run's output. Only ever
+/// deletes a `.md` file, mirroring the `.md`-only invariant `read_text_file`
+/// enforces, and checks the extension on BOTH the raw and the canonicalized path
+/// so a `.md` symlink cannot redirect the delete at a non-`.md` target. An empty
+/// path or a missing file is a no-op success (idempotent).
+///
+/// ponytail: deletes the `.md` only; `keep_images` page-PNG dirs are NOT cleaned
+/// up here. Add that path-pruning later if kept-image clutter becomes a problem.
+pub fn delete_output_file(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Ok(());
+    }
+    let p = Path::new(path);
+    if !is_md(p) {
+        return Err(format!("refusing to delete non-.md path: {path}"));
+    }
+    if !p.exists() {
+        return Ok(()); // already gone
+    }
+    // Resolve symlinks/.. before removal, then re-check it is a regular .md file.
+    let canon = p
+        .canonicalize()
+        .map_err(|e| format!("could not resolve {path}: {e}"))?;
+    if !is_md(&canon) {
+        return Err(format!(
+            "refusing to delete: {} resolves to a non-.md file {}",
+            path,
+            canon.display()
+        ));
+    }
+    if !canon.is_file() {
+        return Err(format!("not a regular file: {}", canon.display()));
+    }
+    std::fs::remove_file(&canon).map_err(|e| format!("could not delete {}: {e}", canon.display()))
 }
 
 #[cfg(test)]
@@ -384,5 +475,64 @@ mod tests {
     fn now_secs_is_positive() {
         let n = now_secs();
         assert!(n > 1_700_000_000, "epoch seconds implausibly small: {n}");
+    }
+
+    fn mk(id: &str, out: &str) -> Job {
+        Job {
+            id: id.into(),
+            input_path: format!("/tmp/{id}.pdf"),
+            options: JobOptions::from_opts("Q8_0", 4096, 144, "p", false),
+            status: "done".into(),
+            output_path: out.into(),
+            error: String::new(),
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    /// filter_out drops only the matching id, keeps the rest in order, and
+    /// returns the removed job's output_path.
+    #[test]
+    fn filter_out_drops_one_returns_output() {
+        let jobs = vec![mk("a", "/tmp/a.md"), mk("b", "/tmp/b.md"), mk("c", "")];
+        let (kept, removed) = filter_out(jobs, "b");
+        assert_eq!(
+            kept.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(),
+            ["a", "c"]
+        );
+        assert_eq!(removed.as_deref(), Some("/tmp/b.md"));
+    }
+
+    /// Unknown id is a no-op: list unchanged, removed is None.
+    #[test]
+    fn filter_out_unknown_id_is_noop() {
+        let jobs = vec![mk("a", "/tmp/a.md")];
+        let (kept, removed) = filter_out(jobs, "zzz");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(removed, None);
+    }
+
+    /// delete_output_file refuses anything that is not a `.md` file and leaves it
+    /// on disk; deletes a real `.md`; and is Ok on a missing/empty path.
+    #[test]
+    fn delete_output_file_guards_and_deletes() {
+        // Empty path: no-op success.
+        assert!(delete_output_file("").is_ok());
+        // Missing .md: idempotent success.
+        assert!(delete_output_file("/no/such/file.md").is_ok());
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // Non-.md is rejected and the file survives.
+        let txt = dir.path().join("keep.txt");
+        std::fs::write(&txt, b"data").unwrap();
+        assert!(delete_output_file(txt.to_str().unwrap()).is_err());
+        assert!(txt.exists(), "non-.md must not be deleted");
+
+        // Real .md is deleted.
+        let md = dir.path().join("out.md");
+        std::fs::write(&md, b"# hi").unwrap();
+        assert!(delete_output_file(md.to_str().unwrap()).is_ok());
+        assert!(!md.exists(), ".md should be removed");
     }
 }
