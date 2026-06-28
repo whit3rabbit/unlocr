@@ -171,6 +171,50 @@ mod tests {
         }
     }
 
+    // GUI-12 (EH-0011) acceptance evidence, headless: the preview pane calls
+    // `crate::render_pages`, which the Tauri `render_pages` command thinly wraps.
+    // Prove that path returns non-empty page PNGs and that a second call is a
+    // cache hit (same paths, pdftoppm not required to re-run). Closes the runtime
+    // verification gap without a live desktop window. Skips without pdftoppm.
+    #[test]
+    fn render_pages_returns_nonempty_pngs_and_caches() {
+        if std::process::Command::new("pdftoppm")
+            .arg("-v")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping render_pages_returns_nonempty_pngs_and_caches: pdftoppm not on PATH");
+            return;
+        }
+
+        let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
+        let pdf_path = pdf_dir.path().join("fixture.pdf");
+        std::fs::write(&pdf_path, minimal_two_page_pdf()).expect("write fixture pdf");
+
+        let cache = tempfile::tempdir().expect("tmp cache dir");
+        let pdftoppm = Path::new("pdftoppm");
+
+        let pages = crate::render_pages(pdftoppm, &pdf_path, 72, cache.path())
+            .expect("render_pages on fixture");
+        assert_eq!(pages.len(), 2, "expected 2 preview PNGs, got {}", pages.len());
+        for (i, p) in pages.iter().enumerate() {
+            assert_eq!(p.extension().unwrap(), "png");
+            assert!(p.exists(), "page {} png missing", i + 1);
+            assert!(
+                std::fs::metadata(p).expect("png metadata").len() > 0,
+                "page {} png is empty",
+                i + 1
+            );
+        }
+
+        // Second call hits the per-PDF preview cache: same paths, no re-render.
+        let again = crate::render_pages(pdftoppm, &pdf_path, 72, cache.path())
+            .expect("render_pages cache hit");
+        assert_eq!(again, pages, "cache hit must return the same page paths");
+    }
+
     // Smallest valid 2-page PDF pdftoppm accepts: a Catalog -> Pages with two
     // pages, each with a short text content stream, plus a valid xref/trailer
     // (poppler 26.06 does not reconstruct a missing xref, so we compute offsets).

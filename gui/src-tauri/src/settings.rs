@@ -30,12 +30,18 @@ pub struct Settings {
     /// "local" | "remote": which provider the Load button targets.
     #[serde(default = "default_mode")]
     pub mode: String,
-    /// Remote OpenAI-compatible base URL (no trailing slash needed).
-    #[serde(default)]
+    /// Remote OpenAI-compatible base URL (no trailing slash needed). Defaults to
+    /// llama-server's own default host:port so the field is prefilled; the user
+    /// edits it when the server runs on a different port/IP.
+    #[serde(default = "default_remote_base_url")]
     pub remote_base_url: String,
     /// Optional bearer token for the remote endpoint. Plaintext (see module note).
     #[serde(default)]
     pub remote_api_key: String,
+    /// Optional model name sent in the request body. Required by multi-model
+    /// gateways (litellm/vLLM); a bare remote llama-server ignores it.
+    #[serde(default)]
+    pub remote_model: String,
     /// Default quant the Workspace + local Load use.
     #[serde(default = "default_quant")]
     pub default_quant: String,
@@ -52,6 +58,11 @@ pub struct Settings {
 
 fn default_mode() -> String {
     "local".to_string()
+}
+// llama-server's own defaults: host 127.0.0.1, port 8080. Prefilling this means
+// the Remote field is ready to edit instead of blank.
+fn default_remote_base_url() -> String {
+    "http://127.0.0.1:8080".to_string()
 }
 fn default_quant() -> String {
     OcrOptions::default().quant
@@ -70,8 +81,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             mode: default_mode(),
-            remote_base_url: String::new(),
+            remote_base_url: default_remote_base_url(),
             remote_api_key: String::new(),
+            remote_model: String::new(),
             default_quant: default_quant(),
             llama_bin: String::new(),
             default_dpi: default_dpi(),
@@ -148,6 +160,14 @@ mod tests {
         assert_eq!(file.settings.mode, "remote");
         assert_eq!(file.settings.default_quant, OcrOptions::default().quant);
         assert_eq!(file.settings.default_dpi, OcrOptions::default().dpi);
+        // A partial file must also pick up the prefilled remote URL, not "".
+        assert_eq!(file.settings.remote_base_url, default_remote_base_url());
+    }
+
+    /// The remote base URL prefills to llama-server's default host:port.
+    #[test]
+    fn default_remote_url_is_llama_default() {
+        assert_eq!(Settings::default().remote_base_url, "http://127.0.0.1:8080");
     }
 
     /// camelCase on the wire (regression guard for the serde rename).

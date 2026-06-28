@@ -142,6 +142,25 @@ reclaim the space.
    `/v1/chat/completions`, concatenate the markdown. Pages run sequentially
    (one image in memory at a time); the model stays loaded the whole time.
 
+## MLX on Apple Silicon (via LM Studio)
+
+On Apple Silicon you can run inference on the MLX engine instead of llama.cpp.
+unlocr does not bundle MLX: it talks to LM Studio's local OpenAI-compatible
+server, which uses MLX (`mlx-vlm`) under the hood. **This path is GUI-only** (the
+CLI has no remote-endpoint flag yet).
+
+1. Install LM Studio (>= 0.3.4, which ships the MLX engine).
+2. Download an MLX DeepSeek-OCR build, e.g. `mlx-community/DeepSeek-OCR-8bit`
+   (or `-4bit` for less RAM).
+3. Load it in LM Studio, then start the Local Server (binds `localhost:1234`).
+4. In the unlocr GUI, click the **LM Studio (MLX)** preset (this flips to the
+   Remote engine and fills `http://localhost:1234`; unlocr appends
+   `/v1/chat/completions` itself), then Load and Run. The API key field can
+   stay empty.
+
+Leave the default `<|grounding|>Convert the document to markdown.` prompt: it is
+the grounding format DeepSeek-OCR expects.
+
 ## Limitations
 
 - Ctrl-C (SIGINT) does not run cleanup, so it may orphan `llama-server`.

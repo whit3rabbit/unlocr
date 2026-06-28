@@ -11,9 +11,12 @@ use std::path::Path;
 // `Server`, `ocr_pages`, `OcrOptions`, `Progress` all come from the `unlocr`
 // library crate (one compiled backend), so the `Server` main passes in is the
 // same type `ocr_pages` expects. `Args` is the bin's own clap struct.
-use unlocr::{ocr_pages, server::Server, OcrOptions, Progress, Res};
+use unlocr::{ocr_pages, server::ImageOcr, OcrOptions, Progress, Res};
 
-pub fn run_pdf(srv: &Server, pdftoppm: &Path, input: &Path, args: &Args, _port: u16) -> Res<()> {
+/// Generic over the OCR backend (`ImageOcr`): the local `Server` or a
+/// `RemoteEndpoint`. `ocr_pages` is already backend-agnostic, so this is just the
+/// CLI glue (Args -> OcrOptions, progress println, write `{stem}.md`).
+pub fn run_pdf<S: ImageOcr>(backend: &S, pdftoppm: &Path, input: &Path, args: &Args) -> Res<()> {
     if !input.is_file() {
         return Err("not a file".into());
     }
@@ -56,7 +59,7 @@ pub fn run_pdf(srv: &Server, pdftoppm: &Path, input: &Path, args: &Args, _port: 
         _ => {}
     };
 
-    let (md, kept) = ocr_pages(srv, pdftoppm, input, &opts, &mut on_progress)?;
+    let (md, kept) = ocr_pages(backend, pdftoppm, input, &opts, &mut on_progress)?;
     println!(); // newline after the last "\r  page N/N" line, matching the original
 
     let out_path = args.out.join(format!("{stem}.md"));

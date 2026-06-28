@@ -388,7 +388,8 @@ fn preflight(
         Err(e) => {
             // Still report model presence so the UI can show "install llama-server,
             // your model is already downloaded" rather than just the error.
-            let (_, model_present, _, mmproj_present) = unlocr::model::check_presence(&cache, &quant);
+            let (_, model_present, _, mmproj_present) =
+                unlocr::model::check_presence(&cache, &quant).unwrap_or((Default::default(), false, Default::default(), false));
             return Ok(PreflightReport {
                 ok: false,
                 build_number: None,
@@ -407,7 +408,8 @@ fn preflight(
     // sync command thread.
     let build_number = unlocr::preflight::build_number(&tools.llama_server);
 
-    let (_, model_present, _, mmproj_present) = unlocr::model::check_presence(&cache, &quant);
+    let (_, model_present, _, mmproj_present) =
+        unlocr::model::check_presence(&cache, &quant).unwrap_or((Default::default(), false, Default::default(), false));
 
     Ok(PreflightReport {
         ok: true,
@@ -441,6 +443,7 @@ async fn load_model(
     quant: Option<String>,
     base_url: Option<String>,
     api_key: Option<String>,
+    model: Option<String>,
     llama_bin: Option<String>,
 ) -> Result<ModelStatus, String> {
     let llama_override = llama_bin.filter(|s| !s.trim().is_empty()).map(PathBuf::from);
@@ -467,9 +470,17 @@ async fn load_model(
                     return Err("remote mode requires a base URL".into());
                 }
                 let pdftoppm = unlocr::preflight::pdftoppm().map_err(|e| e.to_string())?;
+                // Same caveat the CLI prints: these OCR models only run on a few
+                // servers. Surfaced in the UI too (Settings/model-bar notes).
+                eprintln!(
+                    "[load_model] remote mode: Unlimited-OCR / DeepSeek-OCR is only known to run \
+                     on llama.cpp (PR #17400), vLLM, and SGLang. Ollama / LM Studio do not support \
+                     these OCR models; gateways (litellm/vLLM) need a model name set."
+                );
                 let ep = RemoteEndpoint {
                     base_url: base.clone(),
                     api_key: api_key.filter(|k| !k.trim().is_empty()),
+                    model: model.filter(|m| !m.trim().is_empty()),
                 };
                 // warn-not-fail: some OpenAI-compatible servers omit /v1/models.
                 if let Err(e) = ep.probe() {
@@ -570,6 +581,68 @@ fn list_local_models() -> Vec<String> {
     match unlocr::model::cache_dir(None) {
         Ok(cache) => unlocr::model::list_cached_quants(&cache),
         Err(_) => Vec::new(),
+    }
+}
+
+/// Return the model cache directory path and the total size of its GGUF files in
+/// bytes. Used by the Settings view to show how much disk the cached models use
+/// and to let the user locate the directory. Errors are stringified so the
+/// future stays Send. Size is best-effort: unreadable entries are skipped.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheInfo {
+    /// Absolute path of the model cache directory (for display).
+    path: String,
+    /// Total size of all .gguf files in the cache, in bytes.
+    size_bytes: u64,
+}
+
+#[tauri::command]
+fn get_cache_info() -> Result<CacheInfo, String> {
+    let cache = unlocr::model::cache_dir(None).map_err(|e| e.to_string())?;
+    let path = cache.display().to_string();
+    // Sum the size of every .gguf file (model + mmproj). Non-.gguf files (logs,
+    // settings.json, jobs.json, previews/) are excluded — they are not model data.
+    let size_bytes = std::fs::read_dir(&cache)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|x| x == "gguf")
+                        .unwrap_or(false)
+                })
+                .filter_map(|e| e.metadata().ok())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0);
+    Ok(CacheInfo { path, size_bytes })
+}
+
+/// Delete all .gguf files from the model cache (the model and projector GGUFs
+/// for every quant). Non-model files (settings.json, jobs.json, previews/) are
+/// left intact. Any currently-loaded model is NOT unloaded first: the caller is
+/// responsible for unloading before clearing if that matters. Errors are returned
+/// as a string so the frontend can surface them inline.
+#[tauri::command]
+fn clear_model_cache() -> Result<(), String> {
+    let cache = unlocr::model::cache_dir(None).map_err(|e| e.to_string())?;
+    let entries = std::fs::read_dir(&cache).map_err(|e| e.to_string())?;
+    let mut errors: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) == Some("gguf") {
+            if let Err(e) = std::fs::remove_file(&path) {
+                errors.push(format!("{}: {e}", path.display()));
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("some files could not be removed: {}", errors.join("; ")))
     }
 }
 
@@ -753,7 +826,9 @@ pub fn run() {
             model_status,
             list_local_models,
             get_settings,
-            save_settings
+            save_settings,
+            get_cache_info,
+            clear_model_cache
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -65,15 +65,13 @@ pub fn run_doctor(llama_override: Option<&Path>, model_dir: Option<PathBuf>, qua
 
     // 2. Check model files
     println!("\nChecking model cache...");
-    // Validate the user-supplied quant before it reaches check_presence: PathBuf
-    // ::join does not normalize, so a traversing quant (e.g. "../../etc/passwd")
-    // would otherwise turn into an is_file() probe outside the cache dir (a
-    // filesystem existence oracle). Same guard the write path already enforces.
-    crate::model::validate_quant(quant)?;
     let cache = crate::model::cache_dir(model_dir)?;
     println!("  Cache directory: {}", cache.display());
 
-    let (model_path, model_present, mmproj_path, mmproj_present) = crate::model::check_presence(&cache, quant);
+    // check_presence now validates the quant internally (defense in depth), so
+    // the explicit validate_quant call above is no longer needed here. The `?`
+    // propagates an invalid-quant error with the same message.
+    let (model_path, model_present, mmproj_path, mmproj_present) = crate::model::check_presence(&cache, quant)?;
     
     if model_present {
         let size_str = match fs::metadata(&model_path) {

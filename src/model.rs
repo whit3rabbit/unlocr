@@ -252,10 +252,16 @@ where
     Ok(())
 }
 
-pub fn check_presence(cache: &Path, quant: &str) -> (PathBuf, bool, PathBuf, bool) {
+/// Check whether the model and projector GGUFs for `quant` exist in `cache`.
+/// Returns `Err` on an invalid quant (same guard as `ensure`): PathBuf::join does
+/// not normalize `..`, so a traversing quant would otherwise let the caller probe
+/// for file existence outside the cache dir (a file-existence oracle). Callers that
+/// already call `validate_quant` separately get defense in depth.
+pub fn check_presence(cache: &Path, quant: &str) -> Res<(PathBuf, bool, PathBuf, bool)> {
+    validate_quant(quant)?;
     let model = cache.join(model_filename(quant));
     let mmproj = cache.join(MMPROJ);
-    (model.clone(), model.is_file(), mmproj.clone(), mmproj.is_file())
+    Ok((model.clone(), model.is_file(), mmproj.clone(), mmproj.is_file()))
 }
 
 /// Quant tags whose GGUF is already cached on disk, e.g. ["Q8_0", "Q4_K_M"].
@@ -284,8 +290,8 @@ pub fn list_cached_quants(cache: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_dir, ensure_with_progress, list_cached_quants, model_filename, stream_to_part,
-        validate_quant, MMPROJ,
+        cache_dir, check_presence, ensure_with_progress, list_cached_quants, model_filename,
+        stream_to_part, validate_quant, MMPROJ,
     };
     use crate::Progress;
     use std::io::Cursor;
@@ -380,6 +386,24 @@ mod tests {
         ] {
             assert!(validate_quant(bad).is_err(), "{bad:?} should be rejected");
         }
+    }
+
+    #[test]
+    fn check_presence_rejects_traversal_quant() {
+        // check_presence is a read path (is_file), but PathBuf::join does not
+        // normalize `..` so a traversing quant would probe for file existence
+        // outside the cache dir. The validate_quant guard at the top must fire.
+        let tmp = tempfile::tempdir().unwrap();
+        let err = check_presence(tmp.path(), "Q8_0/../../evil")
+            .expect_err("traversing quant must be rejected");
+        assert!(err.to_string().contains("invalid quant"), "got: {err}");
+        // A valid quant must still succeed (returns false for absent files).
+        let (model, model_ok, mmproj, mmproj_ok) =
+            check_presence(tmp.path(), "Q8_0").expect("valid quant must not error");
+        assert!(!model_ok, "model should be absent in empty tmp dir");
+        assert!(!mmproj_ok, "mmproj should be absent in empty tmp dir");
+        assert!(model.ends_with("Unlimited-OCR-Q8_0.gguf"));
+        let _ = mmproj; // path returned, just not checked for name here
     }
 
     #[test]

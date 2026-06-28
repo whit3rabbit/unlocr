@@ -102,11 +102,46 @@ async function subscribeOcrEvents(ui) {
     },
   ]);
 
+  // Streaming token chunks: one event per token, arrives during inference.
+  // Append each chunk into a per-page <pre> in the transcript so text grows
+  // progressively instead of appearing all at once on ocr://done.
+  // `streamPre` tracks the current active <pre>; a new page resets it so
+  // chunks land in separate blocks (one block per page, readable as they arrive).
+  let streamPre = null;
+  handlers.push([
+    "ocr://partial-text",
+    (e) => {
+      const { page, chunk } = e.payload || {};
+      if (!body || typeof chunk !== "string") return;
+      // On the first chunk of a new page (or the first chunk ever), create a
+      // fresh <pre> so each page's OCR text has its own block. The page counter
+      // resets across inputs, so a null chunk on page 1 means "new input started".
+      if (streamPre === null || streamPre.dataset.page !== String(page)) {
+        if (placeholder) placeholder.hidden = true;
+        streamPre = document.createElement("pre");
+        streamPre.dataset.page = String(page);
+        body.appendChild(streamPre);
+      }
+      streamPre.textContent += chunk;
+      // Keep the bottom of the transcript visible as tokens arrive.
+      body.scrollTop = body.scrollHeight;
+    },
+  ]);
+
   // Terminal event: assembled markdown for the input.
+  // Clear the streaming pres for this input (they were provisional; the
+  // assembled markdown from ocr://done is the canonical result) and render
+  // the final version. Reset streamPre so the next input gets a fresh block.
   handlers.push([
     "ocr://done",
     (e) => {
       const { markdown } = e.payload || {};
+      // Remove any streaming pres we built (provisional token view) then
+      // render the assembled markdown so the transcript shows the clean result.
+      if (body) {
+        body.querySelectorAll("pre[data-page]").forEach((n) => n.remove());
+      }
+      streamPre = null;
       ui.renderMarkdown(markdown);
     },
   ]);
@@ -346,12 +381,64 @@ function jobBaseName(path) {
   return r ? r.name : "(untitled run)";
 }
 
+/** EH-0015: navigate to the Review view and render the .md for a done job.
+ *  Called when the user clicks a job card whose status is "done" and has an
+ *  outputPath. Switches the rail to "review", loads the markdown from disk via
+ *  read_text_file, and renders it in the review pane. Fail-soft: errors are
+ *  logged but never crash the Library view.
+ *
+ *  `outputPath` is the absolute path to the written {stem}.md.
+ *  `mdPane`     the makeMarkdownPane() controller.
+ *  `buttons`    the rail button NodeList (to update is-active + titlebar). */
+async function openInReview(outputPath, mdPane, buttons) {
+  if (!outputPath) return;
+  // Switch to the review view — mirror what wireRail does on a click.
+  const screenTitle = document.getElementById("screenTitle");
+  if (buttons) {
+    buttons.forEach((b) => b.classList.remove("is-active"));
+    const reviewBtn = Array.from(buttons).find((b) => b.dataset.route === "review");
+    if (reviewBtn) reviewBtn.classList.add("is-active");
+  }
+  document.querySelectorAll(".view").forEach((v) => {
+    v.classList.toggle("is-shown", v.dataset.view === "review");
+  });
+  if (screenTitle) screenTitle.textContent = "Review";
+
+  // Fetch the .md from disk via the backend command.
+  let t;
+  try {
+    t = requireTauri();
+  } catch (err) {
+    return;
+  }
+  try {
+    // allowed_dir: the parent directory of the .md file so read_text_file's
+    // allowlist check passes (matches the outDir the run used).
+    const lastSep = Math.max(outputPath.lastIndexOf("/"), outputPath.lastIndexOf("\\"));
+    const allowedDir = lastSep > 0 ? outputPath.slice(0, lastSep) : ".";
+    const markdown = await t.core.invoke("read_text_file", {
+      path: outputPath,
+      allowedDir,
+    });
+    if (mdPane) mdPane.render(markdown, outputPath);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("[library] re-open failed:", err);
+    if (mdPane) mdPane.render("could not read " + outputPath + ": " + String(err), outputPath);
+  }
+}
+
 /** EH-0006: build a single read-only job card element from a Job record. Status
  *  drives the stripe + badge color via the .job-card--<status> class. Done shows the
  *  output path; failed shows the error. Options + timestamps are the meta footer.
  *  Module-level so the Library grid (all jobs) and the Board columns (jobs grouped by
- *  status) render identical cards — one source of truth for the card markup. */
-function renderJobCard(job) {
+ *  status) render identical cards — one source of truth for the card markup.
+ *
+ *  EH-0015: `mdPane` and `railButtons` are optional. When provided, cards for done
+ *  jobs with an outputPath are clickable: clicking opens the .md in the review pane
+ *  (via openInReview). The pointer cursor and a "Open in review" aria-label signal
+ *  the affordance. Board column cards do not receive these so they stay inert. */
+function renderJobCard(job, mdPane, railButtons) {
   const card = document.createElement("div");
   const status = (job && job.status) || "queued";
   card.className = "job-card job-card--" + status;
@@ -402,6 +489,20 @@ function renderJobCard(job) {
     push("queued:", formatEpoch(job.createdAt));
   }
   card.appendChild(meta);
+
+  // EH-0015: wire the "re-open in review" affordance for done jobs that have an
+  // on-disk output. Only the Library grid passes mdPane + railButtons; Board cards
+  // are intentionally inert (the Board is a status board, not a content browser).
+  const outputPath = job && job.outputPath;
+  if (mdPane && railButtons && status === "done" && outputPath) {
+    card.classList.add("job-card--openable");
+    card.title = "Click to open the markdown in the Review pane";
+    card.style.cursor = "pointer";
+    card.addEventListener("click", () => {
+      openInReview(outputPath, mdPane, railButtons);
+    });
+  }
+
   return card;
 }
 
@@ -413,17 +514,25 @@ function renderJobCard(job) {
  *  `load()` is called once on app start and again whenever the Library rail button
  *  is activated, so a run completed in the Workspace shows up after switching tabs
  *  without a manual reload. A store read failure is surfaced as an error card
- *  instead of throwing, so a first-launch (no store yet) stays usable. */
+ *  instead of throwing, so a first-launch (no store yet) stays usable.
+ *
+ *  EH-0015: `mdPane` and `railButtons` are optional. When provided, done job cards
+ *  with an outputPath become clickable and re-open the .md in the Review pane.
+ *  They are wired in DOMContentLoaded after makeMarkdownPane() and the rail buttons
+ *  are resolved, then injected via library.setReviewHooks(). */
 function makeLibrary() {
   const grid = document.getElementById("libraryGrid");
   const count = document.getElementById("libraryCount");
   const empty = document.getElementById("libraryEmpty");
   const refresh = document.getElementById("libraryRefresh");
+  // Set by setReviewHooks() once mdPane + rail buttons are available.
+  let _mdPane = null;
+  let _railButtons = null;
 
   /** Replace the grid with cards for the given jobs (newest-first by createdAt so
    *  the most recent run is top-left). Empty -> placeholder shown. Cards are built
    *  by the shared module-level renderJobCard, so the Library and Board render the
-   *  same card markup. */
+   *  same card markup. Done cards are clickable when _mdPane is wired. */
   function render(jobs) {
     if (!grid) return;
     grid.querySelectorAll(".job-card").forEach((n) => n.remove());
@@ -436,7 +545,7 @@ function makeLibrary() {
     }
     if (empty) empty.hidden = true;
     for (const job of list) {
-      grid.appendChild(renderJobCard(job));
+      grid.appendChild(renderJobCard(job, _mdPane, _railButtons));
     }
   }
 
@@ -466,7 +575,17 @@ function makeLibrary() {
     refresh.addEventListener("click", load);
   }
 
-  return { load, render };
+  /** EH-0015: inject the review-pane controller and rail buttons so done job
+   *  cards become clickable. Call once in DOMContentLoaded after both are live.
+   *  Re-renders the grid immediately so existing cards pick up the affordance. */
+  function setReviewHooks(mdPane, railButtons) {
+    _mdPane = mdPane;
+    _railButtons = railButtons;
+    // Re-render: cards already in the grid were built without the hooks.
+    load();
+  }
+
+  return { load, render, setReviewHooks };
 }
 
 /** Format a unix epoch-seconds value as a short local timestamp for a card footer.
@@ -1025,26 +1144,55 @@ async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, board) {
   }
 }
 
-/** Wire the Run button: validate path, then delegate to runOcrOnPath.
+/** Wire the Run button: validate queued path list, then run each sequentially.
  *  EH-0004 bite 2: on success the written {stem}.md (path returned by run_ocr) is
  *  fetched via read_text_file and rendered into the read-only Markdown review pane.
  *  EH-0006: on completion (success or failure) the outcome is recorded to the job
  *  store via record_job so it appears in the Library grid and on the Board; the
- *  record call is best-effort and never rolls back a delivered OCR result. */
-function wireRunButton(ui, mdPane, unlistensRef, library, board) {
+ *  record call is best-effort and never rolls back a delivered OCR result.
+ *  EH-0012: getQueuedPaths() returns the current queued-file list so the button
+ *  processes all imported files, not just the typed-path field. */
+function wireRunButton(ui, mdPane, unlistensRef, library, board, getQueuedPaths) {
   const runBtn = document.getElementById("runBtn");
   const pathInput = document.getElementById("pdfPath");
   if (!runBtn) return;
 
   runBtn.addEventListener("click", () => {
-    const path = (pathInput && pathInput.value || "").trim();
-    if (!path) {
-      ui.fail("enter a PDF path first");
+    // Prefer the multi-file queue; fall back to the typed-path field for
+    // single-file entry without the picker.
+    const queued = typeof getQueuedPaths === "function" ? getQueuedPaths() : [];
+    const fallback = (pathInput && pathInput.value || "").trim();
+    const paths = queued.length > 0 ? queued : fallback ? [fallback] : [];
+    if (paths.length === 0) {
+      ui.fail("import or type a PDF path first");
       return;
     }
-    // Fire-and-forget: the click handler cannot await without holding the event,
-    // and runOcrOnPath owns its own UI state transitions + error surfacing.
-    runOcrOnPath(path, ui, mdPane, unlistensRef, library, board);
+    // Fire-and-forget: the click handler cannot await without holding the event.
+    // runOcrOnPath owns UI state transitions + error surfacing per file.
+    (async () => {
+      // Capture the real setStatus once, before any patching, so a rejection in
+      // one file cannot leave a patched function that the next iteration would
+      // then capture and double-prefix.
+      const originalSetStatus = ui.setStatus.bind(ui);
+      for (let i = 0; i < paths.length; i++) {
+        const path = paths[i];
+        // Per-file status prefix so the user knows which file is running when
+        // multiple are queued (single-file batches show the same "1/1: name").
+        const prefix = paths.length > 1
+          ? "[" + (i + 1) + "/" + paths.length + "] " + jobBaseName(path) + " — "
+          : "";
+        // Patch ui.setStatus to prepend the per-file prefix while this file runs.
+        // try/finally so the original is always restored, even if runOcrOnPath
+        // rejects (its pre-try teardown/subscribe can throw) — otherwise the
+        // patch leaks past the loop and into later files.
+        ui.setStatus = (text) => originalSetStatus(prefix + text);
+        try {
+          await runOcrOnPath(path, ui, mdPane, unlistensRef, library, board);
+        } finally {
+          ui.setStatus = originalSetStatus;
+        }
+      }
+    })();
   });
 }
 
@@ -1268,6 +1416,24 @@ function wireEngineTabs() {
       if (remoteFields) remoteFields.hidden = btn.dataset.engine !== "remote";
     });
   });
+
+  // ponytail: convenience prefill, not a new engine mode. LM Studio's MLX engine
+  // is just a local OpenAI-compatible endpoint, so this flips to the Remote tab
+  // (reusing its click handler) and fills the default localhost:1234 URL.
+  const preset = document.getElementById("presetLmStudio");
+  if (preset) {
+    preset.addEventListener("click", () => {
+      const remoteBtn = tabs.querySelector('.seg__btn[data-engine="remote"]');
+      if (remoteBtn) remoteBtn.click();
+      if (remoteFields) {
+        const url = document.getElementById("remoteUrl");
+        // Base URL only (no /v1): the backend appends /v1/chat/completions.
+        // LM Studio's OpenAI server lives at localhost:1234, /v1 is the suffix
+        // unlocr adds itself, so writing it here would double it -> 404.
+        if (url) url.value = "http://localhost:1234";
+      }
+    });
+  }
 }
 
 /** Return the active engine tab's mode ("local" | "remote"). */
@@ -1298,6 +1464,7 @@ function wireModelBar(ui) {
       const quantEl = document.getElementById("optQuant");
       const urlEl = document.getElementById("remoteUrl");
       const keyEl = document.getElementById("remoteKey");
+      const modelEl = document.getElementById("remoteModel");
       loadBtn.disabled = true;
       if (unloadBtn) unloadBtn.disabled = true;
       if (statusText) statusText.textContent = "loading…";
@@ -1307,6 +1474,7 @@ function wireModelBar(ui) {
           quant: quantEl ? quantEl.value : null,
           baseUrl: urlEl ? urlEl.value : null,
           apiKey: keyEl ? keyEl.value : null,
+          model: modelEl ? modelEl.value : null,
           llamaBin: null,
         });
         if (ui) ui.applyModelStatus(status);
@@ -1359,9 +1527,19 @@ function attachLoadListeners() {
   });
 }
 
+/** Map a raw quant value to the human-readable tier label used in the select.
+ *  Matches the CLI tier semantics: best=BF16, good=Q8_0, less=Q4_K_M.
+ *  Unknown quants fall back to the raw value so future quants degrade gracefully. */
+function quantTierLabel(quant) {
+  const TIERS = { BF16: "best", Q8_0: "good", Q4_K_M: "less" };
+  const tier = TIERS[quant];
+  return tier ? tier + " (" + quant + ")" : quant;
+}
+
 /** Mark which quant options are already cached on disk (list_local_models) by
  *  appending a check to their label. Applies to both the run-time Quant select and
- *  the Settings default-quant select. Best-effort; never throws. */
+ *  the Settings default-quant select. Best-effort; never throws. Preserves the tier
+ *  label prefix so the cached marker appends to "good (Q8_0)", not just "Q8_0". */
 async function markCachedQuants() {
   let t;
   try {
@@ -1381,7 +1559,8 @@ async function markCachedQuants() {
     if (!sel) return;
     Array.from(sel.options).forEach((opt) => {
       const base = opt.value;
-      opt.textContent = set.has(base) ? base + " ✓ cached" : base;
+      const label = quantTierLabel(base);
+      opt.textContent = set.has(base) ? label + " ✓ cached" : label;
     });
   });
 }
@@ -1400,6 +1579,7 @@ function applySettingsToControls(s) {
   setVal("optPrompt", s.defaultPrompt);
   setVal("remoteUrl", s.remoteBaseUrl);
   setVal("remoteKey", s.remoteApiKey);
+  setVal("remoteModel", s.remoteModel);
   // Select the engine tab matching the saved mode.
   const tabs = document.getElementById("engineTabs");
   const remoteFields = document.getElementById("remoteFields");
@@ -1425,6 +1605,7 @@ async function wireSettings(onSaved) {
     defaultQuant: "setQuant",
     remoteBaseUrl: "setRemoteUrl",
     remoteApiKey: "setRemoteKey",
+    remoteModel: "setRemoteModel",
     llamaBin: "setLlamaBin",
     defaultDpi: "setDpi",
     defaultMaxTokens: "setMaxTokens",
@@ -1461,6 +1642,7 @@ async function wireSettings(onSaved) {
         defaultQuant: (get(ids.defaultQuant) && get(ids.defaultQuant).value) || "Q8_0",
         remoteBaseUrl: (get(ids.remoteBaseUrl) && get(ids.remoteBaseUrl).value) || "",
         remoteApiKey: (get(ids.remoteApiKey) && get(ids.remoteApiKey).value) || "",
+        remoteModel: (get(ids.remoteModel) && get(ids.remoteModel).value) || "",
         llamaBin: (get(ids.llamaBin) && get(ids.llamaBin).value) || "",
         defaultDpi: num(ids.defaultDpi, 144),
         defaultMaxTokens: num(ids.defaultMaxTokens, 4096),
@@ -1487,6 +1669,67 @@ async function wireSettings(onSaved) {
   }
 }
 
+/** Wire the Settings panel's Model cache section: load the cache path + GGUF
+ *  size via get_cache_info, and wire the Clear button to clear_model_cache.
+ *  Called once on startup (the Settings view exists in the DOM at load time).
+ *  Fail-soft outside the webview. */
+async function wireCacheControls() {
+  let t;
+  try {
+    t = requireTauri();
+  } catch (err) {
+    return;
+  }
+  const dirEl = document.getElementById("cacheDir");
+  const sizeEl = document.getElementById("cacheSizeBytes");
+  const clearBtn = document.getElementById("clearCacheBtn");
+  const statusEl = document.getElementById("clearCacheStatus");
+
+  /** Format bytes to a human-readable string (MiB for GB-scale GGUFs). */
+  function fmtBytes(n) {
+    if (n <= 0) return "0 B";
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KiB";
+    if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MiB";
+    return (n / (1024 * 1024 * 1024)).toFixed(2) + " GiB";
+  }
+
+  /** Refresh the path + size display from the backend. */
+  async function refreshCacheInfo() {
+    try {
+      const info = await t.core.invoke("get_cache_info");
+      if (dirEl) dirEl.textContent = (info && info.path) || "—";
+      if (sizeEl) sizeEl.textContent = info ? fmtBytes(Number(info.sizeBytes) || 0) : "";
+    } catch (err) {
+      if (dirEl) dirEl.textContent = "unavailable";
+      if (sizeEl) sizeEl.textContent = "";
+    }
+  }
+
+  await refreshCacheInfo();
+
+  if (clearBtn) {
+    clearBtn.addEventListener("click", async () => {
+      clearBtn.disabled = true;
+      if (statusEl) { statusEl.hidden = false; statusEl.textContent = "clearing…"; }
+      try {
+        await t.core.invoke("clear_model_cache");
+        if (statusEl) statusEl.textContent = "Cache cleared.";
+        await refreshCacheInfo();
+        // Re-mark cached quants (all gone after a clear).
+        markCachedQuants();
+      } catch (err) {
+        if (statusEl) statusEl.textContent = "Error: " + String(err);
+      } finally {
+        clearBtn.disabled = false;
+        if (statusEl) {
+          setTimeout(() => { if (statusEl) statusEl.hidden = true; }, 3000);
+        }
+      }
+    });
+  }
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   const library = makeLibrary();
   const board = makeBoard();
@@ -1496,7 +1739,19 @@ window.addEventListener("DOMContentLoaded", () => {
   const rail = makeFileRail();
   const mdPane = makeMarkdownPane();
   const unlistensRef = { value: [] };
-  wireRunButton(ui, mdPane, unlistensRef, library, board);
+
+  // EH-0015: wire the review-pane re-open affordance. Done job cards in the
+  // Library become clickable; clicking switches to the Review view and loads
+  // the card's .md. Rail buttons are needed so openInReview can update is-active.
+  const railButtons = document.querySelectorAll(".rail__btn");
+  library.setReviewHooks(mdPane, railButtons);
+  // EH-0012: canonical queue of PDF paths to process on Run. The Import picker
+  // populates this; the path-input field seeds it too (single-file typed entry).
+  // wireRunButton reads this via getQueuedPaths() so all imported files run
+  // sequentially on one click instead of only the last typed path.
+  let queuedPaths = [];
+  const getQueuedPaths = () => queuedPaths.slice();
+  wireRunButton(ui, mdPane, unlistensRef, library, board, getQueuedPaths);
   // EH-0006 bite 4: drag-drop PDF import onto the Library grid. Wired once on app
   // load; the listeners live for the app lifetime and are scoped to the Library
   // view inside the handler. Fail-soft outside the webview (plain browser).
@@ -1513,32 +1768,47 @@ window.addEventListener("DOMContentLoaded", () => {
     markCachedQuants();
   });
   markCachedQuants();
+  wireCacheControls();
   refreshModelStatus(ui);
 
-  // EH-0004 bite 2: the file list pane is bound to the path field + Import
-  // button, so it reflects the input queued for the next run instead of a
-  // static placeholder. The Import button seeds the field; typing does too.
+  // EH-0004 bite 2 / EH-0012: the file list pane is bound to the queued-path
+  // list. The Import button opens a MULTI-select picker; each chosen PDF is
+  // added to queuedPaths and rendered in the file-rail. The path-input field
+  // provides single-file typed/pasted entry (adds one path on change). The Run
+  // button processes queuedPaths in order, with per-file status.
   const pathInput = document.getElementById("pdfPath");
   const importBtn = document.getElementById("importBtn");
   const preview = makePreviewPane();
+
+  // Apply queuedPaths to the file-rail display and clear the text field
+  // (the canonical list is in queuedPaths, not the field, for multi-file batches).
+  function applyQueue(paths) {
+    queuedPaths = paths.slice();
+    rail.renderFiles(queuedPaths);
+    // Show the first file in the path field for context; for multi-file batches
+    // this is the first item only (the rail shows the full list).
+    if (pathInput) pathInput.value = queuedPaths.length === 1 ? queuedPaths[0] : "";
+  }
+
   if (pathInput) {
-    const syncFiles = () => {
+    const syncFromField = () => {
       const v = (pathInput.value || "").trim();
-      rail.renderFiles(v ? [v] : []);
+      // Typed path replaces the entire queue (single-file typed entry).
+      queuedPaths = v ? [v] : [];
+      rail.renderFiles(queuedPaths);
     };
-    // Preview render shells out to pdftoppm, so only refresh on `change`
-    // (blur/Enter) + explicit picker selection, never per keystroke.
+    // Preview render shells out to pdftoppm; only refresh on blur/Enter/change,
+    // not per keystroke.
     const refreshPreview = () => preview.show((pathInput.value || "").trim());
-    pathInput.addEventListener("input", syncFiles);
-    pathInput.addEventListener("change", syncFiles);
+    pathInput.addEventListener("input", syncFromField);
+    pathInput.addEventListener("change", syncFromField);
     pathInput.addEventListener("change", refreshPreview);
-    // Import opens the native file picker (tauri-plugin-dialog, exposed at
-    // window.__TAURI__.dialog via withGlobalTauri). Single-select: the chosen
-    // path seeds the field, exactly like typing it. Batch import stays on
-    // drag-drop (wireLibraryDrop). Outside the webview the API is absent, so
-    // fall back to focusing the field for manual entry.
-    // ponytail: single-select picker; flip `multiple: true` + loop runOcrOnPath
-    // here if a multi-file picker is needed.
+
+    // Import opens the native multi-select file picker (tauri-plugin-dialog,
+    // exposed at window.__TAURI__.dialog via withGlobalTauri). The picker result
+    // is a string (single) or string[] (multiple) for multi:true.
+    // EH-0012: `multiple: true` so the user can pick several PDFs at once; all
+    // are added to queuedPaths and shown in the file-rail.
     if (importBtn) {
       importBtn.addEventListener("click", async () => {
         const dialog = window.__TAURI__ && window.__TAURI__.dialog;
@@ -1548,15 +1818,18 @@ window.addEventListener("DOMContentLoaded", () => {
         }
         try {
           const selected = await dialog.open({
-            multiple: false,
+            multiple: true,
             directory: false,
             filters: [{ name: "PDF", extensions: ["pdf"] }],
           });
-          if (typeof selected === "string") {
-            pathInput.value = selected;
-            syncFiles();
-            refreshPreview();
-          }
+          // selected is null (cancelled), string (single), or string[] (multiple).
+          if (!selected) return;
+          const picked = Array.isArray(selected) ? selected : [selected];
+          const pdfs = picked.filter((p) => typeof p === "string" && p.trim());
+          if (pdfs.length === 0) return;
+          applyQueue(pdfs);
+          // Preview the first file; multi-file batches show page 1 of the first PDF.
+          preview.show(pdfs[0]);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("[import] picker failed:", err.message);

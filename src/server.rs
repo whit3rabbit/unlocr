@@ -2,7 +2,7 @@
 // completions, and kill it on drop.
 
 use crate::Res;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -145,6 +145,7 @@ impl Server {
         ocr_via(
             &format!("http://127.0.0.1:{}", self.port),
             None,
+            None,
             prompt,
             data_uri,
             max_tokens,
@@ -157,11 +158,44 @@ impl Server {
 /// caring which. The body it sends is provider-agnostic (OpenAI chat-completions).
 pub trait ImageOcr {
     fn ocr_image(&self, prompt: &str, data_uri: &str, max_tokens: u32) -> Res<String>;
+
+    /// Stream completions: like `ocr_image` but calls `on_token` with each partial
+    /// text chunk as it arrives (SSE delta), and returns the full assembled text.
+    /// The default falls back to the non-streaming path (safe for stub servers
+    /// and callers that do not need partial-token events).
+    fn ocr_image_stream(
+        &self,
+        prompt: &str,
+        data_uri: &str,
+        max_tokens: u32,
+        on_token: &mut dyn FnMut(&str),
+    ) -> Res<String> {
+        let _ = on_token; // default: ignore the sink
+        self.ocr_image(prompt, data_uri, max_tokens)
+    }
 }
 
 impl ImageOcr for Server {
     fn ocr_image(&self, prompt: &str, data_uri: &str, max_tokens: u32) -> Res<String> {
         Server::ocr_image(self, prompt, data_uri, max_tokens)
+    }
+
+    fn ocr_image_stream(
+        &self,
+        prompt: &str,
+        data_uri: &str,
+        max_tokens: u32,
+        on_token: &mut dyn FnMut(&str),
+    ) -> Res<String> {
+        ocr_via_stream(
+            &format!("http://127.0.0.1:{}", self.port),
+            None,
+            None,
+            prompt,
+            data_uri,
+            max_tokens,
+            on_token,
+        )
     }
 }
 
@@ -174,6 +208,10 @@ pub struct RemoteEndpoint {
     pub base_url: String,
     /// Optional bearer token sent as `Authorization: Bearer <key>`.
     pub api_key: Option<String>,
+    /// Optional model name placed in the request body's `"model"` field. Required
+    /// by multi-model gateways (litellm, vLLM); a bare remote llama-server ignores
+    /// it, so `None` is fine there.
+    pub model: Option<String>,
 }
 
 impl RemoteEndpoint {
@@ -196,9 +234,28 @@ impl ImageOcr for RemoteEndpoint {
         ocr_via(
             self.base_url.trim_end_matches('/'),
             self.api_key.as_deref(),
+            self.model.as_deref(),
             prompt,
             data_uri,
             max_tokens,
+        )
+    }
+
+    fn ocr_image_stream(
+        &self,
+        prompt: &str,
+        data_uri: &str,
+        max_tokens: u32,
+        on_token: &mut dyn FnMut(&str),
+    ) -> Res<String> {
+        ocr_via_stream(
+            self.base_url.trim_end_matches('/'),
+            self.api_key.as_deref(),
+            self.model.as_deref(),
+            prompt,
+            data_uri,
+            max_tokens,
+            on_token,
         )
     }
 }
@@ -209,12 +266,13 @@ impl ImageOcr for RemoteEndpoint {
 fn ocr_via(
     base_url: &str,
     api_key: Option<&str>,
+    model: Option<&str>,
     prompt: &str,
     data_uri: &str,
     max_tokens: u32,
 ) -> Res<String> {
     let url = format!("{base_url}/v1/chat/completions");
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "temperature": 0,
         "max_tokens": max_tokens,
         "messages": [{
@@ -225,12 +283,97 @@ fn ocr_via(
             ]
         }]
     });
+    // Only multi-model gateways (litellm, vLLM) need a "model" field; a bare
+    // llama-server ignores it. Inject it only when the caller supplied one.
+    if let Some(m) = model {
+        body["model"] = serde_json::Value::String(m.to_string());
+    }
     let mut req = ureq::post(&url).timeout(Duration::from_secs(600));
     if let Some(key) = api_key {
         req = req.set("Authorization", &format!("Bearer {key}"));
     }
     let resp: serde_json::Value = req.send_json(body)?.into_json()?;
     parse_completion(&resp)
+}
+
+/// POST with `stream: true` and consume the SSE response, calling `on_token`
+/// for each `choices[0].delta.content` chunk. Returns the full assembled text.
+/// Lines that are not `data: {...}` (keep-alive `:` or the terminal `data: [DONE]`)
+/// are silently skipped. On a parse failure for a single chunk, the chunk is
+/// skipped (best-effort) and the loop continues so a single corrupt line does not
+/// abort a long OCR run.
+fn ocr_via_stream(
+    base_url: &str,
+    api_key: Option<&str>,
+    model: Option<&str>,
+    prompt: &str,
+    data_uri: &str,
+    max_tokens: u32,
+    on_token: &mut dyn FnMut(&str),
+) -> Res<String> {
+    let url = format!("{base_url}/v1/chat/completions");
+    let mut body = serde_json::json!({
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "stream": true,
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": prompt },
+                { "type": "image_url", "image_url": { "url": data_uri } }
+            ]
+        }]
+    });
+    if let Some(m) = model {
+        body["model"] = serde_json::Value::String(m.to_string());
+    }
+    let mut req = ureq::post(&url).timeout(Duration::from_secs(600));
+    if let Some(key) = api_key {
+        req = req.set("Authorization", &format!("Bearer {key}"));
+    }
+    let resp = req.send_json(body)?;
+    let reader = BufReader::new(resp.into_reader());
+    let mut full = String::new();
+    // Track whether we ever saw an SSE `data:` line. Some OpenAI-compatible
+    // servers ignore `stream: true` and reply with one plain JSON completion
+    // body; without this flag those replies would be silently dropped (every
+    // line fails strip_prefix) and we would return an empty string.
+    let mut saw_sse = false;
+    let mut raw = String::new();
+    for line in reader.lines() {
+        let line = line?;
+        // SSE lines begin with "data: "; everything else is a comment or blank.
+        let Some(json_str) = line.strip_prefix("data: ") else {
+            // Keep the raw body around for the non-streaming fallback below.
+            raw.push_str(&line);
+            continue;
+        };
+        saw_sse = true;
+        // Terminal sentinel sent by llama-server at end-of-stream.
+        if json_str.trim() == "[DONE]" {
+            break;
+        }
+        // Best-effort parse: a single corrupt chunk is skipped, not fatal.
+        let Ok(chunk) = serde_json::from_str::<serde_json::Value>(json_str) else {
+            continue;
+        };
+        if let Some(token) = chunk["choices"][0]["delta"]["content"].as_str() {
+            on_token(token);
+            full.push_str(token);
+        }
+    }
+    // Non-streaming fallback: the server returned a normal JSON completion body
+    // (no `data:` lines). Parse it like ocr_via and deliver the text in one shot
+    // so callers against a server that ignores `stream: true` still get output
+    // instead of an empty result.
+    if !saw_sse && full.is_empty() {
+        if let Ok(resp) = serde_json::from_str::<serde_json::Value>(&raw) {
+            let text = parse_completion(&resp)?;
+            on_token(&text);
+            return Ok(text);
+        }
+    }
+    Ok(full)
 }
 
 /// Pull the assistant message text out of an OpenAI-style chat completion.
@@ -269,7 +412,7 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_completion, ImageOcr, RemoteEndpoint};
+    use super::{ocr_via_stream, parse_completion, ImageOcr, RemoteEndpoint};
     use serde_json::json;
 
     #[test]
@@ -342,6 +485,7 @@ mod tests {
         let ep = RemoteEndpoint {
             base_url: format!("http://127.0.0.1:{port}/"), // trailing slash must be trimmed
             api_key: Some("secret".to_string()),
+            model: None,
         };
         let out = ep
             .ocr_image("<|grounding|>x", "data:image/png;base64,AAAA", 64)
@@ -351,6 +495,226 @@ mod tests {
         let (request_line, auth) = rx.recv().expect("stub recorded request");
         assert_eq!(request_line, "POST /v1/chat/completions HTTP/1.1");
         assert_eq!(auth.as_deref(), Some("bearer secret"));
+    }
+
+    /// A `model` set on RemoteEndpoint must land in the request body (gateways
+    /// like litellm/vLLM require it); when unset, no `"model"` key is sent (a bare
+    /// llama-server would reject an empty/unknown model). Stub captures the body.
+    #[test]
+    fn remote_endpoint_injects_model_only_when_set() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::sync::mpsc;
+
+        fn run_once(model: Option<String>) -> serde_json::Value {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
+            let port = listener.local_addr().unwrap().port();
+            let resp_body =
+                json!({ "choices": [{ "message": { "content": "ok" } }] }).to_string();
+            let http_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                resp_body.len(),
+                resp_body,
+            );
+            let (tx, rx) = mpsc::channel::<Vec<u8>>();
+            std::thread::spawn(move || {
+                let Ok(s) = listener.incoming().next().unwrap() else { return };
+                let mut reader = BufReader::new(s.try_clone().unwrap());
+                let mut writer = s;
+                let mut content_length = 0usize;
+                let mut first = String::new();
+                reader.read_line(&mut first).ok();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let t = line.trim_end_matches(|c| c == '\r' || c == '\n');
+                    if t.is_empty() {
+                        break;
+                    }
+                    if let Some(v) = t.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                let _ = reader.read_exact(&mut body);
+                let _ = writer.write_all(http_response.as_bytes());
+                let _ = tx.send(body);
+            });
+
+            let ep = RemoteEndpoint {
+                base_url: format!("http://127.0.0.1:{port}"),
+                api_key: None,
+                model,
+            };
+            ep.ocr_image("p", "data:image/png;base64,AAAA", 64).expect("ocr");
+            let body = rx.recv().expect("stub recorded body");
+            serde_json::from_slice(&body).expect("body is json")
+        }
+
+        let with = run_once(Some("my-model".to_string()));
+        assert_eq!(with["model"], json!("my-model"));
+
+        let without = run_once(None);
+        assert!(without.get("model").is_none(), "model key must be absent when unset");
+    }
+
+    /// EH-0010 acceptance: prove `ocr_via_stream` fires `on_token` once per SSE
+    /// `data:` chunk and assembles the full text correctly.
+    ///
+    /// The stub HTTP server returns a proper SSE body with `stream: true` semantics:
+    ///   data: {"choices":[{"delta":{"content":"Hello"}}]}
+    ///   data: {"choices":[{"delta":{"content":" world"}}]}
+    ///   data: [DONE]
+    ///
+    /// This is the real SSE wire format that llama-server sends. The test verifies:
+    ///   1. on_token fires exactly twice, once per chunk.
+    ///   2. The assembled return value equals the concatenation of both chunks.
+    ///   3. Blank lines and [DONE] are silently skipped (not counted as tokens).
+    #[test]
+    fn sse_streaming_fires_on_token() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        // Build the SSE body: two chunks then [DONE].
+        let sse_body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\r\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\r\n",
+            "data: [DONE]\r\n",
+        );
+        // Use Transfer-Encoding: chunked so ureq reads line-by-line without
+        // needing a fixed Content-Length for a streaming response.
+        // Alternatively, send a fixed-length body — simpler and avoids chunked encoding.
+        let http_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{}",
+            sse_body.len(),
+            sse_body,
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
+        let port = listener.local_addr().unwrap().port();
+
+        let http_resp_clone = http_response.clone();
+        std::thread::spawn(move || {
+            // Serve a single connection with the SSE response, then exit.
+            if let Ok(stream) = listener.accept() {
+                let (sock, _) = stream;
+                let mut reader = BufReader::new(sock.try_clone().expect("clone"));
+                let mut writer = sock;
+                // Drain the request headers + body.
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let t = line.trim_end_matches(|c| c == '\r' || c == '\n');
+                    if t.is_empty() {
+                        break;
+                    }
+                    if t.to_ascii_lowercase().starts_with("content-length:") {
+                        if let Some(v) = t.splitn(2, ':').nth(1) {
+                            content_length = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                let _ = Read::read_exact(&mut reader, &mut body);
+                let _ = writer.write_all(http_resp_clone.as_bytes());
+            }
+        });
+
+        let base_url = format!("http://127.0.0.1:{port}");
+        let mut tokens: Vec<String> = Vec::new();
+        let result = ocr_via_stream(
+            &base_url,
+            None,
+            None,
+            "test prompt",
+            "data:image/png;base64,AAAA",
+            64,
+            &mut |chunk: &str| tokens.push(chunk.to_string()),
+        );
+
+        assert!(result.is_ok(), "ocr_via_stream failed: {:?}", result.err());
+        let assembled = result.unwrap();
+
+        // on_token must fire exactly once per data chunk (2 chunks, not 3 — [DONE] is not a token).
+        assert_eq!(
+            tokens,
+            vec!["Hello".to_string(), " world".to_string()],
+            "on_token fired with unexpected chunks: {tokens:?}"
+        );
+        // Assembled text must be the concatenation of both chunks.
+        assert_eq!(
+            assembled, "Hello world",
+            "assembled text mismatch: {assembled:?}"
+        );
+    }
+
+    /// Non-SSE fallback: a server that ignores `stream: true` and replies with a
+    /// single plain JSON completion body must still yield its text (parsed like
+    /// ocr_via) rather than an empty string. Regression guard for the streaming
+    /// switch in ocr_pages, which otherwise silently dropped such responses.
+    #[test]
+    fn stream_falls_back_to_plain_json_completion() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        // A normal (non-streaming) OpenAI chat-completion body, no `data:` framing.
+        let json_body = r#"{"choices":[{"message":{"content":"plain json ok"}}]}"#;
+        let http_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            json_body.len(),
+            json_body,
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
+        let port = listener.local_addr().unwrap().port();
+
+        let http_resp_clone = http_response.clone();
+        std::thread::spawn(move || {
+            if let Ok((sock, _)) = listener.accept() {
+                let mut reader = BufReader::new(sock.try_clone().expect("clone"));
+                let mut writer = sock;
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let t = line.trim_end_matches(|c| c == '\r' || c == '\n');
+                    if t.is_empty() {
+                        break;
+                    }
+                    if t.to_ascii_lowercase().starts_with("content-length:") {
+                        if let Some(v) = t.splitn(2, ':').nth(1) {
+                            content_length = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                let _ = Read::read_exact(&mut reader, &mut body);
+                let _ = writer.write_all(http_resp_clone.as_bytes());
+            }
+        });
+
+        let base_url = format!("http://127.0.0.1:{port}");
+        let mut tokens: Vec<String> = Vec::new();
+        let result = ocr_via_stream(
+            &base_url,
+            None,
+            None,
+            "test prompt",
+            "data:image/png;base64,AAAA",
+            64,
+            &mut |chunk: &str| tokens.push(chunk.to_string()),
+        );
+
+        let assembled = result.expect("ocr_via_stream fallback failed");
+        assert_eq!(assembled, "plain json ok", "fallback text mismatch");
+        // The fallback delivers the whole body as one on_token call.
+        assert_eq!(tokens, vec!["plain json ok".to_string()]);
     }
 }
 

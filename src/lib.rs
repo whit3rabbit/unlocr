@@ -67,6 +67,9 @@ pub enum Progress {
     ServerReady { port: u16 },
     /// One page rasterized+OCR'd. `page` is 1-based, `total` is the page count.
     Page { page: usize, total: usize },
+    /// One streaming token chunk emitted during OCR of a page. `page` is 1-based.
+    /// The GUI appends `chunk` to the live transcript; the CLI may ignore it.
+    PartialText { page: usize, chunk: String },
 }
 
 /// Drive one PDF end to end and return the assembled markdown, emitting progress
@@ -208,12 +211,26 @@ where
 
     let mut md = String::new();
     for (i, page) in pages.iter().enumerate() {
-        on_progress(Progress::Page { page: i + 1, total: n });
+        let page_num = i + 1;
+        on_progress(Progress::Page { page: page_num, total: n });
 
         let bytes = std::fs::read(page)?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         let data_uri = format!("data:image/png;base64,{b64}");
-        let text = srv.ocr_image(&opts.prompt, &data_uri, opts.max_tokens)?;
+        // Use streaming so the GUI receives PartialText events as tokens arrive.
+        // The CLI's on_progress sink ignores PartialText (zero cost), while the
+        // Tauri bridge forwards each chunk to the frontend for live appending.
+        let text = srv.ocr_image_stream(
+            &opts.prompt,
+            &data_uri,
+            opts.max_tokens,
+            &mut |chunk: &str| {
+                on_progress(Progress::PartialText {
+                    page: page_num,
+                    chunk: chunk.to_string(),
+                });
+            },
+        )?;
         push_page(&mut md, i, text.trim());
     }
 
@@ -452,13 +469,28 @@ mod tests {
             (2, 2),
             "second event should be Page{{page:2, total:2}}"
         );
-        // Verify no non-Page events sneaked in from ocr_pages (only Page is emitted there).
+        // ocr_pages emits Page plus PartialText (streamed OCR text). The stub
+        // replies with a plain JSON completion (no SSE framing); ocr_via_stream's
+        // non-streaming fallback delivers that text via on_token, so we expect one
+        // PartialText per page carrying the stub's content. No other variant.
         for ev in &events {
             assert!(
-                matches!(ev, Progress::Page { .. }),
-                "ocr_pages emitted unexpected event variant"
+                matches!(ev, Progress::Page { .. } | Progress::PartialText { .. }),
+                "ocr_pages emitted unexpected event variant: {ev:?}"
             );
         }
+        let partials: Vec<(usize, &str)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Progress::PartialText { page, chunk } => Some((*page, chunk.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            partials,
+            vec![(1, "# page text"), (2, "# page text")],
+            "expected one PartialText per page from the non-SSE fallback"
+        );
     }
 
     #[test]

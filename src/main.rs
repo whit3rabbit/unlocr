@@ -79,6 +79,24 @@ struct Args {
     /// Keep the intermediate page PNGs instead of deleting them
     #[arg(long)]
     keep_images: bool,
+
+    /// Remote OpenAI-compatible endpoint base URL (e.g. http://host:8080). When
+    /// set, skips the local llama-server spawn and model download: pages are
+    /// rasterized locally and OCR'd against this endpoint. Only llama.cpp
+    /// (PR #17400), vLLM, and SGLang are known to support these OCR models;
+    /// --quant/--quality/--llama-bin/--port are ignored in this mode.
+    #[arg(long)]
+    endpoint: Option<String>,
+
+    /// Bearer token for --endpoint. Prefer the UNLOCR_API_KEY env var so the key
+    /// does not leak via the process list / shell history.
+    #[arg(long)]
+    endpoint_key: Option<String>,
+
+    /// Model name to send in the request body (required by litellm/vLLM gateways;
+    /// omit for a bare remote llama-server).
+    #[arg(long)]
+    endpoint_model: Option<String>,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -158,6 +176,12 @@ fn run() -> Res<()> {
     // Expand folders, globs, and --from-list into a concrete, deduped PDF list.
     let inputs = expand_inputs(&args.inputs, args.from_list.as_deref(), args.recursive)?;
 
+    // Remote endpoint mode: rasterize locally, OCR against a remote
+    // OpenAI-compatible server. No local llama-server spawn, no model download.
+    if let Some(base_url) = args.endpoint.clone() {
+        return run_remote(base_url, &inputs, &args);
+    }
+
     // 1. Preflight: locate external binaries and validate the llama.cpp build.
     let tools = preflight::check(args.llama_bin.as_deref())?;
 
@@ -179,13 +203,63 @@ fn run() -> Res<()> {
     // 4. OCR each PDF.
     let mut failures = 0;
     for input in &inputs {
-        if let Err(e) = ocr::run_pdf(&srv, &tools.pdftoppm, input, &args, port) {
+        if let Err(e) = ocr::run_pdf(&srv, &tools.pdftoppm, input, &args) {
             eprintln!("error: {}: {e}", input.display());
             failures += 1;
         }
     }
 
     drop(srv); // explicit: kill llama-server before returning
+    if failures > 0 {
+        return Err(format!("{failures} input(s) failed").into());
+    }
+    Ok(())
+}
+
+/// OCR every input against a remote OpenAI-compatible endpoint. Pages are still
+/// rasterized locally (pdftoppm), so this only skips the llama-server spawn and
+/// the model download; --quant/--quality/--llama-bin/--port are inert here.
+fn run_remote(base_url: String, inputs: &[PathBuf], args: &Args) -> Res<()> {
+    // Only the rasterizer is needed locally; no llama-server, no GGUF.
+    let pdftoppm = preflight::pdftoppm()?;
+
+    // Key precedence: --endpoint-key, then UNLOCR_API_KEY. Prefer the env var so
+    // the secret stays out of the process list / shell history.
+    let api_key = args
+        .endpoint_key
+        .clone()
+        .or_else(|| std::env::var("UNLOCR_API_KEY").ok());
+
+    eprintln!(
+        "warning: remote endpoint mode. Unlimited-OCR / DeepSeek-OCR is only known to run on \
+         llama.cpp (PR #17400), vLLM, and SGLang. Ollama / LM Studio do not support these \
+         OCR models; gateways (litellm/vLLM) need --endpoint-model set to the served name."
+    );
+
+    let endpoint = server::RemoteEndpoint {
+        base_url,
+        api_key,
+        model: args.endpoint_model.clone(),
+    };
+
+    // Soft reachability check: some servers omit /v1/models, so warn but proceed.
+    if let Err(e) = endpoint.probe() {
+        eprintln!(
+            "warning: could not reach {} (/v1/models): {e}. Proceeding anyway.",
+            endpoint.base_url
+        );
+    }
+
+    std::fs::create_dir_all(&args.out)?;
+    println!("using remote endpoint {}", endpoint.base_url);
+
+    let mut failures = 0;
+    for input in inputs {
+        if let Err(e) = ocr::run_pdf(&endpoint, &pdftoppm, input, args) {
+            eprintln!("error: {}: {e}", input.display());
+            failures += 1;
+        }
+    }
     if failures > 0 {
         return Err(format!("{failures} input(s) failed").into());
     }

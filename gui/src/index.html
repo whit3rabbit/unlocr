@@ -147,6 +147,11 @@
                     <button class="seg__btn is-active" type="button" data-engine="local">Unlimited-OCR</button>
                     <button class="seg__btn" type="button" data-engine="remote">Remote</button>
                   </div>
+                  <!-- One-click preset: flip to Remote + fill LM Studio's local MLX
+                       server URL. MLX on Apple Silicon = LM Studio serving an MLX
+                       DeepSeek-OCR build over its OpenAI-compatible local API. -->
+                  <button class="model-btn model-btn--ghost" type="button" id="presetLmStudio"
+                    title="Use LM Studio's MLX server on localhost:1234">LM Studio (MLX)</button>
                 </div>
                 <!-- Model load bar (litellm-style). A model must be loaded before
                      Run OCR is enabled; loading holds it warm in RAM, Unload frees
@@ -155,9 +160,12 @@
                 <div class="model-bar" id="modelBar">
                   <div class="model-bar__remote" id="remoteFields" hidden>
                     <input class="path-input" id="remoteUrl" type="text" spellcheck="false"
-                      placeholder="https://host:8080  (OpenAI-compatible base URL)" />
+                      placeholder="http://127.0.0.1:8080  (OpenAI-compatible base URL)" />
                     <input class="path-input" id="remoteKey" type="password" spellcheck="false"
                       placeholder="API key (optional)" />
+                    <input class="path-input" id="remoteModel" type="text" spellcheck="false"
+                      placeholder="model name (litellm/vLLM gateways; optional for bare llama-server)" />
+                    <p class="settings__note">Only llama.cpp (PR #17400), vLLM, and SGLang are known to support Unlimited-OCR / DeepSeek-OCR. Ollama / LM Studio do not.</p>
                   </div>
                   <div class="model-bar__row">
                     <button class="model-btn" id="loadModelBtn" type="button">Load model</button>
@@ -176,10 +184,11 @@
                   <div class="opts__grid">
                     <label class="opts__field">
                       <span class="opts__label">Quant</span>
+                      <!-- Tiers map to CLI quant names: good=Q8_0 (default), less=Q4_K_M, best=BF16 -->
                       <select class="opts__select" id="optQuant">
-                        <option value="Q8_0" selected>Q8_0</option>
-                        <option value="Q4_K_M">Q4_K_M</option>
-                        <option value="BF16">BF16</option>
+                        <option value="Q8_0" selected>good (Q8_0)</option>
+                        <option value="Q4_K_M">less (Q4_K_M)</option>
+                        <option value="BF16">best (BF16)</option>
                       </select>
                     </label>
                     <label class="opts__field">
@@ -362,27 +371,41 @@
                 </label>
                 <label class="opts__field">
                   <span class="opts__label">Default quant</span>
+                  <!-- Tiers map to CLI quant names: good=Q8_0 (default), less=Q4_K_M, best=BF16 -->
                   <select class="opts__select" id="setQuant">
-                    <option value="Q8_0">Q8_0</option>
-                    <option value="Q4_K_M">Q4_K_M</option>
-                    <option value="BF16">BF16</option>
+                    <option value="Q8_0">good (Q8_0)</option>
+                    <option value="Q4_K_M">less (Q4_K_M)</option>
+                    <option value="BF16">best (BF16)</option>
                   </select>
                 </label>
-                <label class="opts__field opts__field--full">
-                  <span class="opts__label">Remote base URL</span>
-                  <input class="path-input" id="setRemoteUrl" type="text" spellcheck="false"
-                    placeholder="https://host:8080" />
-                </label>
-                <label class="opts__field opts__field--full">
-                  <span class="opts__label">Remote API key</span>
-                  <input class="path-input" id="setRemoteKey" type="password" spellcheck="false"
-                    placeholder="optional bearer token" />
-                </label>
-                <label class="opts__field opts__field--full">
-                  <span class="opts__label">llama-server path (optional override)</span>
-                  <input class="path-input" id="setLlamaBin" type="text" spellcheck="false"
-                    placeholder="leave empty to resolve from PATH / Homebrew" />
-                </label>
+                <!-- Connection knobs tucked behind a native disclosure so they do
+                     not clutter the form. The remote base URL prefills to
+                     llama-server's default (http://127.0.0.1:8080); expand to point
+                     at a different port/IP. -->
+                <details class="settings__advanced opts__field--full">
+                  <summary>Server connection (advanced)</summary>
+                  <label class="opts__field opts__field--full">
+                    <span class="opts__label">Remote base URL</span>
+                    <input class="path-input" id="setRemoteUrl" type="text" spellcheck="false"
+                      placeholder="http://127.0.0.1:8080" />
+                  </label>
+                  <label class="opts__field opts__field--full">
+                    <span class="opts__label">Remote API key</span>
+                    <input class="path-input" id="setRemoteKey" type="password" spellcheck="false"
+                      placeholder="optional bearer token" />
+                  </label>
+                  <label class="opts__field opts__field--full">
+                    <span class="opts__label">Remote model name</span>
+                    <input class="path-input" id="setRemoteModel" type="text" spellcheck="false"
+                      placeholder="required by litellm/vLLM gateways; optional for a bare llama-server" />
+                  </label>
+                  <p class="settings__note">Only llama.cpp (PR #17400), vLLM, and SGLang are known to support Unlimited-OCR / DeepSeek-OCR. Ollama / LM Studio do not support these OCR models.</p>
+                  <label class="opts__field opts__field--full">
+                    <span class="opts__label">llama-server path (optional override)</span>
+                    <input class="path-input" id="setLlamaBin" type="text" spellcheck="false"
+                      placeholder="leave empty to resolve from PATH / Homebrew" />
+                  </label>
+                </details>
                 <label class="opts__field">
                   <span class="opts__label">Default DPI</span>
                   <input class="opts__num" id="setDpi" type="number" min="72" max="600" step="1" value="144" />
@@ -395,6 +418,19 @@
                   <span class="opts__label">Default prompt</span>
                   <textarea class="opts__textarea" id="setPrompt" rows="2" spellcheck="false"></textarea>
                 </label>
+              </div>
+              <!-- Model cache: path display + size + clear button. Populated by
+                   main.js wireCacheControls() via get_cache_info on Settings open. -->
+              <div class="settings__cache">
+                <div class="panel__head">
+                  <span class="panel__label">Model cache</span>
+                </div>
+                <div class="settings__cache-row">
+                  <span class="settings__cache-path" id="cacheDir">—</span>
+                  <span class="settings__cache-size" id="cacheSizeBytes"></span>
+                </div>
+                <button class="model-btn model-btn--ghost" id="clearCacheBtn" type="button">Clear cached models</button>
+                <span class="settings__cache-status" id="clearCacheStatus" hidden></span>
               </div>
               <p class="settings__note">API key is stored in plaintext in settings.json under the model cache dir. Use a key scoped to this device.</p>
               <span class="settings__saved" id="settingsSaved" hidden>Saved.</span>

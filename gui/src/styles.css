@@ -1280,3 +1280,17 @@ button {
   color: var(--green);
   font-size: 12px;
 }
+
+/* Native disclosure for the connection knobs (remote URL/key, llama-bin path).
+   Collapsed by default; the inner full-width labels stack with a small gap. */
+.settings__advanced > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--dim);
+  padding: 4px 0;
+  user-select: none;
+}
+.settings__advanced[open] {
+  display: grid;
+  gap: 12px;
+}

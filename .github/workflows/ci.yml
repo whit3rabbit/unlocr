@@ -1,0 +1,32 @@
+name: ci
+
+# Build check that covers the full workspace, including the Tauri GUI crate.
+# The release workflow targets the CLI only (musl runners can't pull Tauri's
+# system deps); this job fills that gap so a compile error in gui/src-tauri
+# is caught on every PR rather than discovered when someone runs `cargo tauri dev`.
+#
+# macOS is used because Tauri's webview stack (WebKit) ships with the OS;
+# no extra apt/brew installs are needed for a check build.
+on:
+  push:
+    branches: [ main, tauri-gui ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  check:
+    name: cargo check --workspace
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      # `cargo check` type-checks the full workspace (root CLI + gui/src-tauri)
+      # without linking or downloading Tauri system libs at runtime. Fast and
+      # sufficient to catch the class of errors the release CI misses.
+      - name: Check workspace (includes GUI crate)
+        run: cargo check --workspace --locked
