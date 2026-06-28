@@ -1,18 +1,17 @@
 # Homebrew CASK template (GUI app). Source of truth; the update-tap workflow renders
 # the @@...@@ tokens from a release's .dmg assets and pushes the result to the tap
 # repo's Casks/unlocr.rb. Install: brew install --cask whit3rabbit/tap/unlocr
+#
+# Style matches the rest of the tap (arch/sha256 keyed by arm:/intel:). The dmg arch
+# tokens are tauri's: aarch64 (Apple silicon) and x64 (Intel).
 cask "unlocr" do
+  arch arm: "aarch64", intel: "x64"
+
   version "@@VERSION@@"
+  sha256 arm:   "@@SHA_ARM_DMG@@",
+         intel: "@@SHA_INTEL_DMG@@"
 
-  on_arm do
-    url "https://github.com/whit3rabbit/unlocr/releases/download/v#{version}/unlocr_#{version}_aarch64.dmg"
-    sha256 "@@SHA_ARM_DMG@@"
-  end
-  on_intel do
-    url "https://github.com/whit3rabbit/unlocr/releases/download/v#{version}/unlocr_#{version}_x64.dmg"
-    sha256 "@@SHA_INTEL_DMG@@"
-  end
-
+  url "https://github.com/whit3rabbit/unlocr/releases/download/v#{version}/unlocr_#{version}_#{arch}.dmg"
   name "unlocr"
   desc "Desktop OCR: PDFs to markdown via Unlimited-OCR (DeepSeek-OCR) + llama.cpp"
   homepage "https://github.com/whit3rabbit/unlocr"
