@@ -76,7 +76,6 @@ pub(crate) async fn load_model(
         return Err("image_max_tokens must be greater than 0".to_string());
     }
 
-    let app_for_join = app.clone();
     let res = tauri::async_runtime::spawn_blocking(move || -> Result<ModelStatus, String> {
         {
             let state = app.state::<AppState>();
@@ -203,6 +202,12 @@ pub(crate) async fn load_model(
         if let Some(p) = pid {
             *state.server_pid.lock().unwrap_or_else(|p| p.into_inner()) = Some(p);
         }
+        // Stamp last_used INSIDE the worker, right after the model is installed, so
+        // the 60s idle-unload watcher can never observe a stale (pre-load)
+        // timestamp in the window between install and the stamp and unload a model
+        // that was just loaded.
+        *state.last_used.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(std::time::Instant::now());
 
         Ok(ModelStatus {
             loaded: true,
@@ -211,11 +216,6 @@ pub(crate) async fn load_model(
         })
     })
     .await;
-    {
-        let state = app_for_join.state::<AppState>();
-        *state.last_used.lock().unwrap_or_else(|p| p.into_inner()) =
-            Some(std::time::Instant::now());
-    }
     res.map_err(|e| format!("load worker join failed: {e}"))?
 }
 
@@ -225,6 +225,10 @@ pub(crate) fn unload_model(state: State<'_, AppState>) -> ModelStatus {
     let mut g = state.model.lock().unwrap_or_else(|p| p.into_inner());
     *g = None;
     *state.server_pid.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    // Clear last_used so a later load is not judged against a stale timestamp by
+    // the idle-unload watcher (the watcher clears it on its own unload; an
+    // explicit unload must too).
+    *state.last_used.lock().unwrap_or_else(|p| p.into_inner()) = None;
     ModelStatus {
         loaded: false,
         mode: String::new(),

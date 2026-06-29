@@ -160,9 +160,10 @@ fn ensure_tool_is_atomic() {
     assert!(res.is_ok(), "ensure_tool should succeed: {:?}", res.err());
     let exe_path = res.unwrap();
     assert!(exe_path.exists());
-    
+
     // Verify that the tools directory contains only "pandoc" (no leftover temp dirs)
-    let entries: Vec<_> = fs::read_dir(tools_dir(cache_path)).unwrap()
+    let entries: Vec<_> = fs::read_dir(tools_dir(cache_path))
+        .unwrap()
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
@@ -189,7 +190,8 @@ fn ensure_tool_is_atomic() {
     );
     let tools_path = tools_dir(cache_path);
     if tools_path.exists() {
-        let entries: Vec<_> = fs::read_dir(&tools_path).unwrap()
+        let entries: Vec<_> = fs::read_dir(&tools_path)
+            .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();

@@ -25,3 +25,4 @@
 .agent-config-mcp.json
 .claude/
 repomix-output.xml
+.vscode/

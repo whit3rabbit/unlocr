@@ -180,13 +180,9 @@ pub fn ensure_tool(
 
     let zip_file_path = tmp_path.join("download.zip");
 
-    if let Err(e) = download_to_file(pin.url, &zip_file_path, name, pin.sha256, on_progress) {
-        return Err(e);
-    }
+    download_to_file(pin.url, &zip_file_path, name, pin.sha256, on_progress)?;
 
-    if let Err(e) = extract_zip(&zip_file_path, &tmp_path) {
-        return Err(e);
-    }
+    extract_zip(&zip_file_path, &tmp_path)?;
 
     // Delete the raw download zip file so it is not moved to the final directory
     let _ = fs::remove_file(&zip_file_path);
@@ -243,14 +239,17 @@ fn download_to_file(
 
     crate::server::block_on(async move {
         let client = reqwest::Client::new();
-        let resp = client.get(&url_str)
+        let resp = client
+            .get(&url_str)
             .timeout(Duration::from_secs(120))
             .send()
             .await?;
 
         let status = resp.status();
         if !status.is_success() {
-            return Err(Box::<dyn std::error::Error>::from(format!("download failed: HTTP error {status}")));
+            return Err(Box::<dyn std::error::Error>::from(format!(
+                "download failed: HTTP error {status}"
+            )));
         }
 
         let total = resp.content_length().unwrap_or(0);

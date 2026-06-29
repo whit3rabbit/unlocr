@@ -209,6 +209,10 @@ function wireGgufPicker(btnId, spanId, label) {
   span.addEventListener("click", () => setPath(null));
 }
 
+/**
+ * Wire up event listeners and custom file pickers for the model control bar.
+ * @param {Object} ui - The UI controller instance.
+ */
 export function wireModelBar(ui) {
   const loadBtn = document.getElementById("loadModelBtn");
   const unloadBtn = document.getElementById("unloadModelBtn");

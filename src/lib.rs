@@ -469,6 +469,23 @@ pub fn write_markdown_output(
     if matches!(mode, OutputMode::Pages | OutputMode::Both) {
         let folder = out_dir.join(stem);
         std::fs::create_dir_all(&folder)?;
+        // Clear stale `page-*.md` from a prior run into the SAME folder before
+        // writing. Without this, OCR'ing a shorter document (or a different
+        // same-stem input) over an earlier run leaves the earlier run's
+        // higher-numbered pages behind, silently mixing two documents' pages.
+        if let Ok(rd) = std::fs::read_dir(&folder) {
+            for e in rd.flatten() {
+                let p = e.path();
+                let is_page_md = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("page-") && n.ends_with(".md"))
+                    .unwrap_or(false);
+                if is_page_md {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
         // Zero-pad to the largest page number's width (min 2) so a listing sorts
         // page-01 before page-10. Width defaults to 2 when there are no pages
         // (defensive: rasterize_range errors on zero pages before we get here).
@@ -486,6 +503,30 @@ pub fn write_markdown_output(
     }
 
     Ok(written)
+}
+
+/// Stems shared by more than one input (sorted, deduped). Same-stem inputs from
+/// different folders collide on a shared out dir, the `{stem}.md` file (single)
+/// or the `{stem}/` pages folder (pages/both), so a later input silently
+/// overwrites an earlier one. A batch caller warns on these before running.
+pub fn duplicate_stems(inputs: &[PathBuf]) -> Vec<String> {
+    use std::collections::HashMap;
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for input in inputs {
+        let stem = input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output")
+            .to_string();
+        *counts.entry(stem).or_insert(0) += 1;
+    }
+    let mut dups: Vec<String> = counts
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(s, _)| s)
+        .collect();
+    dups.sort();
+    dups
 }
 
 /// Append one page's text with a `<!-- page N -->` delimiter (1-based).

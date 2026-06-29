@@ -106,7 +106,10 @@ pub(crate) fn ocr_via(
 
     block_on(async move {
         let client = reqwest::Client::new();
-        let mut req = client.post(&url).timeout(Duration::from_secs(600)).json(&body);
+        let mut req = client
+            .post(&url)
+            .timeout(Duration::from_secs(600))
+            .json(&body);
         if let Some(key) = &api_key {
             req = req.header("Authorization", format!("Bearer {key}"));
         }
@@ -160,7 +163,10 @@ pub(crate) fn ocr_via_stream(
 
     block_on(async {
         let client = reqwest::Client::new();
-        let mut req = client.post(&url).timeout(Duration::from_secs(600)).json(&body);
+        let mut req = client
+            .post(&url)
+            .timeout(Duration::from_secs(600))
+            .json(&body);
         if let Some(key) = &api_key {
             req = req.header("Authorization", format!("Bearer {key}"));
         }
@@ -171,7 +177,10 @@ pub(crate) fn ocr_via_stream(
             let status = resp.status();
             if !status.is_success() {
                 let err_text = resp.text().await.unwrap_or_default();
-                return Err(Box::<dyn std::error::Error>::from(format!("HTTP error {}: {}", status, err_text)));
+                return Err(Box::<dyn std::error::Error>::from(format!(
+                    "HTTP error {}: {}",
+                    status, err_text
+                )));
             }
             Ok::<reqwest::Response, Box<dyn std::error::Error>>(resp)
         };
@@ -274,7 +283,12 @@ pub(crate) fn ocr_via_stream(
     if !saw_sse && full.is_empty() {
         if let Ok(resp) = serde_json::from_str::<serde_json::Value>(&raw) {
             let text = parse_completion(&resp)?;
-            on_token(&text);
+            // Honor cancel on the non-SSE fallback too: a server that ignores
+            // stream:true and returns one JSON body must not deliver a page the
+            // caller already asked to stop.
+            if !on_token(&text) {
+                return Err("stopped".into());
+            }
             return Ok(text);
         }
     }

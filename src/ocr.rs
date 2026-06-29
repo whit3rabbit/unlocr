@@ -62,20 +62,25 @@ pub fn run_pdf<S: ImageOcr>(backend: &S, pdftoppm: &Path, input: &Path, args: &A
         }
     };
 
-    let (md, kept) = ocr_pages(backend, pdftoppm, input, &opts, &mut on_progress, &|| false)?;
+    let out = ocr_pages(backend, pdftoppm, input, &opts, &mut on_progress, &|| false)?;
     println!(); // newline after the last "\r  page N/N" line, matching the original
 
-    // Resolve where to write: --output (single-input only; validated in main::run)
-    // wins over the default {stem}.md under --out. Create the parent dir first since
-    // a custom --output may point at a not-yet-created directory (main only creates --out).
-    let out_path = unlocr::resolve_output_path(&args.out, args.output.as_deref(), stem);
-    if let Some(parent) = out_path.parent() {
-        std::fs::create_dir_all(parent)?;
+    // --output/-o names a single file; it is meaningless in `pages` mode (which
+    // writes a per-page folder named after the input stem). Warn rather than
+    // silently ignore so the user sees the flag had no effect on the folder name.
+    let mode = args.output_mode.to_mode();
+    if args.output.is_some() && matches!(mode, unlocr::OutputMode::Pages) {
+        eprintln!("  warning: --output is ignored in pages mode; folder uses the input stem");
     }
-    std::fs::write(&out_path, md)?;
-    println!("  wrote {}", out_path.display());
 
-    if let Some(kept_dir) = kept {
+    // Write via the shared lib helper (single/pages/both). It creates parent dirs,
+    // so the explicit create_dir_all the old path did now lives inside the helper.
+    let paths = unlocr::write_markdown_output(mode, &args.out, args.output.as_deref(), stem, &out)?;
+    for p in &paths {
+        println!("  wrote {}", p.display());
+    }
+
+    if let Some(kept_dir) = &out.kept_images {
         println!("  kept page images in {}", kept_dir.display());
     }
     Ok(())

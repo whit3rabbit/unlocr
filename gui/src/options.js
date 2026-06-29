@@ -51,6 +51,8 @@ export function readRunOptions() {
     // first>=1 and last>=first (a direct invoke bypasses the form min= clamp).
     firstPage: pages.firstPage,
     lastPage: pages.lastPage,
+    // single/pages/both; backend parse_output_mode validates (defaults to single).
+    outputMode: (document.getElementById("optOutputMode") || {}).value || "single",
   };
 }
 
@@ -128,10 +130,12 @@ export function renderEffectiveSummary() {
     else if (opts.lastPage == null) pagesNote = " · pages " + f + "-end";
     else pagesNote = " · page " + f;
   }
+  const modeNote = opts.outputMode === "single" ? "" : " · output " + opts.outputMode;
   vals.textContent =
     opts.quant +
     " · " + opts.dpi + " DPI · " + opts.maxTokens + " tok · " +
     "keep images " + (opts.keepImages ? "on" : "off") +
     pagesNote +
+    modeNote +
     " · prompt: “" + shown + ellipsis + "”";
 }

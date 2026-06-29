@@ -425,6 +425,26 @@ button {
   white-space: nowrap;
 }
 
+/* Bulk mode: per-row remove (×) drops one file from the queue. Muted until the
+   row is hovered so the list stays calm; turns to the danger tint on hover. */
+.file-row__remove {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.file-row__remove:hover {
+  background: var(--panel2);
+  color: var(--danger, #c0392b);
+}
+
 /* center: PDF preview */
 .preview {
   flex: 1;

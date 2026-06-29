@@ -3,6 +3,10 @@
 // access so a stale non-Tauri context (e.g. opening index.html in a plain
 // browser) fails softly instead of throwing on load.
 
+/**
+ * Helper function to safely read the global Tauri bridge from the window object.
+ * @returns {Object|undefined} The Tauri API object if available.
+ */
 export const Tauri = () => window.__TAURI__;
 
 /** Throw a friendly error if the global Tauri bridge is missing. */

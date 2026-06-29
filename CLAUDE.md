@@ -5,8 +5,31 @@ Thin wrapper. Full usage/benchmarks in README.md.
 
 ## Layout
 - Cargo workspace lives in repo root. Source: `src/`.
-  Modules: `model` (HF download/cache), `pdf` (pdftoppm), `server` (llama-server
-  spawn), `ocr`, `preflight`, `lib` (public API), `main` (clap CLI).
+  Modules / File Tree:
+  - `lib.rs`: library entry point, exports `model`, `pdf`, `preflight`, `server`, `tools`.
+  - `main.rs`: CLI binary entry point, declares `ocr`, `cli_args`, `inputs`.
+  - `cli_args.rs`: CLI argument parsing / clap definition.
+  - `inputs.rs`: CLI input parsing and expansion.
+  - `ocr.rs`: bin-only OCR orchestrator (`run_pdf`).
+  - `model/`: folder containing model cache logic (HF download/cache).
+    - `mod.rs`: module entry, check_presence, list_cached_quants, etc.
+    - `download.rs`: HTTP streaming download & cache population.
+    - `tests.rs`: tests.
+  - `server/`: folder containing llama-server and remote endpoint interaction.
+    - `mod.rs`: module entry, traits, shared logic.
+    - `local.rs`: `Server` manager for spawning llama-server.
+    - `remote.rs`: `RemoteEndpoint` wrapper for SGLang/vLLM/OpenAI compatible backends.
+    - `tests.rs`: tests.
+  - `pdf.rs`: pdftoppm runner and page rasterizer.
+  - `preflight.rs`: preflight checks and doctor diagnostics.
+  - `preflight/`:
+    - `hints.rs`: platform-specific installation hints.
+    - `system.rs`: environment checking (binary locate/permissions).
+  - `tools/`: folder containing the on-demand tool downloader.
+    - `mod.rs`: PINS, download, extract_zip.
+    - `tests.rs`: tests.
+  - `lib_tests.rs`: unit tests for library.
+  - `main_tests.rs`: unit tests for main CLI.
 - Packaging (deb/rpm/installers) at repo root + `packaging/`.
 - Repo, product, binary, and crate are all named `unlocr`.
 
@@ -35,11 +58,11 @@ Thin wrapper. Full usage/benchmarks in README.md.
   declare as a package dep. deb postinst / rpm %post warn if missing.
 
 ## Gotchas
-- `src/tools.rs`: on-demand tool downloader. `PINS` is per OS+arch (cfg-selected):
+- `src/tools/mod.rs`: on-demand tool downloader. `PINS` is per OS+arch (cfg-selected):
   Windows = pandoc/poppler/llama-server CPU (.zip); macOS = pandoc only (per-arch .zip;
   poppler has no standalone mac binary, llama ships .tar.gz so both stay on brew); Linux
   = none. Pins (url+sha256+exe) are version-locked; bump on upgrade. The GitHub release
-  API `digest` field gives the sha256 (also for model.rs DIGESTS). `extract_zip` sets the
+  API `digest` field gives the sha256 (also for `src/model/mod.rs` DIGESTS). `extract_zip` sets the
   unix exec bit from the zip entry (mac binary won't run otherwise). `preflight::locate`
   also scans `<cache>/tools/` so a downloaded tool resolves for every caller. Needs `zip`.
 - OS detection is compile-time `cfg!(target_os)` everywhere (per-platform builds), never
@@ -49,7 +72,10 @@ Thin wrapper. Full usage/benchmarks in README.md.
   pre-existing debt was cleared. It is a real release gate (docs/RELEASE.md), so
   keep it green: your diff must add no new lints.
 - Public lib API (consumed by gui crate): `run_ocr_job` + `OcrOptions` + `Progress`
-  + `render_pages` (cached PDF->PNG for previews) + `resolve_output_path` (clap-free).
+  + `render_pages`/`render_page` (cached PDF->PNG for previews; the GUI preview pane
+  calls the singular `render_page` per page) + `resolve_output_path` +
+  `write_markdown_output` (the shared single/pages/both write sink, used by BOTH
+  `ocr::run_pdf` and the GUI `run_ocr`) + `duplicate_stems` (clap-free).
   Keep these stable; the GUI links via `path = "../.."`.
 - Output path is resolved by the shared `resolve_output_path(out_dir, out_file, stem)`
   called from BOTH CLI `ocr::run_pdf` and GUI `run_ocr`. `-o`/`out_file` is a single
@@ -61,16 +87,16 @@ Thin wrapper. Full usage/benchmarks in README.md.
   `Server::start`, `run_ocr_job`, ...) run `cargo build --manifest-path
   gui/src-tauri/Cargo.toml` (or `cargo build --workspace`) or gui breakage stays hidden.
 - Tests favor a pure helper + assert over spawning/network: extract arg-vec builders
-  (e.g. `server::server_args`) and stub HTTP servers for the OpenAI path (server.rs tests).
+  (e.g. `server::local::server_args`) and stub HTTP servers for the OpenAI path (`src/server/tests.rs`).
 - Batch input: positionals accept files, folders, globs; `--from-list FILE` +
-  `--recursive`. `expand_inputs` (main.rs) dedups/sorts to a concrete PDF list.
+  `--recursive`. `expand_inputs` (`src/inputs.rs`) dedups/sorts to a concrete PDF list.
 - Binary searches PATH then Homebrew prefixes (/opt/homebrew/bin, /usr/local/bin).
-  Install hints in preflight.rs are macOS-only.
+  Install hints in `src/preflight/hints.rs` are cross-platform (supporting macOS, Windows, and Linux via various package managers).
 - Model GGUFs download from HF on first run, cached at per-OS dir + `/unlocr`
-  (model.rs). Renaming the binary changed this path: old `uocr` caches are orphaned.
+  (`src/model/mod.rs`). Renaming the binary changed this path: old `uocr` caches are orphaned.
 - TWO distinct model repos, do not conflate them:
   - Local llama.cpp (managed-local path): the quantized GGUF build
-    `sahilchachra/Unlimited-OCR-GGUF` (`REPO` in model.rs). Downloaded + cached;
+    `sahilchachra/Unlimited-OCR-GGUF` (`REPO` in `src/model/mod.rs`). Downloaded + cached;
     this is what `--quant`/the GUI quality tiers select.
   - Remote GPU (`--gpu` / GUI "gpu" preset -> vLLM/SGLang): the full-precision
     original `baidu/Unlimited-OCR` (`UNLIMITED_OCR_REPO` in main.rs), sent as the
@@ -86,7 +112,7 @@ Thin wrapper. Full usage/benchmarks in README.md.
     prompt (ngram_size/window_size via extra_body) or output is empty. Colab has no
     Docker daemon, so `colab/` uses the llama.cpp managed-local path on GPU, NOT
     `--gpu`/vLLM.
-- `server::server_args` passes NO `-ngl`, so the managed-local llama-server runs
+- `server::local::server_args` passes NO `-ngl`, so the managed-local llama-server runs
   CPU-only. For GPU (e.g. Colab) set env `LLAMA_ARG_N_GPU_LAYERS=99` before unlocr
   spawns it (llama-server reads `LLAMA_ARG_*` env vars); no CLI flag, no Rust change.
 - llama.cpp GGUF build for Unlimited-OCR (`colab/` notebook) = clone llama.cpp +
@@ -111,7 +137,11 @@ Thin wrapper. Full usage/benchmarks in README.md.
 - rust-analyzer inline diagnostics can lag the source (saw repeated false
   "no such field" on `Progress::Download {done,total}` while cargo was green).
   Trust `cargo build`/`cargo test` over the editor diagnostics; re-check, don't chase.
-- Ctrl-C does not clean up; may orphan llama-server.
+- Child-cleanup is platform-split (`src/server/local.rs`): Linux sets
+  `prctl(PR_SET_PDEATHSIG, SIGKILL)` and Windows assigns the child to a JobObject with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so llama-server dies with the parent (incl. a
+  Ctrl-C/SIGINT exit that skips `Drop`). macOS has NEITHER, so a SIGINT there can still
+  orphan llama-server. (These pull in `libc`/`windows-sys` as per-OS deps in Cargo.toml.)
 - Release profile tuned for size (opt-level=z, lto, panic=abort).
 - BSD sed (macOS) has no `\b`; use plain patterns or `[[:<:]]`/`[[:>:]]`.
 
@@ -129,7 +159,7 @@ Workspace UX, fill stubbed views, fix packaging/CI. (46 iterations, board: `.eat
 - GUI-05: real CSP set in tauri.conf.json; `read_text_file` restricted to .md files via allowlist (not just OS denylist)
 - GUI-06: `validate_quant` added to `model::check_presence`
 - GUI-07: `tauri-plugin-dialog` added; native OS file picker wired to field + file list
-- GUI-08: streaming token transcript -- SSE parse in server.rs, `Progress::PartialText`, `ocr://partial-text` event, live append in main.js
+- GUI-08: streaming token transcript -- SSE parse in `src/server/mod.rs`, `Progress::PartialText`, `ocr://partial-text` event, live append in `main.js`
 - GUI-09: editable prompt row in index.html; defaults to `OcrOptions::default().prompt`; forwarded in run payload
 - GUI-10: engine segmented control removed (only one engine exists)
 - GUI-11: quality tiers map best/good/less to BF16/Q8_0/Q4_K_M

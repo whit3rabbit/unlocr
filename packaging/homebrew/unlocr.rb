@@ -25,6 +25,7 @@ class Unlocr < Formula
     sha256 "@@SHA_LINUX_TGZ@@"
   end
 
+  # Installs the unlocr binary into the Homebrew prefix.
   def install
     bin.install "unlocr"
   end

@@ -110,8 +110,13 @@ pub(crate) fn init_conn(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("could not set busy_timeout: {e}"))?;
     conn.execute_batch(SCHEMA_SQL)
         .map_err(|e| format!("could not apply DB schema: {e}"))?;
-    conn.pragma_update(None, "user_version", 1u32)
-        .map_err(|e| format!("could not set user_version: {e}"))?;
+    let v: u32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap_or(0);
+    if v == 0 {
+        conn.pragma_update(None, "user_version", 1u32)
+            .map_err(|e| format!("could not set user_version: {e}"))?;
+    }
     Ok(())
 }
 

@@ -4,7 +4,14 @@
 use crate::Res;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+/// Installation hints and instructions.
+pub mod hints;
+/// System information and check utilities.
+pub mod system;
+
+pub use hints::*;
+pub use system::*;
 
 // b8530, released 2026-03-25T18:57:40Z, is the exact merge build of
 // llama.cpp PR #17400 "mtmd: Add DeepSeekOCR Support". Builds below this
@@ -14,11 +21,15 @@ const MIN_BUILD: u64 = 8530;
 
 const HOMEBREW_BINS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
 
+/// Resolved paths to system dependencies (llama-server and pdftoppm).
 pub struct Tools {
+    /// Resolved path to the llama-server binary.
     pub llama_server: PathBuf,
+    /// Resolved path to the pdftoppm binary.
     pub pdftoppm: PathBuf,
 }
 
+/// Runs diagnostic checks on dependencies, model files, memory, and disk space.
 pub fn run_doctor(
     llama_override: Option<&Path>,
     model_dir: Option<PathBuf>,
@@ -164,91 +175,7 @@ pub fn run_doctor(
     Ok(())
 }
 
-fn get_total_ram_bytes() -> Option<u64> {
-    if cfg!(target_os = "macos") {
-        let out = Command::new("sysctl")
-            .args(["-n", "hw.memsize"])
-            .output()
-            .ok()?;
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        stdout.parse().ok()
-    } else if cfg!(target_os = "linux") {
-        let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
-        for line in meminfo.lines() {
-            if line.starts_with("MemTotal:") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let kb: u64 = parts[1].parse().ok()?;
-                    return Some(kb * 1024);
-                }
-            }
-        }
-        None
-    } else if cfg!(target_os = "windows") {
-        let out = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "(Get-CimInstance Win32_PhysicalMemory | Measure-Object Capacity -Sum).Sum",
-            ])
-            .output()
-            .ok()?;
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        stdout.parse().ok()
-    } else {
-        None
-    }
-}
-
-fn get_free_disk_space_bytes(path: &Path) -> Option<u64> {
-    if cfg!(target_os = "windows") {
-        // Pass the path through an env var, not string interpolation, so
-        // PowerShell never parses it as code. `path` is user-controlled
-        // (--model-dir, or the LOCALAPPDATA/XDG_CACHE_HOME/HOME cache-dir env
-        // vars); a value containing a single quote would otherwise terminate the
-        // -Command string literal and inject arbitrary PowerShell. -LiteralPath
-        // also stops wildcard/glob interpretation of the path.
-        let out = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "(Get-Item -LiteralPath $env:UNLOCR_DISK_PATH).Volume.Free",
-            ])
-            .env("UNLOCR_DISK_PATH", path)
-            .output()
-            .ok()?;
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        stdout.parse().ok()
-    } else {
-        // macOS or Linux (Unix)
-        let out = Command::new("df").arg("-k").arg(path).output().ok()?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
-        if lines.len() < 2 {
-            return None;
-        }
-        let headers: Vec<&str> = lines[0].split_whitespace().collect();
-        let data_joined = lines[1..].join(" ");
-        let data: Vec<&str> = data_joined.split_whitespace().collect();
-
-        let avail_idx = headers
-            .iter()
-            .position(|&h| h.contains("Avail") || h.contains("Free") || h.contains("avail"));
-        if let Some(idx) = avail_idx {
-            if idx < data.len() {
-                let kb: u64 = data[idx].parse().ok()?;
-                return Some(kb * 1024);
-            }
-        }
-
-        if data.len() >= 4 {
-            let kb: u64 = data[3].parse().ok()?;
-            return Some(kb * 1024);
-        }
-        None
-    }
-}
-
+/// Validates that both llama-server and pdftoppm are installed and reachable.
 pub fn check(llama_override: Option<&Path>) -> Res<Tools> {
     let llama_server = match llama_override {
         Some(p) => p.to_path_buf(),
@@ -287,97 +214,6 @@ pub fn pdftoppm() -> Res<PathBuf> {
 
 fn hint(bin: &str, install: &str) -> Box<dyn std::error::Error> {
     format!("{bin} not found on PATH. Install it: `{install}` (macOS), or pass --llama-bin.").into()
-}
-
-/// Detect what package managers are available on the user's PATH.
-fn detect_package_managers() -> Vec<&'static str> {
-    let mut managers = Vec::new();
-    if locate("brew").is_some() {
-        managers.push("brew");
-    }
-    if locate("port").is_some() {
-        managers.push("port");
-    }
-    if locate("conda").is_some() || locate("mamba").is_some() || locate("pixi").is_some() {
-        managers.push("conda");
-    }
-    if locate("nix").is_some() {
-        managers.push("nix");
-    }
-    if locate("winget").is_some() {
-        managers.push("winget");
-    }
-    if locate("scoop").is_some() {
-        managers.push("scoop");
-    }
-    managers
-}
-
-/// Generate rich, tailored install instructions for llama-server.
-pub fn generate_install_hint() -> String {
-    let managers = detect_package_managers();
-    let mut methods = Vec::new();
-
-    if cfg!(target_os = "macos") {
-        if managers.contains(&"brew") {
-            methods.push("  - Homebrew: brew install llama.cpp");
-        }
-        if managers.contains(&"port") {
-            methods.push("  - MacPorts: sudo port install llama.cpp");
-        }
-        if managers.contains(&"conda") {
-            methods.push("  - Conda-forge: conda install -c conda-forge llama-cpp");
-        }
-        if managers.contains(&"nix") {
-            methods.push("  - Nix: nix profile install nixpkgs#llama-cpp");
-        }
-        if methods.is_empty() {
-            methods.push("  - Homebrew (Recommended): brew install llama.cpp");
-            methods.push("  - Conda-forge: conda install -c conda-forge llama-cpp");
-            methods.push("  - MacPorts: sudo port install llama.cpp");
-            methods.push("  - Nix: nix profile install nixpkgs#llama-cpp");
-        }
-    } else if cfg!(target_os = "windows") {
-        if managers.contains(&"winget") {
-            methods.push("  - Winget: winget install llama.cpp");
-        }
-        if managers.contains(&"scoop") {
-            methods.push("  - Scoop: scoop install llama-cpp");
-        }
-        if managers.contains(&"conda") {
-            methods.push("  - Conda-forge: conda install -c conda-forge llama-cpp");
-        }
-        if methods.is_empty() {
-            methods.push("  - Winget (Recommended): winget install llama.cpp");
-            methods.push("  - Scoop: scoop install llama-cpp");
-            methods.push("  - Conda-forge: conda install -c conda-forge llama-cpp");
-        }
-    } else {
-        // Linux / other Unix
-        if managers.contains(&"brew") {
-            methods.push("  - Homebrew: brew install llama.cpp");
-        }
-        if managers.contains(&"conda") {
-            methods.push("  - Conda-forge: conda install -c conda-forge llama-cpp");
-        }
-        if managers.contains(&"nix") {
-            methods.push("  - Nix: nix profile install nixpkgs#llama-cpp");
-        }
-        if methods.is_empty() {
-            methods.push("  - Homebrew: brew install llama.cpp");
-            methods.push("  - Conda-forge: conda install -c conda-forge llama-cpp");
-            methods.push("  - Nix: nix profile install nixpkgs#llama-cpp");
-            methods.push("  - Build from source: see https://github.com/ggml-org/llama.cpp/blob/master/docs/install.md");
-        }
-    }
-
-    let mut hint = "llama-server (from llama.cpp >= b8530) is required.\nInstall it using one of these options:\n".to_string();
-    for m in &methods {
-        hint.push_str(m);
-        hint.push('\n');
-    }
-    hint.push_str("Or pass --llama-bin with the path to the executable.");
-    hint
 }
 
 /// Look up a binary on PATH, then in the known Homebrew prefixes. Public so the GUI
@@ -423,45 +259,9 @@ pub fn locate(bin: &str) -> Option<PathBuf> {
     None
 }
 
-/// Parse the build number out of llama-server's `--version` output. Returns None
-/// when llama-server is missing, unreadable, or its version line cannot be parsed
-/// (commit hashes are skipped). Pub so the Tauri host can surface the build number
-/// in its preflight report without re-implementing the parse. Additive: existing
-/// callers (`check`, `run_doctor`) are unchanged.
-pub fn build_number(llama_server: &Path) -> Option<u64> {
-    let out = Command::new(llama_server).arg("--version").output().ok()?;
-    // llama.cpp prints the version line to stderr.
-    let text = String::from_utf8_lossy(&out.stderr);
-    let text = if text.trim().is_empty() {
-        String::from_utf8_lossy(&out.stdout).into_owned()
-    } else {
-        text.into_owned()
-    };
-    parse_build(&text)
-}
-
-/// Extract the build number from llama.cpp's version output.
-/// Accepts `version: 9770 (75ad0b23e)`, bare `4229`, or tag `b8530`.
-fn parse_build(text: &str) -> Option<u64> {
-    for raw in text.split_whitespace() {
-        let tok = raw.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-        // `b<digits>` (release tag form)
-        if let Some(rest) = tok.strip_prefix('b') {
-            if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
-                return rest.parse().ok();
-            }
-        }
-        // bare integer (commit hashes have letters, so they're skipped)
-        if !tok.is_empty() && tok.bytes().all(|b| b.is_ascii_digit()) {
-            return tok.parse().ok();
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
-    use super::parse_build;
+    use super::hints::parse_build;
 
     #[test]
     fn parses_build_numbers() {

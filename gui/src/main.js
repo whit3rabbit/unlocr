@@ -49,13 +49,44 @@ window.addEventListener("DOMContentLoaded", () => {
   // the card's .md. Rail buttons are needed so openInReview can update is-active.
   const railButtons = document.querySelectorAll(".rail__btn");
   library.setReviewHooks(mdPane, railButtons);
-  // EH-0012: canonical queue of PDF paths to process on Run. The Import picker
-  // populates this; the path-input field seeds it too (single-file typed entry).
-  // wireRunButton reads this via getQueuedPaths() so all imported files run
-  // sequentially on one click instead of only the last typed path.
-  let queuedPaths = [];
-  const getQueuedPaths = () => queuedPaths.slice();
-  wireRunButton(ui, mdPane, unlistensRef, getQueuedPaths);
+  // EH-0012 / bulk mode: canonical in-memory queue of PDF paths to process on Run.
+  // The Import picker + typed path feed it; wireRunButton reads it via queue.get()
+  // so all queued files run sequentially on one click. Subscribers (file rail,
+  // board Queued column, output-field gating, path field) repaint on every change
+  // via queue.onChange — registered below, after the helper defs they depend on.
+  const queue = {
+    paths: [],
+    subs: [],
+    get() {
+      return this.paths.slice();
+    },
+    notify() {
+      const p = this.get();
+      this.subs.forEach((fn) => fn(p));
+    },
+    set(paths) {
+      this.paths = (paths || []).filter((p) => typeof p === "string" && p.trim());
+      this.notify();
+    },
+    add(paths) {
+      const next = (paths || []).filter((p) => typeof p === "string" && p.trim());
+      for (const p of next) if (!this.paths.includes(p)) this.paths.push(p);
+      this.notify();
+    },
+    remove(path) {
+      this.paths = this.paths.filter((p) => p !== path);
+      this.notify();
+    },
+    clear() {
+      this.set([]);
+    },
+    onChange(fn) {
+      this.subs.push(fn);
+    },
+  };
+  // Bind remove so it can be handed to the rail/board as a bare callback.
+  queue.remove = queue.remove.bind(queue);
+  wireRunButton(ui, mdPane, unlistensRef, () => queue.get());
   // EH-0006 bite 4: drag-drop PDF import onto the Library grid. Wired once on app
   // load; the listeners live for the app lifetime and are scoped to the Library
   // view inside the handler. Fail-soft outside the webview (plain browser).
@@ -130,11 +161,16 @@ window.addEventListener("DOMContentLoaded", () => {
   const outFolderEl = document.getElementById("outFolder");
   function updateOutFileState() {
     if (!outFileEl) return;
-    const single = queuedPaths.length === 1;
-    outFileEl.disabled = !single;
-    // Clear for batches; also drop the autofill flag so a later single selection
-    // re-fills cleanly (a user-typed name would already have cleared the flag).
-    if (!single) {
+    const single = queue.paths.length === 1;
+    // pages mode writes a per-page folder named after the input stem; a custom
+    // single filename is meaningless there. Disable + clear it, mirroring the
+    // batch gate (the backend also ignores out_file for the folder name).
+    const mode = (document.getElementById("optOutputMode") || {}).value || "single";
+    const modeDisables = mode === "pages";
+    outFileEl.disabled = !single || modeDisables;
+    // Clear for batches/pages; also drop the autofill flag so a later single
+    // selection re-fills cleanly (a user-typed name would already have cleared it).
+    if (!single || modeDisables) {
       outFileEl.value = "";
       delete outFileEl.dataset.autofilled;
     }
@@ -161,32 +197,50 @@ window.addEventListener("DOMContentLoaded", () => {
   // directory, filename = <stem>.md, matching the backend's blank defaults). No-op
   // for 0/2+ files: folder is left as-is, filename is gated by updateOutFileState.
   function autofillOutputs() {
-    if (queuedPaths.length !== 1) return;
-    const path = queuedPaths[0];
+    if (queue.paths.length !== 1) return;
+    const path = queue.paths[0];
     autofill(outFolderEl, parentDirOf(path));
     autofill(outFileEl, mdName(path));
   }
 
-  // Apply queuedPaths to the file-rail display and clear the text field
-  // (the canonical list is in queuedPaths, not the field, for multi-file batches).
-  function applyQueue(paths) {
-    queuedPaths = paths.slice();
-    rail.renderFiles(queuedPaths);
-    // Show the first file in the path field for context; for multi-file batches
-    // this is the first item only (the rail shows the full list).
-    if (pathInput) pathInput.value = queuedPaths.length === 1 ? queuedPaths[0] : "";
+  // Single source of truth: every queue change repaints the file rail (each row
+  // gets a remove × that drops the exact path), the board Queued column, the
+  // output-field gating, and the path field. Registered as queue.onChange below.
+  function syncQueueUi(paths) {
+    rail.renderFiles(paths, queue.remove);
+    board.renderPending();
+    // Show the lone file in the path field for context; blank for 0/2+ (the rail
+    // and board show the full list).
+    if (pathInput) pathInput.value = paths.length === 1 ? paths[0] : "";
     updateOutFileState();
     autofillOutputs();
   }
+  queue.onChange(syncQueueUi);
+  // Bulk mode: the board's Queued column mirrors the in-memory queue; a Remove on a
+  // board card drops the same path the rail's × would.
+  board.bindQueue(() => queue.get(), queue.remove);
+
+  // Board head controls (bulk mode): Add PDFs reuses the workspace Import picker
+  // (which appends to the queue); Run all reuses the workspace Run button (batch
+  // run, respects the model-loaded gate). Both delegate to the existing buttons so
+  // there is one code path for import and run.
+  const runBtn = document.getElementById("runBtn");
+  // A run consumes the pending queue: wireRunButton captured the paths synchronously
+  // on click, so clearing here (a later-registered listener on the same click) only
+  // empties the pending cards — they reappear as real Running/Done rows via the
+  // store + jobs://changed.
+  if (runBtn) runBtn.addEventListener("click", () => queue.clear());
+  const boardAddBtn = document.getElementById("boardAddBtn");
+  if (boardAddBtn) boardAddBtn.addEventListener("click", () => importBtn && importBtn.click());
+  const boardRunBtn = document.getElementById("boardRunBtn");
+  if (boardRunBtn && runBtn) boardRunBtn.addEventListener("click", () => runBtn.click());
 
   if (pathInput) {
     const syncFromField = () => {
       const v = (pathInput.value || "").trim();
-      // Typed path replaces the entire queue (single-file typed entry).
-      queuedPaths = v ? [v] : [];
-      rail.renderFiles(queuedPaths);
-      updateOutFileState();
-      autofillOutputs();
+      // Typed path replaces the entire queue (single-file typed entry). queue.set
+      // notifies syncQueueUi, which repaints the rail/board/output fields.
+      queue.set(v ? [v] : []);
     };
     // Preview render shells out to pdftoppm; only refresh on blur/Enter/change,
     // not per keystroke.
@@ -218,7 +272,8 @@ window.addEventListener("DOMContentLoaded", () => {
           const picked = Array.isArray(selected) ? selected : [selected];
           const pdfs = picked.filter((p) => typeof p === "string" && p.trim());
           if (pdfs.length === 0) return;
-          applyQueue(pdfs);
+          // Bulk mode: append (don't replace) so successive Imports build one batch.
+          queue.add(pdfs);
           // Preview the first file; multi-file batches show page 1 of the first PDF.
           preview.show(pdfs[0]);
         } catch (err) {
@@ -270,6 +325,17 @@ window.addEventListener("DOMContentLoaded", () => {
     el.addEventListener("input", renderEffectiveSummary);
     el.addEventListener("change", renderEffectiveSummary);
   });
+
+  // Output mode dropdown lives in #outputOpts (outside #runOpts, so the listener
+  // above does not cover it): refresh the summary AND re-evaluate the out-file
+  // gate (pages mode disables/clears the filename field) on every change.
+  const outputModeEl = document.getElementById("optOutputMode");
+  if (outputModeEl) {
+    outputModeEl.addEventListener("change", () => {
+      updateOutFileState();
+      renderEffectiveSummary();
+    });
+  }
 
   // Task preset -> fill the Prompt box. Keep these strings in sync with the CLI's
   // Task::prompt() (src/main.rs). "custom" leaves whatever the user typed.

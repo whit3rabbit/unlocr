@@ -9,9 +9,10 @@
 //
 // Layout (commands split out of this file so each stays navigable):
 //   - state.rs      AppState + the held backend (Backend/LoadedModel).
-//   - cmd_model.rs  preflight, load/unload/stop, status, cache info/clear.
-//   - cmd_run.rs    render_pages, read_text_file, write_text_file, export_markdown,
-//                   list_tools/download_tool (Windows dep downloader), run_ocr.
+//   - cmd_model/    preflight, load/unload/stop, status (mod.rs); cache info/clear (cache.rs).
+//   - cmd_run/      run_ocr (mod.rs); render_pages/render_page (render.rs);
+//                   read/write/export file commands (fs.rs); list_tools/download_tool
+//                   Windows dep downloader (tools.rs).
 //   - cmd_store.rs  job store, settings, and notification command wrappers.
 // This file keeps only the module wiring and the `run()` builder.
 
@@ -55,6 +56,7 @@ use cmd_store::{
 };
 use state::AppState;
 
+/// Application entry point that configures and starts the Tauri desktop GUI.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()

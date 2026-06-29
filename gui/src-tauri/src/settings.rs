@@ -171,7 +171,10 @@ pub fn load_settings() -> Settings {
     });
 
     // Check if there is an old plaintext key in the database
-    if !s.remote_api_key.is_empty() && s.remote_api_key != "__saved__" && s.remote_api_key != "••••••••" {
+    if !s.remote_api_key.is_empty()
+        && s.remote_api_key != "__saved__"
+        && s.remote_api_key != "••••••••"
+    {
         let key = s.remote_api_key.clone();
         if let Ok(entry) = keyring::Entry::new("unlocr", "remote_api_key") {
             if entry.set_password(&key).is_ok() {
@@ -211,9 +214,9 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
     } else {
         // Modified/new key! Save to keyring, set marker in DB
         if let Ok(entry) = keyring::Entry::new("unlocr", "remote_api_key") {
-            entry.set_password(&key).map_err(|e| {
-                format!("failed to save API key to OS credential manager: {e}")
-            })?;
+            entry
+                .set_password(&key)
+                .map_err(|e| format!("failed to save API key to OS credential manager: {e}"))?;
         } else {
             return Err("OS credential manager not available".to_string());
         }

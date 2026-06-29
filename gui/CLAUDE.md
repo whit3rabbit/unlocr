@@ -3,12 +3,30 @@
 Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives here.
 
 ## Layout
-- `src/`            Frontend: vanilla HTML/JS/CSS, no bundler, no npm. Static.
-  - `index.html`, `main.js` (calls `window.__TAURI__.core.invoke`), `styles.css`.
+- `src/`            Frontend: vanilla HTML/CSS + native ES modules, no bundler, no npm. Static.
+  - `index.html`, `styles.css`; JS split into ES modules booted from `main.js`:
+    - `tauri.js`: window.__TAURI__ core bridge wrapper.
+    - `paths.js`: path parsing and date formatting helpers.
+    - `model.js`: model loading and preset selectors.
+    - `options.js`: form-options parser.
+    - `run.js` & `run_ocr.js`: run button bindings, sequential batch execution, drag-drop import, and `run_ocr` event orchestration.
+    - `ocr-events.js`: Tauri event listeners and preflight checks on load.
+    - `panes.js` & `./markdown_pane.js`, `./preview_pane.js`, `./file_rail.js`: markdown editor, PDF preview, and workspace file rail controllers.
+    - `ui.js`: global UI transitions, status messages, and streaming text buffering.
+    - `jobs.js` & `./library.js`, `./board.js`, `./job_card.js`, `./rail.js`: library database grid, kanban board, and jobs view handlers.
+    - `settings.js`: settings configuration pane.
+    - `toasts.js`: notifications/toasts management.
 - `src-tauri/`      Rust backend (crate `unlocr-gui`, lib name `gui_lib`).
-  - `src/lib.rs`    Tauri commands + `run()` builder. `src/main.rs` calls `gui_lib::run()`.
-  - `src/store.rs`  Job persistence: appends each run to a JSON file under the
-                    model cache dir (no extra dep). Powers Library/Board views.
+  - `src/lib.rs`    `run()` builder + `generate_handler!`. `src/main.rs` calls `gui_lib::run()`.
+  - `src/cmd_model/` directory: model loading/management Tauri commands (`mod.rs`, `cache.rs`).
+  - `src/cmd_run/` directory: running, preflight, tools, and safe filesystem Tauri commands (`mod.rs`, `fs.rs`, `render.rs`, `tools.rs`).
+  - `src/cmd_store.rs` Tauri commands wrapper for the jobs store.
+  - `src/db.rs`     SQLite (`rusqlite`) backing for all persisted stores: one `unlocr.db`
+                    in the app-DATA dir, one warm `Connection` behind a `Mutex` (`with_db`).
+                    Replaced the old per-store JSON files under the cache dir.
+  - `src/store/`    directory: typed jobs accessors over `db.rs` (`mod.rs`, `db.rs`, `types.rs`, `helpers.rs`, `tests.rs`).
+  - `src/settings.rs`/`notifications.rs`  Typed accessors over `db.rs` (settings; notifications).
+  - `src/state.rs`  `AppState` (warm model handle + read allowlist).
   - `Cargo.toml`, `tauri.conf.json`, `capabilities/`, `icons/`.
 
 ## Library link (the important part)
@@ -30,15 +48,15 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
   files the app itself produced (`AppState.read_allow`, the paths `run_ocr` wrote this session,
   plus non-empty `output_path`s in the job store). The match is exact after canonicalize, not a
   dir prefix. No `allowedDir` arg: the renderer cannot widen the read scope. `check_readable`
-  (cmd_run.rs) is the pure, unit-tested core.
+  in `src/cmd_run/fs.rs` is the pure, unit-tested core.
 - `write_text_file`/`export_markdown` reuse `read_text_file`'s `check_readable` allowlist
   (read==write scope). Export writes a SIBLING of the allowlisted source (backend-derived
   path, renderer can't choose it); `export_markdown` shells pandoc. Dep-downloader commands
-  (cmd_run.rs): `list_tools` (status), `download_tool` (direct fetch), `host_os`,
+  in `src/cmd_run/tools.rs`: `list_tools` (status), `download_tool` (direct fetch), `host_os`,
   `brew_available`, `brew_install` (allowlisted formulae only). UI: direct Download where
   `downloadable` (Win all; mac pandoc); else on mac an "Install with Homebrew" button when
   `brew_available`, else copyable Homebrew guidance.
-- Job-store commands (`list_jobs`, `jobs_store_path`, `record_job`) wrap `store.rs`;
+- Job-store commands (`list_jobs`, `jobs_store_path`, `record_job`) wrap `src/store/mod.rs`;
   `record_job` fires after each run_ocr completes/fails. Defaults mirror `OcrOptions::default()`.
 
 ## PDF preview + page-image cache
@@ -65,7 +83,7 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
   (no npm/bundler); ask first.
 - EasyMDE's default toolbar icons are FontAwesome auto-fetched from a CDN -> blocked by
   our CSP (`style-src`/`font-src 'self'`) and broken offline. Use a text-label toolbar
-  over EasyMDE's static actions + `autoDownloadFontAwesome:false` (panes.js).
+  over EasyMDE's static actions + `autoDownloadFontAwesome:false` in `src/markdown_pane.js`.
 - OS is compile-time only (the GUI ships per-platform, release-gui.yml). The frontend
   reads it via the `host_os` command; the Windows dep-download UI shows only when
   `list_tools` reports `downloadable`. Do NOT add runtime OS detection.
@@ -124,7 +142,7 @@ wired into the `src/` Rust OCR backend). 41 iterations; cleared via "board clear
 ### Remaining (code complete, verification blocked)
 - EH-0003 Tauri commands `preflight` + `run_ocr` with `ocr://` progress events. All 3 bites done.
 - EH-0004 Port the mockup UI into `gui/src/` (Workspace panes, options form, event subs). All 5 bites done.
-- EH-0006 Job store (`store.rs`), Library grid, Board columns, drag-drop import. All 4 bites done.
+- EH-0006 Job store (`src/store/`), Library grid, Board columns, drag-drop import. All 4 bites done.
 - EH-0007 Review view (rendered markdown + diff between two runs). Backlog, untouched.
 - EH-0008 Settings view (persist engine/provider/privacy/routing). Backlog, untouched.
 

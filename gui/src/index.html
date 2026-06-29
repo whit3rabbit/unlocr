@@ -138,6 +138,14 @@
                     <span class="opts__label">Output filename</span>
                     <input class="opts__text" id="outFile" type="text" placeholder="{stem}.md (single file only)" spellcheck="false" />
                   </label>
+                  <label class="opts__field opts__field--full">
+                    <span class="opts__label">Output mode</span>
+                    <select class="opts__select" id="optOutputMode">
+                      <option value="single" selected>Single file ({stem}.md)</option>
+                      <option value="pages">Per-page folder ({stem}/page-N.md)</option>
+                      <option value="both">Both (file + folder)</option>
+                    </select>
+                  </label>
                 </div>
                 <!-- pipeline: rendered from the preflight report (main.js),
                      not a hardcoded label. Each stage lights up green/amber/red
@@ -413,6 +421,11 @@
                 <span class="panel__label">Workflow board</span>
                 <span class="panel__count" id="boardCount">0</span>
                 <div class="board__spacer"></div>
+                <!-- Bulk mode: Add PDFs reuses the workspace Import picker (appends to
+                     the queue); Run all reuses the workspace Run button. Both delegate
+                     in main.js so import/run have one code path. -->
+                <button class="board__refresh" id="boardAddBtn" type="button" title="Import PDFs into the queue">Add PDFs</button>
+                <button class="board__refresh" id="boardRunBtn" type="button" title="Run every queued PDF">Run all</button>
                 <button class="board__refresh" id="boardRefresh" type="button" title="Reload from store">Reload</button>
               </div>
               <!-- columns. Each .board__col renders one .board__col-list of
