@@ -107,7 +107,7 @@ export function makeMarkdownPane() {
       element: el,
       // Default toolbar icons are FontAwesome glyphs auto-fetched from a CDN, which
       // the app CSP (style-src/font-src 'self') blocks and which break offline. Use a
-      // text-label toolbar over EasyMDE's static actions instead — no FA dependency.
+      // text-label toolbar over EasyMDE's static actions instead; no FA dependency.
       autoDownloadFontAwesome: false,
       spellChecker: false,
       status: false,
@@ -187,10 +187,11 @@ export function makeMarkdownPane() {
     }
   }
 
-  /** Export the loaded markdown to `format` via the export_markdown command (pandoc).
-   *  Flushes the editor's current content to disk first so the exported document
-   *  matches what's on screen (export reads the .md from disk). Surfaces toasts;
-   *  fail-soft outside the webview. */
+  /** Export the on-disk markdown to `format` via the export_markdown command
+   *  (pandoc). Exports what was last SAVED to disk, NOT the live editor buffer:
+   *  there is no hidden save here, so experimental edits are not silently written
+   *  as a side effect of Export. Save first to export unsaved edits. Surfaces
+   *  toasts; fail-soft outside the webview. */
   async function exportAs(format) {
     if (!currentPath || !format) return;
     let t;
@@ -201,14 +202,46 @@ export function makeMarkdownPane() {
     }
     showToast("md-export", { kind: "info", title: "Exporting…", meta: format.toUpperCase() });
     try {
-      await t.core.invoke("write_text_file", { path: currentPath, content: getValue() });
       const out = await t.core.invoke("export_markdown", { srcPath: currentPath, format });
       showToast("md-export", { kind: "done", title: "Exported", meta: out });
       removeToast("md-export", 3500);
     } catch (err) {
+      // Pandoc missing: on a platform that can auto-download (Windows), offer to fetch
+      // it and retry once. Elsewhere the error already carries package-manager hints.
+      if (String(err).includes("pandoc not found") && (await offerPandocDownload(t))) {
+        await exportAs(format);
+        return;
+      }
       // eslint-disable-next-line no-console
       console.error("[review] export failed:", err);
       showToast("md-export", { kind: "error", title: "Export failed", meta: String(err) });
+    }
+  }
+
+  /** When pandoc is missing, ask to download it (Windows). Returns true if it was
+   *  fetched (caller retries the export). False if declined, unavailable, or failed. */
+  async function offerPandocDownload(t) {
+    const dialog = window.__TAURI__ && window.__TAURI__.dialog;
+    if (!dialog || typeof dialog.ask !== "function") return false;
+    let ok = false;
+    try {
+      ok = await dialog.ask("pandoc is required to export and was not found. Download it now?", {
+        title: "unlocr",
+        kind: "info",
+      });
+    } catch (err) {
+      return false;
+    }
+    if (!ok) return false;
+    showToast("md-export", { kind: "info", title: "Downloading pandoc…" });
+    try {
+      await t.core.invoke("download_tool", { name: "pandoc" });
+      return true;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[review] pandoc download failed:", err);
+      showToast("md-export", { kind: "error", title: "pandoc download failed", meta: String(err) });
+      return false;
     }
   }
 

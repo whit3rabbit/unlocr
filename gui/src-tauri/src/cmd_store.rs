@@ -1,21 +1,21 @@
 // Thin persistence-command wrappers over the data modules (store.rs, settings.rs,
 // notifications.rs). The frontend's only access to the job store, GUI settings,
-// and the notification panel. No OCR logic here; these just read/write JSON.
+// and the notification panel. No OCR logic here; these just read/write the SQLite
+// store in db.rs.
 
-use unlocr::OcrOptions;
-
-use crate::store::{Job, JobOptions};
+use crate::state::AppState;
+use crate::store::Job;
 use crate::{notifications, settings, store};
+use tauri::State;
 
 // --- job store commands (EH-0006 bite 1) -----------------------------------
 //
 // The store itself lives in `store.rs`; these thin commands are the frontend's
-// only access. Two are required for this bite: `list_jobs` (Library/Board reads)
-// and `record_job` (write a run's outcome after run_ocr returns/throws). A third,
-// `jobs_store_path`, exposes the on-disk path so an acceptance check can `cat`
-// the file and confirm one record per run. All three are additive; run_ocr is
-// unchanged (the frontend decides when to record, keeping OCR and persistence
-// decoupled so an OCR success is never rolled back by a store write failure).
+// only access. `list_jobs` (Library/Board reads) + `jobs_store_path` (on-disk path
+// for acceptance) are read-only here. The job LIFECYCLE (running -> done/failed) is
+// owned by the backend `run_ocr` loop (cmd_run.rs) via `store::start_job` /
+// `finish_job`, which emit `jobs://changed` so the views reload live; the frontend
+// no longer writes job rows itself.
 
 /// Return every persisted job in insertion order. The frontend renders this into
 /// the Library grid (all jobs) and the Board (grouped by `status`). An empty vec
@@ -25,65 +25,12 @@ pub(crate) fn list_jobs() -> Vec<Job> {
     store::load_jobs()
 }
 
-/// Absolute path of the `jobs.json` store under the model cache dir, as a string.
-/// Surfaces the cache-dir resolution error (if any) so the UI/acceptance can tell
-/// "no jobs yet" apart from "could not even locate the store". Used by the card's
-/// "cat the file path and show record count" acceptance check.
+/// Absolute path of the SQLite store (`unlocr.db` under the app-data dir), as a
+/// string. Surfaces the path-resolution error (if any) so the UI/acceptance can
+/// tell "no jobs yet" apart from "could not even locate the store".
 #[tauri::command]
 pub(crate) fn jobs_store_path() -> Result<String, String> {
     store::store_path().map(|p| p.display().to_string())
-}
-
-/// Record one run's outcome to the store. The frontend calls this right after a
-/// `run_ocr` invocation completes (status="done", output_path set) or fails
-/// (status="failed", error set). Options are echoed as the same-shaped struct the
-/// `run_ocr` command received, so the stored record reflects what the run used.
-///
-/// Returns the stored `Job` (with its generated id) so the caller can append it to
-/// an in-memory list without a full reload. A store write failure is surfaced as
-/// Err rather than swallowed, but the OCR result it accompanies has already been
-/// delivered to the user, so this never rolls back a successful run.
-// Each arg is an invoke field (the JS contract); a struct would not reduce them.
-#[allow(clippy::too_many_arguments)]
-#[tauri::command]
-pub(crate) fn record_job(
-    input_path: String,
-    quant: Option<String>,
-    max_tokens: Option<u32>,
-    dpi: Option<u32>,
-    prompt: Option<String>,
-    keep_images: Option<bool>,
-    status: Option<String>,
-    output_path: Option<String>,
-    error: Option<String>,
-) -> Result<Job, String> {
-    // Defaults mirror OcrOptions::default() so a record with no options sent
-    // matches a no-args run (the same convention run_ocr uses).
-    let def = OcrOptions::default();
-    let options = JobOptions::from_opts(
-        quant.as_deref().unwrap_or(&def.quant),
-        max_tokens.unwrap_or(def.max_tokens),
-        dpi.unwrap_or(def.dpi),
-        prompt.as_deref().unwrap_or(&def.prompt),
-        keep_images.unwrap_or(def.keep_images),
-    );
-    // Validate status against the known set the Board buckets on. An unknown value
-    // would render unstyled and be bucketed into "queued", hiding a finished run
-    // from the Done column. Reject it: the frontend always sends a known value, so
-    // an unknown is a bug, and recordRunOutcome swallows the Err (best-effort).
-    let status = status.as_deref().unwrap_or("done");
-    if !matches!(status, "queued" | "running" | "done" | "failed") {
-        return Err(format!(
-            "invalid status {status:?}: expected one of queued|running|done|failed"
-        ));
-    }
-    store::record_outcome(
-        &input_path,
-        options,
-        status,
-        output_path.as_deref().unwrap_or(""),
-        error.as_deref().unwrap_or(""),
-    )
 }
 
 /// Remove one job from the Library by id. With `delete_file == Some(true)`, also
@@ -91,24 +38,39 @@ pub(crate) fn record_job(
 /// `store::delete_output_file`); otherwise the record is dropped but the file is
 /// left in place. A missing id is a no-op success. The frontend confirms the
 /// file-deleting variant with a native dialog before invoking.
+///
+/// Order: the file is deleted BEFORE the record is dropped, so a file-delete
+/// failure leaves the record in place (the user can retry or remove the file
+/// manually) instead of orphaning the file with no Library entry to clean it.
 #[tauri::command]
-pub(crate) fn delete_job(id: String, delete_file: Option<bool>) -> Result<(), String> {
-    let output_path = store::remove_job(&id)?;
+pub(crate) fn delete_job(
+    id: String,
+    delete_file: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let output_path = store::peek_job_output(&id)?;
     if delete_file == Some(true) {
-        if let Some(path) = output_path {
-            store::delete_output_file(&path)?;
+        if let Some(path) = &output_path {
+            store::delete_output_file(path)?;
         }
     }
+    store::remove_job(&id)?;
+    state.invalidate_job_outputs();
     Ok(())
 }
 
 /// Clear the entire Library. With `delete_files == Some(true)`, also delete every
 /// recorded `.md` output from disk; otherwise only the records are dropped. The
-/// records are cleared first, so a file-delete failure is reported but never
-/// leaves stale records behind. The frontend confirms the file-deleting variant.
+/// files are deleted BEFORE the records are cleared: a file-delete failure returns
+/// Err with every record still in place, so the Library is never emptied while
+/// output files are left orphaned on disk. The frontend confirms the file-deleting
+/// variant.
 #[tauri::command]
-pub(crate) fn clear_jobs(delete_files: Option<bool>) -> Result<(), String> {
-    let outputs = store::clear_jobs()?;
+pub(crate) fn clear_jobs(
+    delete_files: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let outputs = store::peek_job_outputs()?;
     if delete_files == Some(true) {
         let errors: Vec<String> = outputs
             .iter()
@@ -121,6 +83,8 @@ pub(crate) fn clear_jobs(delete_files: Option<bool>) -> Result<(), String> {
             ));
         }
     }
+    store::clear_jobs()?;
+    state.invalidate_job_outputs();
     Ok(())
 }
 

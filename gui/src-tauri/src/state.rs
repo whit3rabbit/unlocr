@@ -54,4 +54,25 @@ pub(crate) struct AppState {
     // review pane's read scope is backend-derived, not supplied by the renderer:
     // a compromised webview cannot point it at an arbitrary .md on disk.
     pub(crate) read_allow: Mutex<HashSet<PathBuf>>,
+    // Cached canonical job-store `output_path`s. Building it needs a DB query plus
+    // one `canonicalize` per output, so it is computed once and invalidated
+    // (`invalidate_job_outputs`) on every job insert/update/delete/clear. `None`
+    // means "stale, rebuild". Without this, every review-pane read re-scanned the
+    // whole jobs table and re-stat'd every output.
+    pub(crate) job_output_cache: Mutex<Option<HashSet<PathBuf>>>,
+    // Sibling files `export_markdown` wrote this session (e.g. report.docx). An
+    // export may overwrite a file in THIS set (a re-export of the same format) but
+    // must refuse a pre-existing file NOT in it, so exporting cannot silently
+    // clobber an unrelated same-named file the user owns.
+    pub(crate) exported_paths: Mutex<HashSet<PathBuf>>,
+}
+
+impl AppState {
+    /// Mark the cached job-output allowlist stale. Call after any change to the
+    /// jobs table (start/finish/delete/clear/reconcile) so the next read rebuilds.
+    pub(crate) fn invalidate_job_outputs(&self) {
+        if let Ok(mut g) = self.job_output_cache.lock() {
+            *g = None;
+        }
+    }
 }

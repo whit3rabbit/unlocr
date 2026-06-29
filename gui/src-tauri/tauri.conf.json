@@ -29,7 +29,12 @@
     "targets": "all",
     "linux": {
       "deb": {
-        "depends": ["poppler-utils"]
+        "depends": ["poppler-utils"],
+        "recommends": ["pandoc"]
+      },
+      "rpm": {
+        "depends": ["poppler-utils"],
+        "recommends": ["pandoc"]
       }
     },
     "icon": [

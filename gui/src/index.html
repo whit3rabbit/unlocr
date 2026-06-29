@@ -492,8 +492,8 @@
           </section>
 
           <!-- SETTINGS -->
-          <!-- Persisted via get_settings/save_settings (settings.json under the
-               model cache dir). Seeds the provider mode + engine-option defaults. -->
+          <!-- Persisted via get_settings/save_settings (unlocr.db under the app-data
+               dir). Seeds the provider mode + engine-option defaults. -->
           <section class="view" data-view="settings">
             <div class="panel panel--full settings">
               <div class="panel__head">
@@ -576,7 +576,23 @@
                 <button class="model-btn model-btn--ghost" id="clearCacheBtn" type="button">Clear cached models</button>
                 <span class="settings__cache-status" id="clearCacheStatus" hidden></span>
               </div>
-              <p class="settings__note">API key is stored in plaintext in settings.json under the model cache dir. Use a key scoped to this device.</p>
+              <!-- External tools: pdftoppm (OCR), llama-server (engine), pandoc (export).
+                   Populated by main.js wireDependencies() via list_tools. On Windows each
+                   missing tool gets a Download button (download_tool fetches a pinned,
+                   sha256-verified build into the cache). Elsewhere it shows the package-
+                   manager hint (brew / apt / dnf). -->
+              <div class="settings__deps">
+                <div class="panel__head">
+                  <span class="panel__label">Dependencies</span>
+                  <div class="settings__spacer"></div>
+                  <button class="model-btn model-btn--ghost" id="depsRefresh" type="button">Recheck</button>
+                </div>
+                <div class="settings__deps-list" id="depsList" aria-live="polite">
+                  <p class="placeholder" id="depsEmpty">Checking…</p>
+                </div>
+                <p class="settings__note" id="depsHint" hidden></p>
+              </div>
+              <p class="settings__note">API key is stored in plaintext in the app database (unlocr.db) under your user data dir. Use a key scoped to this device.</p>
               <span class="settings__saved" id="settingsSaved" hidden>Saved.</span>
             </div>
           </section>

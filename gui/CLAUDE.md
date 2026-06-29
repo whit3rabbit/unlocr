@@ -31,6 +31,13 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
   plus non-empty `output_path`s in the job store). The match is exact after canonicalize, not a
   dir prefix. No `allowedDir` arg: the renderer cannot widen the read scope. `check_readable`
   (cmd_run.rs) is the pure, unit-tested core.
+- `write_text_file`/`export_markdown` reuse `read_text_file`'s `check_readable` allowlist
+  (read==write scope). Export writes a SIBLING of the allowlisted source (backend-derived
+  path, renderer can't choose it); `export_markdown` shells pandoc. Dep-downloader commands
+  (cmd_run.rs): `list_tools` (status), `download_tool` (direct fetch), `host_os`,
+  `brew_available`, `brew_install` (allowlisted formulae only). UI: direct Download where
+  `downloadable` (Win all; mac pandoc); else on mac an "Install with Homebrew" button when
+  `brew_available`, else copyable Homebrew guidance.
 - Job-store commands (`list_jobs`, `jobs_store_path`, `record_job`) wrap `store.rs`;
   `record_job` fires after each run_ocr completes/fails. Defaults mirror `OcrOptions::default()`.
 
@@ -52,6 +59,16 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
 ## Frontend conventions
 - `withGlobalTauri: true` (see tauri.conf.json), so JS uses `window.__TAURI__.core.invoke`,
   not an npm `@tauri-apps/api` import. No build step: edit JS, reload.
+- Vendored UMD libs (EasyMDE, DOMPurify) live in `src/assets/`, loaded as classic
+  `<script>` in `index.html <head>` BEFORE the deferred `main.js` module so the globals
+  exist when `makeMarkdownPane()` runs. New frontend dep = drop the file + add the tag
+  (no npm/bundler); ask first.
+- EasyMDE's default toolbar icons are FontAwesome auto-fetched from a CDN -> blocked by
+  our CSP (`style-src`/`font-src 'self'`) and broken offline. Use a text-label toolbar
+  over EasyMDE's static actions + `autoDownloadFontAwesome:false` (panes.js).
+- OS is compile-time only (the GUI ships per-platform, release-gui.yml). The frontend
+  reads it via the `host_os` command; the Windows dep-download UI shows only when
+  `list_tools` reports `downloadable`. Do NOT add runtime OS detection.
 - Engine backend mode + remote URL/key/model are read ONLY at `load_model` time (model
   is held warm); `run_ocr` uses the loaded server and does NOT re-read engine fields.
   Backend picker is `#enginePreset` (llamacpp=managed local, vllm/sglang/custom=remote);
@@ -79,6 +96,12 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
 ## Runtime deps (same as the CLI, NOT bundled)
 - `pdftoppm` (poppler) and `llama-server` (llama.cpp >= b8530) must be on PATH /
   Homebrew prefixes. The `preflight` command surfaces missing ones to the UI.
+- `pandoc` is an OPTIONAL, GUI-only runtime dep: used ONLY by the review-pane export
+  (`export_markdown`, md -> docx/odt/rtf/html/txt). Declared as a WEAK dep in the GUI
+  deb/rpm (`tauri.conf.json` bundle.linux deb.recommends / rpm.recommends) and a hard
+  cask dep (`packaging/homebrew/unlocr-cask.rb`); NOT on the CLI (the CLI has no
+  export). Missing pandoc disables export only (cross-platform install hint shown),
+  never OCR. Resolved via `preflight::locate` like the other tools.
 
 ## Gotchas
 - `spawn_blocking` keeps Rust off the UI thread, but a high-rate `emit` (e.g. the

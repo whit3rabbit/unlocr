@@ -3,28 +3,14 @@
 //! Backs the notification panel (the bell dropdown): terminal/notable events
 //! (a PDF finished, a run failed, a model download completed) are recorded here
 //! so they survive across app restarts and can be cleared individually or all at
-//! once. Mirrors `store.rs` deliberately: a JSON file under the model cache dir,
-//! atomic write, no extra dependency. SQLite would be overkill for an append +
-//! read-all + delete list of at most a few hundred rows.
+//! once. Mirrors `store.rs`/`settings.rs`: a table in the SQLite store (`db.rs`),
+//! accessed via `db::with_db`. Uncapped by design (the old 200-row cap is gone).
 //!
 //! Scope: persistence + typed accessors only; the toast UI and panel live in the
 //! frontend. Transient progress (download percent/speed) is NOT stored here, only
 //! terminal events worth surfacing after the fact. Purely additive module.
 
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
-
-use unlocr::model::cache_dir;
-
-/// Co-located with `jobs.json` and the GGUFs so one cache dir holds everything
-/// the app persists.
-const STORE_FILE: &str = "notifications.json";
-
-/// Cap on retained notifications. The list is rewritten in full on every add and
-/// the bell panel renders all of them, so an uncapped store grows unbounded. Keep
-/// the most recent N (insertion-ordered, so the tail is newest).
-const MAX_NOTIFICATIONS: usize = 200;
 
 /// One stored notification. camelCase on the wire so the JS side reads
 /// `n.createdAt` without a rename layer. `kind` is a coarse string
@@ -38,7 +24,7 @@ pub struct Notification {
     pub id: String,
     /// done | error | download | info. Drives the panel icon/severity.
     pub kind: String,
-    /// One-line headline, e.g. "report.pdf — OCR complete".
+    /// One-line headline, e.g. "report.pdf: OCR complete".
     pub title: String,
     /// Optional detail, e.g. the output path or an error message. May be empty.
     pub body: String,
@@ -49,62 +35,78 @@ pub struct Notification {
     pub read: bool,
 }
 
-/// On-disk envelope. `version` lets a future migration detect an older schema.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct NotificationsFile {
-    version: u32,
-    notifications: Vec<Notification>,
-}
+// --- DB layer ---------------------------------------------------------------
+//
+// Pure functions over a `&Connection`, namespaced under `rows` so they do not
+// collide with the public accessors of the same intent (add/clear/mark_all_read).
+// Tests drive these against an in-memory DB; the public fns wrap them in with_db.
 
-impl Default for NotificationsFile {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            notifications: Vec::new(),
+mod rows {
+    use super::Notification;
+    use rusqlite::{params, Connection};
+
+    /// Upsert by id.
+    pub(crate) fn insert(conn: &Connection, n: &Notification) -> Result<(), String> {
+        conn.execute(
+            "INSERT OR REPLACE INTO notifications
+               (id, kind, title, body, created_at, read)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![n.id, n.kind, n.title, n.body, n.created_at as i64, n.read,],
+        )
+        .map_err(|e| format!("could not insert notification: {e}"))?;
+        Ok(())
+    }
+
+    /// All notifications in insertion order (newest last), matching the old
+    /// file order the panel relied on (the frontend reverses for display). The
+    /// table is a normal rowid table, so `ORDER BY rowid` is stable insertion
+    /// order regardless of the string id's lexicographic quirks.
+    pub(crate) fn list(conn: &Connection) -> Result<Vec<Notification>, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, kind, title, body, created_at, read
+                 FROM notifications ORDER BY rowid ASC",
+            )
+            .map_err(|e| format!("could not prepare notifications select: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(Notification {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    title: row.get(2)?,
+                    body: row.get(3)?,
+                    created_at: row.get::<_, i64>(4)? as u64,
+                    read: row.get(5)?,
+                })
+            })
+            .map_err(|e| format!("could not query notifications: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("could not read notification row: {e}"))?);
         }
+        Ok(out)
     }
-}
 
-/// Resolve the store path: `<model cache dir>/notifications.json`.
-pub fn store_path() -> Result<PathBuf, String> {
-    let cache = cache_dir(None).map_err(|e| format!("could not resolve model cache dir: {e}"))?;
-    Ok(cache.join(STORE_FILE))
-}
-
-/// Load all notifications. A missing file means "none yet"; a corrupt file is
-/// logged and treated as empty so a bad state never wedges the panel.
-pub fn load() -> Vec<Notification> {
-    let path = match store_path() {
-        Ok(p) => p,
-        Err(_) => return Vec::new(),
-    };
-    match std::fs::read(&path) {
-        Ok(bytes) => match serde_json::from_slice::<NotificationsFile>(&bytes) {
-            Ok(file) => file.notifications,
-            Err(e) => {
-                eprintln!("[notifications] parse failed, treating as empty: {e}");
-                Vec::new()
-            }
-        },
-        Err(_) => Vec::new(),
+    /// Remove one notification by id. A missing id is a no-op (DELETE matches nothing).
+    pub(crate) fn delete(conn: &Connection, id: &str) -> Result<(), String> {
+        conn.execute("DELETE FROM notifications WHERE id = ?1", params![id])
+            .map_err(|e| format!("could not delete notification {id}: {e}"))?;
+        Ok(())
     }
-}
 
-/// Persist the full list, creating the cache dir if needed. Atomic: write to a
-/// temp file then rename so a crash mid-write cannot truncate the store.
-fn save(items: &[Notification]) -> Result<(), String> {
-    let path = store_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("could not create store dir {}: {e}", parent.display()))?;
+    /// Set every unread notification read. Single atomic UPDATE.
+    pub(crate) fn mark_all_read(conn: &Connection) -> Result<(), String> {
+        conn.execute("UPDATE notifications SET read = 1 WHERE read = 0", [])
+            .map_err(|e| format!("could not mark notifications read: {e}"))?;
+        Ok(())
     }
-    let file = NotificationsFile {
-        version: 1,
-        notifications: crate::jsonstore::cap_to_recent(items.to_vec(), MAX_NOTIFICATIONS),
-    };
-    let bytes =
-        serde_json::to_vec_pretty(&file).map_err(|e| format!("could not serialize: {e}"))?;
-    crate::jsonstore::write_atomic(&path, &bytes)
+
+    /// Drop every notification.
+    pub(crate) fn clear_all(conn: &Connection) -> Result<(), String> {
+        conn.execute("DELETE FROM notifications", [])
+            .map_err(|e| format!("could not clear notifications: {e}"))?;
+        Ok(())
+    }
 }
 
 /// Next id: `<created_at>-<seq>` where `seq` is one past the largest existing
@@ -121,13 +123,24 @@ fn next_id(items: &[Notification], created_at: u64) -> String {
     format!("{created_at}-{}", max_seq + 1)
 }
 
+// --- public accessors (the command-facing surface) --------------------------
+
+/// All stored notifications, newest last (insertion order). Empty on a DB error
+/// (logged) so the panel never wedges.
+pub fn load() -> Vec<Notification> {
+    crate::db::with_db(rows::list).unwrap_or_else(|e| {
+        eprintln!("[notifications] load failed, treating as empty: {e}");
+        Vec::new()
+    })
+}
+
 /// Append a notification and persist. Returns the stored record so the frontend
 /// can push it into its in-memory list without a reload.
 pub fn add(kind: &str, title: &str, body: &str) -> Result<Notification, String> {
     let created_at = crate::store::now_secs();
-    // Serialize load-mutate-save so concurrent adds cannot lose one (see jsonstore).
-    crate::jsonstore::with_write_lock(|| {
-        let mut items = load();
+    crate::db::with_db(|conn| {
+        // list first so next_id sees the current set (same-second uniqueness).
+        let items = rows::list(conn)?;
         let n = Notification {
             id: next_id(&items, created_at),
             kind: kind.to_string(),
@@ -136,54 +149,115 @@ pub fn add(kind: &str, title: &str, body: &str) -> Result<Notification, String> 
             created_at,
             read: false,
         };
-        items.push(n.clone());
-        save(&items)?;
+        rows::insert(conn, &n)?;
         Ok(n)
     })
 }
 
-/// Remove one notification by id. A missing id is a no-op success (the UI may
-/// clear a stale row); the store is only rewritten when something changed.
+/// Remove one notification by id. A missing id is a no-op success.
 pub fn clear(id: &str) -> Result<(), String> {
-    crate::jsonstore::with_write_lock(|| {
-        let mut items = load();
-        let before = items.len();
-        items.retain(|n| n.id != id);
-        if items.len() != before {
-            save(&items)?;
-        }
-        Ok(())
-    })
+    crate::db::with_db(|c| rows::delete(c, id))
 }
 
-/// Mark every notification read and persist. Returns the updated list so the
-/// frontend can re-render without a reload. Cheap full rewrite (small list).
+/// Mark every notification read and return the updated list so the bell's unread
+/// badge clears without a reload.
 pub fn mark_all_read() -> Result<Vec<Notification>, String> {
-    crate::jsonstore::with_write_lock(|| {
-        let mut items = load();
-        let mut changed = false;
-        for n in items.iter_mut() {
-            if !n.read {
-                n.read = true;
-                changed = true;
-            }
-        }
-        if changed {
-            save(&items)?;
-        }
-        Ok(items)
+    crate::db::with_db(|conn| {
+        rows::mark_all_read(conn)?;
+        rows::list(conn)
     })
 }
 
-/// Drop every notification (Clear all). Writes an empty list.
+/// Drop every notification (Clear all button).
 pub fn clear_all() -> Result<(), String> {
-    // Under the lock so it cannot interleave with an in-flight add's load/save.
-    crate::jsonstore::with_write_lock(|| save(&[]))
+    crate::db::with_db(rows::clear_all)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
+
+    /// Fresh in-memory DB with the schema applied.
+    fn mem_db() -> Connection {
+        crate::db::mem_db()
+    }
+
+    fn note(id: &str, read: bool) -> Notification {
+        Notification {
+            id: id.into(),
+            kind: "info".into(),
+            title: format!("t-{id}"),
+            body: "".into(),
+            created_at: 100,
+            read,
+        }
+    }
+
+    /// add inserts a row the list returns, with read=false.
+    #[test]
+    fn add_then_list() {
+        let conn = mem_db();
+        // Simulate the add path (next_id over the current set, then insert).
+        let items = rows::list(&conn).unwrap();
+        let n = Notification {
+            id: next_id(&items, 100),
+            kind: "done".into(),
+            title: "report.pdf".into(),
+            body: "/tmp/report.md".into(),
+            created_at: 100,
+            read: false,
+        };
+        rows::insert(&conn, &n).unwrap();
+        let got = rows::list(&conn).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "100-1");
+        assert_eq!(got[0].kind, "done");
+        assert_eq!(got[0].title, "report.pdf");
+        assert_eq!(got[0].body, "/tmp/report.md");
+        assert!(!got[0].read);
+    }
+
+    /// mark_all_read flips only the unread rows (and is idempotent on re-run).
+    #[test]
+    fn mark_all_read_flips_read() {
+        let conn = mem_db();
+        rows::insert(&conn, &note("100-1", false)).unwrap();
+        rows::insert(&conn, &note("100-2", false)).unwrap();
+        rows::insert(&conn, &note("100-3", true)).unwrap();
+        rows::mark_all_read(&conn).unwrap();
+        let got = rows::list(&conn).unwrap();
+        assert_eq!(got.len(), 3);
+        assert!(got.iter().all(|n| n.read));
+        // Re-running does not error and leaves them read.
+        rows::mark_all_read(&conn).unwrap();
+        assert!(rows::list(&conn).unwrap().iter().all(|n| n.read));
+    }
+
+    /// clear removes only the matching id.
+    #[test]
+    fn clear_one() {
+        let conn = mem_db();
+        rows::insert(&conn, &note("100-1", false)).unwrap();
+        rows::insert(&conn, &note("100-2", false)).unwrap();
+        rows::delete(&conn, "100-1").unwrap();
+        let got = rows::list(&conn).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "100-2");
+        // Clearing an unknown id is a no-op.
+        rows::delete(&conn, "zzz").unwrap();
+        assert_eq!(rows::list(&conn).unwrap().len(), 1);
+    }
+
+    /// clear_all empties the table.
+    #[test]
+    fn clear_all_empties() {
+        let conn = mem_db();
+        rows::insert(&conn, &note("100-1", false)).unwrap();
+        rows::insert(&conn, &note("100-2", false)).unwrap();
+        rows::clear_all(&conn).unwrap();
+        assert!(rows::list(&conn).unwrap().is_empty());
+    }
 
     /// next_id must be unique within the same second (batch completions) and
     /// monotonic, since a bare timestamp would collide and break clear-by-id.
@@ -191,74 +265,10 @@ mod tests {
     fn next_id_unique_within_same_second() {
         let mut items: Vec<Notification> = Vec::new();
         let a = next_id(&items, 100);
-        items.push(Notification {
-            id: a.clone(),
-            kind: "info".into(),
-            title: "a".into(),
-            body: "".into(),
-            created_at: 100,
-            read: false,
-        });
+        items.push(note(&a, false));
         let b = next_id(&items, 100);
         assert_ne!(a, b, "same-second ids must differ");
         assert_eq!(a, "100-1");
         assert_eq!(b, "100-2");
-    }
-
-    /// The cap keeps exactly MAX_NOTIFICATIONS, drops the oldest, keeps the newest
-    /// tail. Pure helper, so no cache dir is touched.
-    #[test]
-    fn cap_to_recent_keeps_newest_tail() {
-        let mk = |i: u64| Notification {
-            id: format!("{i}-1"),
-            kind: "info".into(),
-            title: format!("n{i}"),
-            body: String::new(),
-            created_at: i,
-            read: false,
-        };
-        let few: Vec<Notification> = (0..5).map(mk).collect();
-        assert_eq!(
-            crate::jsonstore::cap_to_recent(few, MAX_NOTIFICATIONS).len(),
-            5
-        );
-
-        // Cap logic is covered in jsonstore; this asserts MAX_NOTIFICATIONS is wired.
-        let many: Vec<Notification> = (0..(MAX_NOTIFICATIONS as u64 + 30)).map(mk).collect();
-        let capped = crate::jsonstore::cap_to_recent(many, MAX_NOTIFICATIONS);
-        assert_eq!(capped.len(), MAX_NOTIFICATIONS, "must trim to the cap");
-        assert_eq!(capped.first().unwrap().created_at, 30, "oldest 30 dropped");
-        assert_eq!(
-            capped.last().unwrap().created_at,
-            MAX_NOTIFICATIONS as u64 + 29,
-            "newest kept at the tail"
-        );
-    }
-
-    /// Envelope round-trips through serde with camelCase on the wire (regression
-    /// guard for the rename the frontend depends on).
-    #[test]
-    fn file_roundtrips_camelcase() {
-        let n = Notification {
-            id: "1-1".into(),
-            kind: "done".into(),
-            title: "report.pdf".into(),
-            body: "/tmp/report.md".into(),
-            created_at: 1_700_000_001,
-            read: false,
-        };
-        let file = NotificationsFile {
-            version: 1,
-            notifications: vec![n],
-        };
-        let json = serde_json::to_string(&file).unwrap();
-        assert!(
-            json.contains("\"createdAt\""),
-            "expected camelCase createdAt"
-        );
-        assert!(!json.contains("\"created_at\""));
-        let back: NotificationsFile = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.notifications.len(), 1);
-        assert_eq!(back.notifications[0].kind, "done");
     }
 }

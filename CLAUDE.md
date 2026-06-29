@@ -35,6 +35,16 @@ Thin wrapper. Full usage/benchmarks in README.md.
   declare as a package dep. deb postinst / rpm %post warn if missing.
 
 ## Gotchas
+- `src/tools.rs`: on-demand tool downloader. `PINS` is per OS+arch (cfg-selected):
+  Windows = pandoc/poppler/llama-server CPU (.zip); macOS = pandoc only (per-arch .zip;
+  poppler has no standalone mac binary, llama ships .tar.gz so both stay on brew); Linux
+  = none. Pins (url+sha256+exe) are version-locked; bump on upgrade. The GitHub release
+  API `digest` field gives the sha256 (also for model.rs DIGESTS). `extract_zip` sets the
+  unix exec bit from the zip entry (mac binary won't run otherwise). `preflight::locate`
+  also scans `<cache>/tools/` so a downloaded tool resolves for every caller. Needs `zip`.
+- OS detection is compile-time `cfg!(target_os)` everywhere (per-platform builds), never
+  runtime. Tests asserting OS-gating put the `cfg!` check INSIDE the test body (runs
+  per-host on CI), not `#[cfg]` on the fn, so each OS verifies its own branch.
 - `cargo clippy --workspace --all-targets -- -D warnings` is GREEN; the old
   pre-existing debt was cleared. It is a real release gate (docs/RELEASE.md), so
   keep it green: your diff must add no new lints.
@@ -69,6 +79,19 @@ Thin wrapper. Full usage/benchmarks in README.md.
   Both names are wired in the GUI too (model.js gpu preset = baidu; quality tiers =
   GGUF quants). Architecture-family comments may still say "DeepSeek-OCR" (the base
   arch) and are intentionally not renamed.
+  - vLLM serving of baidu/Unlimited-OCR ships ONLY as a Docker image
+    (`vllm/vllm-openai:unlimited-ocr`), NOT a pip wheel; needs `--trust-remote-code`
+    + logits processor `vllm.model_executor.models.unlimited_ocr:NGramPerReqLogits-
+    Processor` (module `unlimited_ocr`, NOT `deepseek_ocr`) + an `<image>`-prefixed
+    prompt (ngram_size/window_size via extra_body) or output is empty. Colab has no
+    Docker daemon, so `colab/` uses the llama.cpp managed-local path on GPU, NOT
+    `--gpu`/vLLM.
+- `server::server_args` passes NO `-ngl`, so the managed-local llama-server runs
+  CPU-only. For GPU (e.g. Colab) set env `LLAMA_ARG_N_GPU_LAYERS=99` before unlocr
+  spawns it (llama-server reads `LLAMA_ARG_*` env vars); no CLI flag, no Rust change.
+- llama.cpp GGUF build for Unlimited-OCR (`colab/` notebook) = clone llama.cpp +
+  `pull/24975` branch + `cmake -DGGML_CUDA=ON --target llama-server`; stock llama.cpp
+  won't load the DeepSeek-OCR arch (cf. the b8530/PR #17400 runtime note above).
 - Two independent "resolutions": `--dpi` is the PNG pixel size pdftoppm renders;
   `--image-max-tokens` is llama-server's vision-token budget (DeepSeek-OCR base/large
   detail). They stack. image-max-tokens + `--chat-template` are llama-server *startup*

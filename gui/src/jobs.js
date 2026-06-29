@@ -325,46 +325,6 @@ export function makeLibrary() {
   return { load, render, setReviewHooks, actions };
 }
 
-/** EH-0006: record a run's outcome to the job store after run_ocr completes or
- *  fails. Keeps OCR and persistence decoupled: a store write failure is logged but
- *  never rolls back the OCR result the user already received. Returns the stored
- *  Job (or null) so the caller can optionally refresh the Library with it. */
-export async function recordRunOutcome(inputPath, opts, status, outputPath, error, library, board) {
-  let t;
-  try {
-    t = requireTauri();
-  } catch (err) {
-    return null;
-  }
-  try {
-    const job = await t.core.invoke("record_job", {
-      inputPath,
-      // Only forward the fields record_job accepts; the rest default server-side.
-      quant: opts && opts.quant,
-      maxTokens: opts && opts.maxTokens,
-      dpi: opts && opts.dpi,
-      prompt: opts && opts.prompt,
-      keepImages: opts && opts.keepImages,
-      status,
-      outputPath: outputPath || "",
-      error: error || "",
-    });
-    // Refresh the Library and the Board so the new card appears without a tab switch.
-    if (library && typeof library.load === "function") {
-      library.load();
-    }
-    if (board && typeof board.load === "function") {
-      board.load();
-    }
-    return job;
-  } catch (err) {
-    // Persistence is best-effort; never fail the run on a store write error.
-    // eslint-disable-next-line no-console
-    console.error("[store] record_job failed", err);
-    return null;
-  }
-}
-
 /** EH-0006 bite 3: controller over the Board kanban. Reads the same persisted job
  *  store the Library grid uses (list_jobs) and groups jobs into status columns:
  *  queued, running, done, failed. Each column lists its jobs newest-first (by

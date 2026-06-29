@@ -1,29 +1,25 @@
 //! Persisted GUI settings (provider mode + defaults).
 //!
-//! Same dependency-free pattern as `store.rs`: one JSON file (`settings.json`)
-//! under the model cache dir, atomic write via temp + rename, missing/corrupt
-//! file falls back to defaults so a first launch or a hand-deleted file never
-//! wedges the app. Holds what the Settings panel persists: the local/remote
-//! provider mode, the remote endpoint, and the engine-option defaults the
-//! Workspace controls seed from.
+//! Backed by the SQLite store (`unlocr.db`, see `db.rs`): a single-row `settings`
+//! table (id = 1) holds the Settings panel's state across restarts. Missing row or
+//! a DB error falls back to `Settings::default()` so a first launch or a corrupt
+//! store never wedges the app. Holds the local/remote provider mode, the remote
+//! endpoint, and the engine-option defaults the Workspace controls seed from.
 //!
-//! ponytail: `remoteApiKey` is stored as plaintext in this JSON under the OS
-//! cache dir (same trust level as the GGUF cache). Upgrade path if it ever
-//! matters: the OS keychain (adds a `keyring`-style dep). The Settings UI shows
-//! a one-line warning so the storage location is not a surprise.
+//! ponytail: `remoteApiKey` is stored as plaintext in the DB under the app-data
+//! dir (same trust level as the old JSON-under-cache model). Upgrade path if it
+//! ever matters: the OS keychain (adds a `keyring`-style dep). The Settings UI
+//! shows a one-line warning so the storage location is not a surprise.
 
-use std::path::PathBuf;
-
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use unlocr::model::cache_dir;
 use unlocr::OcrOptions;
-
-const SETTINGS_FILE: &str = "settings.json";
 
 /// Persisted settings. camelCase on the wire so the JS side reads
 /// `settings.remoteBaseUrl` etc. without a rename layer. Every field has a
-/// default so an older/partial file still deserializes (serde `default`).
+/// default so an older/partial state still fills in (serde `default`), and a
+/// missing DB row returns `Settings::default()` wholesale.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -104,68 +100,145 @@ impl Default for Settings {
     }
 }
 
-/// On-disk envelope, versioned so a future migration can detect an older schema.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct SettingsFile {
-    version: u32,
-    settings: Settings,
-}
+// --- DB layer ---------------------------------------------------------------
+//
+// Pure functions over a `&Connection` (split from the `with_db` wrappers so tests
+// drive them against an in-memory DB). The settings table is a singleton (id = 1).
 
-/// Resolve `<model cache dir>/settings.json`. Surfaces the cache-dir error like
-/// `store::store_path` does.
-pub fn settings_path() -> Result<PathBuf, String> {
-    let cache = cache_dir(None).map_err(|e| format!("could not resolve model cache dir: {e}"))?;
-    Ok(cache.join(SETTINGS_FILE))
-}
-
-/// Load settings, falling back to defaults on a missing or corrupt file.
-pub fn load_settings() -> Settings {
-    let path = match settings_path() {
-        Ok(p) => p,
-        Err(_) => return Settings::default(),
-    };
-    match std::fs::read(&path) {
-        Ok(bytes) => match serde_json::from_slice::<SettingsFile>(&bytes) {
-            Ok(file) => file.settings,
-            Err(e) => {
-                eprintln!("[settings] settings.json parse failed, using defaults: {e}");
-                Settings::default()
-            }
+/// Read the singleton settings row. A missing row (fresh install, cleared store)
+/// yields `Settings::default()` rather than an error, mirroring the old
+/// "missing file -> defaults" contract.
+fn fetch(conn: &Connection) -> Result<Settings, String> {
+    match conn.query_row(
+        "SELECT mode, remote_base_url, remote_api_key, remote_model,
+                default_quant, llama_bin, default_dpi, default_max_tokens,
+                default_prompt, idle_unload_minutes
+         FROM settings WHERE id = 1",
+        [],
+        |row| {
+            Ok(Settings {
+                mode: row.get(0)?,
+                remote_base_url: row.get(1)?,
+                remote_api_key: row.get(2)?,
+                remote_model: row.get(3)?,
+                default_quant: row.get(4)?,
+                llama_bin: row.get(5)?,
+                default_dpi: row.get(6)?,
+                default_max_tokens: row.get(7)?,
+                default_prompt: row.get(8)?,
+                idle_unload_minutes: row.get(9)?,
+            })
         },
-        Err(_) => Settings::default(),
+    ) {
+        Ok(s) => Ok(s),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Settings::default()),
+        Err(e) => Err(format!("could not read settings: {e}")),
     }
 }
 
-/// Persist settings via temp + rename so a crash mid-write never truncates the file.
+/// Upsert the singleton settings row (INSERT OR REPLACE on id = 1).
+fn persist(conn: &Connection, s: &Settings) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR REPLACE INTO settings
+           (id, mode, remote_base_url, remote_api_key, remote_model,
+            default_quant, llama_bin, default_dpi, default_max_tokens,
+            default_prompt, idle_unload_minutes)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            s.mode,
+            s.remote_base_url,
+            s.remote_api_key,
+            s.remote_model,
+            s.default_quant,
+            s.llama_bin,
+            s.default_dpi,
+            s.default_max_tokens,
+            s.default_prompt,
+            s.idle_unload_minutes,
+        ],
+    )
+    .map_err(|e| format!("could not save settings: {e}"))?;
+    Ok(())
+}
+
+// --- public accessors (the command-facing surface) --------------------------
+
+/// Load settings, falling back to defaults on a missing row or a DB error.
+pub fn load_settings() -> Settings {
+    crate::db::with_db(fetch).unwrap_or_else(|e| {
+        eprintln!("[settings] load failed, using defaults: {e}");
+        Settings::default()
+    })
+}
+
+/// Persist settings (upsert the singleton row).
 pub fn save_settings(settings: &Settings) -> Result<(), String> {
-    let path = settings_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("could not create settings dir {}: {e}", parent.display()))?;
-    }
-    let file = SettingsFile {
-        version: 1,
-        settings: settings.clone(),
-    };
-    let bytes = serde_json::to_vec_pretty(&file)
-        .map_err(|e| format!("could not serialize settings: {e}"))?;
-    crate::jsonstore::write_atomic(&path, &bytes)
+    crate::db::with_db(|c| persist(c, settings))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A partial file (only `mode`) must fill the rest from defaults, not fail.
+    /// Fresh in-memory DB with the schema applied.
+    fn mem_db() -> Connection {
+        crate::db::mem_db()
+    }
+
+    /// A fresh store has no settings row -> fetch returns defaults, including the
+    /// prefilled llama-server remote URL.
     #[test]
-    fn partial_file_fills_defaults() {
-        let json = r#"{ "version": 1, "settings": { "mode": "remote" } }"#;
-        let file: SettingsFile = serde_json::from_str(json).unwrap();
-        assert_eq!(file.settings.mode, "remote");
-        assert_eq!(file.settings.default_quant, OcrOptions::default().quant);
-        assert_eq!(file.settings.default_dpi, OcrOptions::default().dpi);
-        // A partial file must also pick up the prefilled remote URL, not "".
-        assert_eq!(file.settings.remote_base_url, default_remote_base_url());
+    fn missing_row_returns_default() {
+        let conn = mem_db();
+        let s = fetch(&conn).unwrap();
+        assert_eq!(s.mode, "local");
+        assert_eq!(s.remote_base_url, default_remote_base_url());
+        assert_eq!(s.default_quant, OcrOptions::default().quant);
+        assert_eq!(s.default_dpi, OcrOptions::default().dpi);
+        assert_eq!(s.idle_unload_minutes, 15);
+        assert!(s.remote_api_key.is_empty());
+    }
+
+    /// Write non-defaults, read them back: every field round-trips through the row.
+    #[test]
+    fn upsert_then_get_roundtrips() {
+        let conn = mem_db();
+        let s = Settings {
+            mode: "remote".into(),
+            remote_base_url: "http://gpu:8000".into(),
+            remote_api_key: "sk-secret".into(),
+            remote_model: "baidu/Unlimited-OCR".into(),
+            default_quant: "Q4_K_M".into(),
+            llama_bin: "/opt/llama-server".into(),
+            default_dpi: 300,
+            default_max_tokens: 8192,
+            default_prompt: "<|x|>".into(),
+            idle_unload_minutes: 5,
+        };
+        persist(&conn, &s).unwrap();
+        let got = fetch(&conn).unwrap();
+        assert_eq!(got.mode, "remote");
+        assert_eq!(got.remote_base_url, "http://gpu:8000");
+        assert_eq!(got.remote_api_key, "sk-secret");
+        assert_eq!(got.remote_model, "baidu/Unlimited-OCR");
+        assert_eq!(got.default_quant, "Q4_K_M");
+        assert_eq!(got.llama_bin, "/opt/llama-server");
+        assert_eq!(got.default_dpi, 300);
+        assert_eq!(got.default_max_tokens, 8192);
+        assert_eq!(got.default_prompt, "<|x|>");
+        assert_eq!(got.idle_unload_minutes, 5);
+    }
+
+    /// The settings table is a singleton: a second save replaces, never adds a row.
+    #[test]
+    fn upsert_is_singleton() {
+        let conn = mem_db();
+        persist(&conn, &Settings::default()).unwrap();
+        persist(&conn, &Settings::default()).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "settings must hold exactly one row (id = 1)");
     }
 
     /// The remote base URL prefills to llama-server's default host:port.
@@ -174,16 +247,14 @@ mod tests {
         assert_eq!(Settings::default().remote_base_url, "http://127.0.0.1:8080");
     }
 
-    /// camelCase on the wire (regression guard for the serde rename).
+    /// camelCase on the wire (regression guard for the serde rename the frontend
+    /// depends on; the command return serializes this struct directly).
     #[test]
     fn serializes_camel_case() {
-        let json = serde_json::to_string(&SettingsFile {
-            version: 1,
-            settings: Settings::default(),
-        })
-        .unwrap();
+        let json = serde_json::to_string(&Settings::default()).unwrap();
         assert!(json.contains("\"remoteBaseUrl\""));
         assert!(json.contains("\"defaultMaxTokens\""));
+        assert!(json.contains("\"idleUnloadMinutes\""));
         assert!(!json.contains("\"remote_base_url\""));
     }
 }

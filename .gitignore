@@ -16,8 +16,12 @@
 *.imatrix
 *.part
 
+# Things I like to use
 .syntext/
 .synrepo/
 .eatahorse*
 .security-audit/
-Tauri PDF OCR app/
+.mcp.json
+.agent-config-mcp.json
+.claude/
+repomix-output.xml

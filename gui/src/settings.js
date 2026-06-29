@@ -158,7 +158,7 @@ export async function wireCacheControls() {
   async function refreshCacheInfo() {
     try {
       const info = await t.core.invoke("get_cache_info");
-      if (dirEl) dirEl.textContent = (info && info.path) || "—";
+      if (dirEl) dirEl.textContent = (info && info.path) || "-";
       if (sizeEl) sizeEl.textContent = info ? fmtBytes(Number(info.sizeBytes) || 0) : "";
     } catch (err) {
       if (dirEl) dirEl.textContent = "unavailable: " + String(err);
@@ -188,4 +188,172 @@ export async function wireCacheControls() {
       }
     });
   }
+}
+
+// Human-facing labels + per-OS package-manager hints for the external tools, keyed by
+// the backend tool name (list_tools / locate). The hint shown is for the detected host
+// OS (host_os command); used only when a tool is missing and cannot be auto-downloaded
+// (i.e. not Windows; on Windows a Download button is shown instead).
+const TOOL_INFO = {
+  pdftoppm: {
+    label: "pdftoppm (poppler)",
+    brew: "poppler",
+    hints: { macos: "brew install poppler", linux: "apt install poppler-utils  ·  dnf install poppler-utils" },
+  },
+  "llama-server": {
+    label: "llama-server (llama.cpp)",
+    brew: "llama.cpp",
+    hints: { macos: "brew install llama.cpp", linux: "build llama.cpp >= b8530 (no distro package)" },
+  },
+  pandoc: {
+    label: "pandoc (export)",
+    brew: "pandoc",
+    hints: { macos: "brew install pandoc", linux: "apt install pandoc  ·  dnf install pandoc" },
+  },
+};
+
+// Official Homebrew install command, shown (copyable, not auto-run) to macOS users who
+// have no package manager and need tools that aren't directly downloadable.
+const HOMEBREW_INSTALL =
+  '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"';
+
+/** Wire the Settings "Dependencies" panel: list each external tool's status and, on
+ *  Windows, offer a Download button per missing tool (download_tool fetches a pinned,
+ *  sha256-verified build into the cache). Elsewhere, a missing tool shows its package-
+ *  manager hint. Called once on startup. Fail-soft outside the webview. */
+export async function wireDependencies() {
+  let t;
+  try {
+    t = requireTauri();
+  } catch (err) {
+    return;
+  }
+  const list = document.getElementById("depsList");
+  const empty = document.getElementById("depsEmpty");
+  const hint = document.getElementById("depsHint");
+  const refresh = document.getElementById("depsRefresh");
+  if (!list) return;
+
+  // Detect the host OS + Homebrew presence once. OS makes hints OS-correct (the GUI
+  // ships per platform); brew presence decides whether macOS shows an "Install with
+  // Homebrew" button vs. manual guidance. Fail-soft.
+  let os = "unknown";
+  let brew = false;
+  try {
+    os = await t.core.invoke("host_os");
+    brew = await t.core.invoke("brew_available");
+  } catch (err) {
+    // leave defaults; UI degrades to hints
+  }
+
+  // One app-lifetime listener routes tool://download progress to the matching row by
+  // tool name (set as data-tool on the row's status span).
+  if (t.event && t.event.listen) {
+    t.event.listen("tool://download", (e) => {
+      const p = e.payload || {};
+      const cell = list.querySelector('[data-tool-status="' + p.name + '"]');
+      if (cell) cell.textContent = "downloading… " + (p.pct || 0) + "%";
+    });
+  }
+
+  async function render() {
+    let tools;
+    try {
+      tools = await t.core.invoke("list_tools");
+    } catch (err) {
+      if (empty) { empty.hidden = false; empty.textContent = "unavailable: " + String(err); }
+      return;
+    }
+    // Clear previous rows (keep the #depsEmpty node).
+    list.querySelectorAll(".dep-row").forEach((n) => n.remove());
+    if (empty) empty.hidden = true;
+
+    let anyManual = false;
+    for (const tool of tools || []) {
+      const info = TOOL_INFO[tool.name] || { label: tool.name, hints: {} };
+      const row = document.createElement("div");
+      row.className = "dep-row";
+
+      const name = document.createElement("span");
+      name.className = "dep-row__name";
+      name.textContent = info.label;
+
+      const status = document.createElement("span");
+      status.className = "dep-row__status" + (tool.found ? " is-ok" : " is-bad");
+      status.dataset.toolStatus = tool.name;
+      status.textContent = tool.found ? "found" : "not found";
+      if (tool.found && tool.path) status.title = tool.path;
+
+      row.appendChild(name);
+      row.appendChild(status);
+
+      if (!tool.found && tool.downloadable) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "model-btn model-btn--ghost dep-row__get";
+        btn.textContent = "Download";
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          status.textContent = "downloading…";
+          try {
+            await t.core.invoke("download_tool", { name: tool.name });
+            await render(); // re-check; the row rebuilds as "found"
+          } catch (err) {
+            status.textContent = "failed";
+            status.title = String(err);
+            btn.disabled = false;
+          }
+        });
+        row.appendChild(btn);
+      } else if (!tool.found && os === "macos" && brew && info.brew) {
+        // No direct download on macOS (poppler/llama), but brew is present: offer a
+        // one-click `brew install <formula>`.
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "model-btn model-btn--ghost dep-row__get";
+        btn.textContent = "Install with Homebrew";
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          status.textContent = "installing…";
+          try {
+            await t.core.invoke("brew_install", { formula: info.brew });
+            await render();
+          } catch (err) {
+            status.textContent = "failed";
+            status.title = String(err);
+            btn.disabled = false;
+          }
+        });
+        row.appendChild(btn);
+      } else if (!tool.found) {
+        anyManual = true;
+        const h = document.createElement("span");
+        h.className = "dep-row__hint";
+        // macOS without brew: nudge toward installing Homebrew (the only practical way
+        // to get poppler). Otherwise the OS-specific package-manager hint.
+        h.textContent =
+          os === "macos" && !brew
+            ? "needs Homebrew; see below, then `brew install " + (info.brew || tool.name) + "`"
+            : (info.hints && info.hints[os]) || "install via your package manager";
+        row.appendChild(h);
+      }
+      list.appendChild(row);
+    }
+    if (hint) {
+      hint.hidden = !anyManual;
+      if (anyManual) {
+        // On macOS without brew, show the official (copyable) Homebrew install command;
+        // elsewhere a generic recheck nudge.
+        hint.textContent =
+          os === "macos" && !brew
+            ? "Install Homebrew (https://brew.sh), then Recheck:\n" + HOMEBREW_INSTALL
+            : "Install the missing tools with your package manager, then click Recheck.";
+      } else {
+        hint.textContent = "";
+      }
+    }
+  }
+
+  if (refresh) refresh.addEventListener("click", render);
+  await render();
 }

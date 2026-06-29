@@ -406,6 +406,20 @@ pub fn locate(bin: &str) -> Option<PathBuf> {
             }
         }
     }
+    // Tools fetched by the on-demand downloader live under <cache>/tools/<tool>/...
+    // (Windows). Skip the walk unless that dir actually exists (it only ever exists
+    // after a Windows download), so non-Windows hosts pay one stat here instead of
+    // six failed `read_dir` calls per `locate()`. PATH/Homebrew still wins above.
+    if let Ok(cache) = crate::model::cache_dir(None) {
+        let tools = crate::tools::tools_dir(&cache);
+        if tools.exists() {
+            for name in &names {
+                if let Some(p) = crate::tools::find_exe(&tools, name) {
+                    return Some(p);
+                }
+            }
+        }
+    }
     None
 }
 

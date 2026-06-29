@@ -20,7 +20,7 @@ import {
   markCachedQuants,
   refreshModelStatus,
 } from "./model.js";
-import { wireSettings, wireCacheControls } from "./settings.js";
+import { wireSettings, wireCacheControls, wireDependencies } from "./settings.js";
 import { initNotifications } from "./toasts.js";
 import { wirePageSelection, renderEffectiveSummary } from "./options.js";
 import { preflightOnLoad } from "./ocr-events.js";
@@ -55,11 +55,23 @@ window.addEventListener("DOMContentLoaded", () => {
   // sequentially on one click instead of only the last typed path.
   let queuedPaths = [];
   const getQueuedPaths = () => queuedPaths.slice();
-  wireRunButton(ui, mdPane, unlistensRef, library, board, getQueuedPaths);
+  wireRunButton(ui, mdPane, unlistensRef, getQueuedPaths);
   // EH-0006 bite 4: drag-drop PDF import onto the Library grid. Wired once on app
   // load; the listeners live for the app lifetime and are scoped to the Library
   // view inside the handler. Fail-soft outside the webview (plain browser).
-  wireLibraryDrop(ui, mdPane, unlistensRef, library, board);
+  wireLibraryDrop(ui, mdPane, unlistensRef);
+
+  // Backend-owned job lifecycle: run_ocr writes a `running` row when a file starts
+  // and flips it to done/failed when it ends, emitting `jobs://changed` each time.
+  // Reload the Library + Board so the Workflow board updates live (no tab switch).
+  // App-lifetime listener (like the drag-drop ones), fail-soft outside the webview.
+  const jobsEv = window.__TAURI__ && window.__TAURI__.event;
+  if (jobsEv && jobsEv.listen) {
+    jobsEv.listen("jobs://changed", () => {
+      library.load();
+      board.load();
+    });
+  }
 
   // Model load/remote wiring: engine tabs (local/remote), the Load/Unload bar,
   // the app-lifetime load-progress listeners, and the settings panel. Load
@@ -74,6 +86,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   markCachedQuants();
   wireCacheControls();
+  wireDependencies();
   refreshModelStatus(ui);
   // The backend idle-unload watcher drops the warm model after N idle minutes and
   // emits model://unloaded; refresh the badge + Run gate so the UI reflects it.

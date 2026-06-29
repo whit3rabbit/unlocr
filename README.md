@@ -4,7 +4,10 @@
 
 A fast, lightweight tool to OCR PDFs into clean Markdown. It is powered by the **[Unlimited-OCR](https://huggingface.co/sahilchachra/Unlimited-OCR-GGUF)** model (DeepSeek-OCR 3B VLM) running locally via **`llama.cpp`** (GGUF).
 
+Currently, a WIP.
+
 ### Key Features
+
 *   **Local & Secure**: Runs entirely offline on your CPU or GPU.
 *   **Auto-cached**: Model weights download automatically from Hugging Face on first run.
 *   **High Performance**: Uses a single persistent `llama-server` background process to avoid reloading overhead across pages.
@@ -18,7 +21,21 @@ A fast, lightweight tool to OCR PDFs into clean Markdown. It is powered by the *
 To run `unlocr`, you need:
 1.  **poppler** (provides `pdftoppm` for rasterizing PDF pages to images).
 2.  **llama.cpp** build `>= b8530` (PR [#17400](https://github.com/ggml-org/llama.cpp/pull/17400) merged 2026-03-25 is required to support DeepSeek-OCR).
-3.  **Rust Toolchain** (only if building from source or installing via cargo).
+3.  **pandoc** *(optional)* — only for the GUI's "export to DOCX/ODT/RTF/HTML/TXT" feature. OCR works without it.
+4.  **Rust Toolchain** (only if building from source or installing via cargo).
+
+#### How prerequisites are provided (per platform)
+
+The **CLI** always expects `pdftoppm` and `llama-server` already on your `PATH`. The **Desktop GUI** makes this easier, differently per OS:
+
+| OS | poppler (`pdftoppm`) | llama.cpp (`llama-server`) | pandoc (export) |
+|----|----------------------|----------------------------|-----------------|
+| **Windows** | GUI downloads it for you | GUI downloads a **CPU** build for you | GUI downloads it for you |
+| **Linux** | installed by the `.deb`/`.rpm` (declared dep) | **install manually** (no apt/dnf package) | installed by the `.deb`/`.rpm` (recommended dep) |
+| **macOS** | `brew install poppler` (cask dep) | **`brew install llama.cpp`** (Homebrew required) | GUI downloads it, or `brew install pandoc` |
+
+> [!NOTE]
+> In the GUI, open **Settings → Dependencies** to see what is found/missing and to fetch what's available for your platform (a sha256-pinned download on Windows / pandoc on macOS, or a one-click `brew install` on macOS). Windows GPU users should install their own CUDA/Vulkan `llama.cpp` build instead of the bundled CPU one.
 
 ### Model Variants & System Specs
 By default, `unlocr` runs a quantized GGUF on `llama.cpp` (CPU or GPU-offloaded). You can also run the full, unquantized model on a dedicated GPU via `vLLM`.
@@ -30,16 +47,14 @@ By default, `unlocr` runs a quantized GGUF on `llama.cpp` (CPU or GPU-offloaded)
 | **GGUF** | `BF16` | 5.47 GB | ~8 GB RAM | llama.cpp | `--quality best` |
 | **Full Model** | `DeepSeek-OCR` | ~6.7 GB | 16 GB+ VRAM | vLLM | `--gpu` |
 
----
-
-## How to Install by OS
+### How to Install by OS
 
 Select your operating system below for quick setup instructions.
 
-### macOS
-Install the prerequisites:
+#### macOS
+Homebrew is required (mainly for `llama.cpp`, which has no standalone macOS binary). Install the prerequisites:
 ```bash
-brew install llama.cpp poppler
+brew install llama.cpp poppler   # pandoc optional, only for GUI export: brew install pandoc
 ```
 Then install `unlocr` using Homebrew:
 ```bash
@@ -53,25 +68,26 @@ brew install --cask whit3rabbit/tap/unlocr
 > For the unsigned macOS GUI app, Homebrew handles quarantine flags automatically. If downloading manually, run:
 > `xattr -dr com.apple.quarantine "/Applications/unlocr.app"`
 
-### Linux
-1. Install `poppler` and `llama.cpp` using your package manager (ensure `llama-server` and `pdftoppm` are in your `PATH`).
-2. Download the pre-built CLI binary or GUI installer (`.AppImage`, `.deb`) from [GitHub Releases](../../releases).
+#### Linux
+1. Download the pre-built CLI binary or GUI installer (`.AppImage`, `.deb`, `.rpm`) from [GitHub Releases](../../releases).
+2. The `.deb`/`.rpm` declares **poppler** (and **pandoc** for GUI export) as dependencies, so your package manager pulls them in automatically.
+3. **`llama.cpp` must be installed manually** — it is not in apt/dnf. Build it (`>= b8530`) or fetch a release binary and put `llama-server` on your `PATH`. The package's post-install step warns if it is missing.
 
-### Windows
-1. Ensure `llama-server` and `pdftoppm` are installed and added to your `PATH`.
-2. Download the CLI executable or the Windows GUI Installer (`.msi`) from [GitHub Releases](../../releases).
-3. Run the installer or script:
+#### Windows
+1. Download the CLI executable or the Windows GUI Installer (`.msi`) from [GitHub Releases](../../releases).
+2. **GUI**: no manual setup — open **Settings → Dependencies** and click Download for any missing tool. The GUI fetches sha256-pinned `pdftoppm`, a CPU `llama-server`, and `pandoc` into its cache (GPU users should install their own `llama.cpp` build).
+3. **CLI**: ensure `llama-server` and `pdftoppm` are installed and on your `PATH`, then run the installer or script:
    ```powershell
    powershell -ExecutionPolicy Bypass -File packaging\windows\install.ps1
    ```
 
-### Alternative: Install via Cargo (CLI)
+#### Alternative: Install via Cargo (CLI)
 If you have the Rust toolchain installed:
 ```bash
 cargo install unlocr
 ```
 
-### Alternative: Build from Source
+#### Alternative: Build from Source
 ```bash
 # Clone the repository and run the install script (macOS/Linux)
 ./install.sh

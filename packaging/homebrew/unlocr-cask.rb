@@ -17,6 +17,10 @@ cask "unlocr" do
   homepage "https://github.com/whit3rabbit/unlocr"
 
   depends_on formula: "poppler"
+  # pandoc is an OPTIONAL export-only dep (md -> docx/odt/rtf/html/txt). Casks have
+  # no weak deps, so rather than force it on every install (and block install when
+  # it is unavailable), it is documented as a caveats note below; missing pandoc
+  # only disables export, never OCR.
 
   app "unlocr.app"
 
@@ -30,6 +34,9 @@ cask "unlocr" do
 
     The OCR engine also needs llama-server (llama.cpp build >= b8530):
       brew install llama.cpp
+
+    Optional: install pandoc to enable review-pane export (md -> docx/odt/rtf/html/txt):
+      brew install pandoc
   EOS
 
   zap trash: [

@@ -31,6 +31,11 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# SQLite backing for the jobs/settings/notifications stores (replaces the JSON
+# files under the cache dir). `bundled` compiles libsqlite3 into the binary via
+# cc (build-time C compiler), so there is no runtime SQLite system dep. Sync API;
+# one process-wide Connection behind a Mutex (see db.rs).
+rusqlite = { version = "0.40", features = ["bundled"] }
 # Path dep on the repo-root `unlocr` crate. Its library target (src/lib.rs)
 # exposes the clap-free run_ocr_job / OcrOptions / Progress API this bridge calls.
 # Additive: the unlocr package and its release profile are untouched.

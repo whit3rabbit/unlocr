@@ -1091,6 +1091,47 @@ button {
   cursor: default;
 }
 
+/* Settings > Dependencies panel: one row per external tool (status + Download/hint). */
+.settings__deps {
+  margin-top: 18px;
+}
+.settings__deps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.dep-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.dep-row__name {
+  min-width: 200px;
+  color: var(--hi);
+  font-size: 13px;
+}
+.dep-row__status {
+  font-size: 12px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+.dep-row__status.is-ok {
+  color: var(--green);
+}
+.dep-row__status.is-bad {
+  color: var(--red);
+}
+.dep-row__hint {
+  color: var(--dim);
+  font-size: 12px;
+}
+/* Footer hint may carry a copyable multi-line Homebrew install command. */
+#depsHint {
+  white-space: pre-wrap;
+  user-select: text;
+  font-size: 12px;
+}
+
 /* ---------- EasyMDE dark-theme overrides ----------
    EasyMDE ships its own (light) CSS (assets/easymde.min.css). These rules retheme it
    to the app palette and make it fill the review pane. The toolbar uses text-label

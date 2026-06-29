@@ -7,6 +7,7 @@ pub mod model;
 pub mod pdf;
 pub mod preflight;
 pub mod server;
+pub mod tools;
 
 // Note: ocr.rs is intentionally NOT a lib module here. It is bin-only CLI glue
 // (`run_pdf(&Args)`) that converts the clap Args into the clap-free OcrOptions

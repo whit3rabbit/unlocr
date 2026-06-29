@@ -11,6 +11,14 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use unlocr::{OcrOptions, Progress};
 
 use crate::state::{AppState, Backend};
+use crate::store::{self, JobOptions};
+
+/// Best-effort notify the webview that the job store changed (a job moved
+/// running -> done/failed) so the Library + Board reload live. Empty payload: the
+/// frontend just re-reads `list_jobs`. A failed emit never aborts the run.
+fn emit_jobs_changed(app: &AppHandle) {
+    let _ = app.emit("jobs://changed", ());
+}
 
 /// Serializable payload for the `ocr://page` event. The frontend listens for
 /// this to render per-page progress. Kept flat + camelCase so the JS side reads
@@ -90,6 +98,138 @@ pub(crate) fn write_text_file(
         .map_err(|e| format!("failed to write {}: {e}", canonical.display()))
 }
 
+/// Per-tool availability for the Settings "Dependencies" panel: whether the external
+/// tool resolves (PATH/Homebrew/cache) and whether this platform can auto-download it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolStatus {
+    pub name: String,
+    pub found: bool,
+    pub path: Option<String>,
+    pub downloadable: bool,
+}
+
+/// The OS this build targets: "windows" | "macos" | "linux" | "unknown". Compile-time
+/// (`cfg!`), which is correct here because the GUI ships a separate bundle per platform.
+/// Lets the frontend show OS-correct dependency hints (the backend already gates the
+/// auto-download to Windows via `downloadable`).
+#[tauri::command]
+pub(crate) fn host_os() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "unknown"
+    }
+}
+
+/// Report which external tools resolve and which can be auto-downloaded (Windows only).
+/// Drives the Settings "Dependencies" panel (status + Download buttons).
+#[tauri::command]
+pub(crate) fn list_tools() -> Vec<ToolStatus> {
+    let dl = unlocr::tools::downloadable();
+    ["pandoc", "pdftoppm", "llama-server"]
+        .iter()
+        .map(|name| {
+            let path = unlocr::preflight::locate(name);
+            ToolStatus {
+                name: (*name).to_string(),
+                found: path.is_some(),
+                path: path.map(|p| p.display().to_string()),
+                downloadable: dl.contains(name),
+            }
+        })
+        .collect()
+}
+
+/// Progress payload for `tool://download` (mirrors the OCR download events): one chunk
+/// of a tool download. `pct` is 0..=100; `done`/`total` are byte counts.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolDownload {
+    name: String,
+    pct: u8,
+    done: u64,
+    total: u64,
+}
+
+/// Download + extract a pinned external tool (pandoc / pdftoppm / llama-server) into the
+/// app cache, returning its executable path. Windows-only (errors elsewhere with a
+/// package-manager hint). Verifies the asset's sha256 before extraction. Emits
+/// `tool://download` progress; runs on spawn_blocking (network + unzip).
+#[tauri::command]
+pub(crate) async fn download_tool(app: AppHandle, name: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let cache = unlocr::model::cache_dir(None).map_err(|e| e.to_string())?;
+        let mut on_progress = |p: Progress| {
+            if let Progress::Download {
+                name,
+                pct,
+                done,
+                total,
+            } = p
+            {
+                let _ = app.emit(
+                    "tool://download",
+                    ToolDownload {
+                        name,
+                        pct,
+                        done,
+                        total,
+                    },
+                );
+            }
+        };
+        let path = unlocr::tools::ensure_tool(&cache, &name, &mut on_progress)
+            .map_err(|e| e.to_string())?;
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("tool download worker join failed: {e}"))?
+}
+
+/// Whether Homebrew is on PATH. Lets the macOS Dependencies panel show an "Install with
+/// Homebrew" button (vs. a manual hint) for tools that have no direct download on macOS
+/// (poppler, llama-server).
+#[tauri::command]
+pub(crate) fn brew_available() -> bool {
+    unlocr::preflight::locate("brew").is_some()
+}
+
+/// Run `brew install <formula>` for one of the app's known formulae and return brew's
+/// combined output. Restricted to an allowlist so the renderer cannot drive brew to
+/// install arbitrary packages. macOS path (brew must be present); runs on spawn_blocking
+/// (network + build can take minutes).
+#[tauri::command]
+pub(crate) async fn brew_install(formula: String) -> Result<String, String> {
+    const ALLOWED: &[&str] = &["poppler", "llama.cpp", "pandoc"];
+    if !ALLOWED.contains(&formula.as_str()) {
+        return Err(format!("not an installable formula: {formula}"));
+    }
+    let brew = unlocr::preflight::locate("brew")
+        .ok_or_else(|| "Homebrew not found on PATH. Install it from https://brew.sh".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let out = std::process::Command::new(&brew)
+            .arg("install")
+            .arg(&formula)
+            .output()
+            .map_err(|e| format!("failed to run brew: {e}"))?;
+        if out.status.success() {
+            Ok(format!("installed {formula}"))
+        } else {
+            Err(format!(
+                "brew install {formula} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    })
+    .await
+    .map_err(|e| format!("brew worker join failed: {e}"))?
+}
+
 /// Map a frontend export format to the pandoc writer name and output file extension.
 /// Restricting to this fixed set (not an arbitrary string) keeps the renderer from
 /// passing pandoc an unexpected writer. `txt` uses pandoc's `plain` writer (strips
@@ -122,7 +262,16 @@ pub(crate) async fn export_markdown(
     let (writer, ext) =
         pandoc_target(&format).ok_or_else(|| format!("unsupported export format: {format}"))?;
     let pandoc = unlocr::preflight::locate("pandoc").ok_or_else(|| {
-        "pandoc not found on PATH. Install it (e.g. `brew install pandoc`) to export.".to_string()
+        // Cross-platform install hint: pandoc is an optional export-only dep, so a
+        // missing one is common. Cover the package managers per OS.
+        concat!(
+            "pandoc not found on PATH; it is required to export. Install it:\n",
+            "  macOS:          brew install pandoc\n",
+            "  Debian/Ubuntu:  sudo apt install pandoc\n",
+            "  Fedora:         sudo dnf install pandoc\n",
+            "  Windows:        scoop install pandoc  (or: winget install JohnMacFarlane.Pandoc)"
+        )
+        .to_string()
     })?;
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         // Validate the source against the app-produced allowlist (same guard as read),
@@ -131,6 +280,22 @@ pub(crate) async fn export_markdown(
         let allowed = allowed_output_paths(&state);
         let canonical = check_readable(&src_path, &allowed)?;
         let out = canonical.with_extension(ext);
+        // Refuse to overwrite a pre-existing file unless WE wrote it this session
+        // (a re-export of the same format). An unrelated same-named file the user
+        // owns is left intact and surfaced as an error, so exporting can never
+        // silently destroy data.
+        let already_exported = state
+            .exported_paths
+            .lock()
+            .map(|g| g.contains(&out))
+            .unwrap_or(false);
+        if out.exists() && !already_exported {
+            return Err(format!(
+                "export target already exists and was not produced by unlocr: {}. \
+                 Remove it first or choose another format.",
+                out.display()
+            ));
+        }
         // `-s` (standalone) so html/rtf get a complete document, not a fragment; it is
         // a no-op for the always-standalone docx/odt writers.
         let output = std::process::Command::new(&pandoc)
@@ -145,6 +310,10 @@ pub(crate) async fn export_markdown(
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
+        // Remember we produced this file so a later re-export may overwrite it.
+        if let Ok(mut g) = state.exported_paths.lock() {
+            g.insert(out.clone());
+        }
         Ok(out.to_string_lossy().into_owned())
     })
     .await
@@ -155,20 +324,36 @@ pub(crate) async fn export_markdown(
 /// session plus the non-empty `output_path`s persisted in the job store. Paths that
 /// no longer resolve (deleted output) are simply absent, so a stale store entry
 /// fails closed rather than widening scope.
+///
+/// The job-store half is cached in `AppState::job_output_cache` and invalidated on
+/// every job mutation (start/finish/delete/clear), so a read does not re-scan the
+/// whole jobs table and re-stat every output each time. `peek_job_paths` is a
+/// single-column query (no full `Job` hydration).
 fn allowed_output_paths(state: &AppState) -> HashSet<PathBuf> {
     let mut set: HashSet<PathBuf> = state
         .read_allow
         .lock()
         .map(|g| g.clone())
         .unwrap_or_default();
-    for job in crate::store::load_jobs() {
-        if job.output_path.is_empty() {
-            continue;
-        }
-        if let Ok(c) = std::fs::canonicalize(&job.output_path) {
-            set.insert(c);
+    // Fast path: the job outputs are already canonicalized and cached.
+    if let Ok(cache) = state.job_output_cache.lock() {
+        if let Some(paths) = cache.as_ref() {
+            set.extend(paths.iter().cloned());
+            return set;
         }
     }
+    // Slow path: query just the output_path column, canonicalize each that still
+    // exists, and stash the result so subsequent reads hit the fast path.
+    let mut built = HashSet::new();
+    for p in crate::store::peek_job_outputs().unwrap_or_default() {
+        if let Ok(c) = std::fs::canonicalize(&p) {
+            built.insert(c);
+        }
+    }
+    if let Ok(mut cache) = state.job_output_cache.lock() {
+        *cache = Some(built.clone());
+    }
+    set.extend(built);
     set
 }
 
@@ -181,12 +366,15 @@ fn allowed_output_paths(state: &AppState) -> HashSet<PathBuf> {
 ///    `foo.md -> /etc/shadow` symlink.
 /// 3. Exact match against the backend-derived `allowed` set (not a dir prefix).
 fn check_readable(path: &str, allowed: &HashSet<PathBuf>) -> Result<PathBuf, String> {
-    if Path::new(path).extension().and_then(|e| e.to_str()) != Some("md") {
+    // Case-insensitive `.md` check (matches `store::is_md`): a `.MD`/`.Md` output is
+    // app-produced and must be readable/writable, not rejected as non-markdown while
+    // `delete_output_file` (which uses the same `is_md`) would still delete it.
+    if !store::is_md(Path::new(path)) {
         return Err(format!("refusing to read non-markdown path: {path}"));
     }
     let canonical =
         std::fs::canonicalize(path).map_err(|e| format!("cannot resolve path {path}: {e}"))?;
-    if canonical.extension().and_then(|e| e.to_str()) != Some("md") {
+    if !store::is_md(&canonical) {
         return Err(format!(
             "refusing to read non-markdown path after resolution: {}",
             canonical.display()
@@ -288,6 +476,10 @@ pub(crate) async fn run_ocr(
     repeat_penalty: Option<f32>,
     first_page: Option<u32>,
     last_page: Option<u32>,
+    // Informational only (the model is already loaded warm): recorded on the job
+    // row so the Library/Board show the quant the run used. Falls back to the
+    // default quant if the frontend omits it.
+    quant: Option<String>,
 ) -> Result<Vec<String>, String> {
     // Per-run options from defaults + the fields the frontend sent. `quant`/`port`
     // are irrelevant here (the model is already loaded/held). image_max_tokens /
@@ -365,6 +557,13 @@ pub(crate) async fn run_ocr(
     // here (synchronously, before dispatch) shrinks that window to IPC transit.
     {
         let state = app.state::<AppState>();
+        // Clear any stale `cancel` at run START. `stop_ocr` sets cancel=true even
+        // when no run is in flight (a Stop with no pid to kill) or when a Stop lands
+        // in a prior run's tail window after its `swap(false)` already ran; without
+        // this reset the next run aborts at the first page with "stopped". A Stop
+        // meant for THIS run, clicked after this line, re-sets cancel and is still
+        // honored at the first page-boundary check, so this clears only STALE flags.
+        state.cancel.store(false, Ordering::SeqCst);
         *state.last_used.lock().unwrap_or_else(|p| p.into_inner()) =
             Some(std::time::Instant::now());
     }
@@ -386,6 +585,16 @@ pub(crate) async fn run_ocr(
         // Set true if stop_ocr fired mid-run; handled after the model guard drops.
         let mut stopped = false;
 
+        // Options snapshot recorded on each job row (cloned per input). quant is
+        // load-time/informational; default it when the frontend omits it.
+        let job_opts = JobOptions::from_opts(
+            quant.as_deref().unwrap_or(&opts.quant),
+            opts.max_tokens,
+            opts.dpi,
+            &opts.prompt,
+            opts.keep_images,
+        );
+
         // Hold the model lock for the whole batch (inner scope so the guard drops
         // before we may need to re-lock to clear a stopped run's dead model). The
         // local Server cannot be cloned, and serializing runs is fine for one user.
@@ -397,14 +606,26 @@ pub(crate) async fn run_ocr(
             let lm = guard.as_ref().ok_or("load a model first")?;
             is_local = matches!(&lm.backend, Backend::Local(_));
 
-            // NOTE: do NOT reset `cancel` here. A Stop clicked in the brief window
-            // between the JS invoke and this point would be silently overwritten.
-            // `cancel` is false on entry by invariant: load_model clears it, and a
-            // clean run clears it at the end (below); a stopped run drops the model,
-            // so the next run can't start until a reload re-clears it.
+            // `cancel` is cleared at run START (above, before dispatch), so it is
+            // false on entry here. Do NOT re-clear it inside the loop: a Stop clicked
+            // during the run sets it and must stay set until the stopped branch (or
+            // the tail swap below) consumes it.
 
             for input in &inputs {
                 let input_path = PathBuf::from(input);
+
+                // Insert a `running` row at the START of this file so the Board's
+                // running column is live (the lifecycle is backend-owned). Keep the
+                // Job so we can finish it to done/failed below; best-effort, a store
+                // failure logs but never aborts the run. Notify the views to reload.
+                let job = match store::start_job(input, job_opts.clone()) {
+                    Ok(j) => Some(j),
+                    Err(e) => {
+                        eprintln!("[run_ocr] start_job failed for {input}: {e}");
+                        None
+                    }
+                };
+                emit_jobs_changed(&app);
 
                 // Per-input progress sink: forward Page (per-page bar) and PartialText
                 // (live token stream) to the webview. Best-effort emit (a failed IPC
@@ -484,11 +705,21 @@ pub(crate) async fn run_ocr(
                     Ok(v) => v,
                     Err(e) if state.cancel.load(Ordering::SeqCst) => {
                         let _ = e;
+                        // User stop: finish this file's row as failed with the intent.
+                        if let Some(j) = &job {
+                            let _ = store::finish_job(&j.id, "failed", "", "stopped by user");
+                            emit_jobs_changed(&app);
+                        }
                         stopped = true;
                         break;
                     }
                     Err(e) => {
-                        errors.push(format!("{}: {}", input_path.display(), e));
+                        let msg = format!("{}: {}", input_path.display(), e);
+                        if let Some(j) = &job {
+                            let _ = store::finish_job(&j.id, "failed", "", &msg);
+                            emit_jobs_changed(&app);
+                        }
+                        errors.push(msg);
                         continue;
                     }
                 };
@@ -510,54 +741,73 @@ pub(crate) async fn run_ocr(
 
                 // Write to disk when a folder OR an explicit filename was given; only an
                 // empty folder AND no filename keeps the result in memory (results = md).
-                if out_dir.as_os_str().is_empty() && out_file.is_none() {
-                    results.push(md);
-                } else {
-                    let stem = input_path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("output");
-                    // Shared resolver (with the CLI): out_file wins, else {stem}.md under
-                    // out_dir; .md appended when missing, absolute out_file used verbatim.
-                    let out_path = unlocr::resolve_output_path(
-                        &out_dir,
-                        out_file.as_deref().map(Path::new),
-                        stem,
-                    );
-                    // Create the parent first (a custom/absolute out_file may target a
-                    // not-yet-created dir), matching the CLI's create_dir_all.
-                    let mut write_failed = false;
-                    if let Some(parent) = out_path.parent() {
-                        if let Err(e) = std::fs::create_dir_all(parent) {
-                            errors.push(format!("failed to create {}: {e}", parent.display()));
-                            write_failed = true;
-                        }
-                    }
-                    if !write_failed {
-                        if let Err(e) = std::fs::write(&out_path, &md) {
-                            errors.push(format!("failed to write {}: {e}", out_path.display()));
-                            write_failed = true;
-                        }
-                    }
-                    if !write_failed {
-                        let abs_path = if out_path.is_absolute() {
-                            out_path
-                        } else {
-                            match std::env::current_dir() {
-                                Ok(cwd) => cwd.join(&out_path),
-                                Err(_) => out_path,
+                // The branch yields this file's terminal record (status, output, error)
+                // so the job row below is finished consistently for every path.
+                let (job_status, job_out, job_err): (&str, String, String) =
+                    if out_dir.as_os_str().is_empty() && out_file.is_none() {
+                        results.push(md);
+                        ("done", String::new(), String::new())
+                    } else {
+                        let stem = input_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("output");
+                        // Shared resolver (with the CLI): out_file wins, else {stem}.md
+                        // under out_dir; .md appended when missing, absolute used verbatim.
+                        let out_path = unlocr::resolve_output_path(
+                            &out_dir,
+                            out_file.as_deref().map(Path::new),
+                            stem,
+                        );
+                        // Create the parent first (a custom/absolute out_file may target a
+                        // not-yet-created dir), matching the CLI's create_dir_all.
+                        let mut werr: Option<String> = None;
+                        if let Some(parent) = out_path.parent() {
+                            if let Err(e) = std::fs::create_dir_all(parent) {
+                                werr = Some(format!("failed to create {}: {e}", parent.display()));
                             }
-                        };
-                        // Authorize the review pane to read THIS file back. Canonicalize
-                        // so it matches read_text_file's canonical comparison (the file
-                        // exists now); fall back to the absolute path if that fails.
-                        let canon =
-                            std::fs::canonicalize(&abs_path).unwrap_or_else(|_| abs_path.clone());
-                        if let Ok(mut g) = state.read_allow.lock() {
-                            g.insert(canon);
                         }
-                        results.push(abs_path.display().to_string());
-                    }
+                        if werr.is_none() {
+                            if let Err(e) = std::fs::write(&out_path, &md) {
+                                werr = Some(format!("failed to write {}: {e}", out_path.display()));
+                            }
+                        }
+                        match werr {
+                            // OCR produced output but the file write failed: record the
+                            // run as failed with the write error (the user got no file).
+                            Some(e) => {
+                                errors.push(e.clone());
+                                ("failed", String::new(), e)
+                            }
+                            None => {
+                                let abs_path = if out_path.is_absolute() {
+                                    out_path
+                                } else {
+                                    match std::env::current_dir() {
+                                        Ok(cwd) => cwd.join(&out_path),
+                                        Err(_) => out_path,
+                                    }
+                                };
+                                // Authorize the review pane to read THIS file back.
+                                // Canonicalize so it matches read_text_file's canonical
+                                // comparison; fall back to the absolute path if that fails.
+                                let canon = std::fs::canonicalize(&abs_path)
+                                    .unwrap_or_else(|_| abs_path.clone());
+                                if let Ok(mut g) = state.read_allow.lock() {
+                                    g.insert(canon);
+                                }
+                                let p = abs_path.display().to_string();
+                                results.push(p.clone());
+                                ("done", p, String::new())
+                            }
+                        }
+                    };
+
+                // Finish this file's job row at its terminal state and notify the
+                // Library/Board to reload. Best-effort, like start_job above.
+                if let Some(j) = &job {
+                    let _ = store::finish_job(&j.id, job_status, &job_out, &job_err);
+                    emit_jobs_changed(&app);
                 }
             }
         } // model guard dropped here
@@ -606,6 +856,9 @@ pub(crate) async fn run_ocr(
     // idle clock from when the run finished, not when it started.
     {
         let state = app_for_join.state::<AppState>();
+        // A run writes job rows (start_job/finish_job); the cached output allowlist
+        // is now stale, so the next review-pane read rebuilds it.
+        state.invalidate_job_outputs();
         *state.last_used.lock().unwrap_or_else(|p| p.into_inner()) =
             Some(std::time::Instant::now());
     }

@@ -410,7 +410,7 @@ pub(crate) fn unload_model(state: State<'_, AppState>) -> ModelStatus {
 /// Stop an in-flight run. Sets the cancel flag and kills the held local
 /// llama-server by pid so the in-flight stream read aborts immediately (run_ocr
 /// remaps the resulting error to "stopped"). The killed server cannot serve
-/// again, so the user must reload the model before the next run — that is the
+/// again, so the user must reload the model before the next run; that is the
 /// intended Stop-only tradeoff (no pause/resume; llama-server can't pause).
 /// Remote backend has no pid stashed, so stop cannot abort an in-flight remote
 /// run; it only sets the flag.
@@ -530,8 +530,9 @@ fn dir_size(dir: &std::path::Path) -> u64 {
 pub(crate) fn get_cache_info() -> Result<CacheInfo, String> {
     let cache = unlocr::model::cache_dir(None).map_err(|e| e.to_string())?;
     let path = cache.display().to_string();
-    // Sum the size of every .gguf file (model + mmproj). Other loose files (logs,
-    // settings.json, jobs.json) are excluded — they are not reclaimable model data.
+    // Sum the size of every .gguf file (model + mmproj). Other loose files (logs)
+    // are excluded; they are not reclaimable model data. (The jobs/settings/
+    // notifications stores live in unlocr.db under the app-data dir, not here.)
     let gguf_bytes: u64 = std::fs::read_dir(&cache)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
@@ -555,7 +556,8 @@ pub(crate) fn get_cache_info() -> Result<CacheInfo, String> {
 
 /// Delete all .gguf files from the model cache (the model and projector GGUFs for
 /// every quant) AND the previews/ dir (rendered page PNGs, regenerable and otherwise
-/// unbounded). Other files (settings.json, jobs.json) are left intact. Any
+/// unbounded). Other files are left intact (the jobs/settings/notifications store
+/// lives in unlocr.db under the app-data dir, not in this cache). Any
 /// currently-loaded model is NOT unloaded first: the caller is responsible for
 /// unloading before clearing if that matters. Errors are returned as a string so the
 /// frontend can surface them inline.

@@ -69,6 +69,26 @@ fn check_digest(name: &str, actual_hex: &str) -> DigestCheck {
     }
 }
 
+/// sha256 of a byte slice as lowercase hex. Shared with the Windows tools
+/// downloader (`tools.rs`) so there is one integrity-hash implementation.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex_from_digest(hasher.finalize())
+}
+
+/// Lowercase-hex encode a sha256 digest (the shared tail of `file_sha256` and
+/// `sha256_hex`).
+fn hex_from_digest(digest: impl AsRef<[u8]>) -> String {
+    use std::fmt::Write;
+    let mut hex = String::with_capacity(64);
+    for b in digest.as_ref() {
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
+}
+
 /// sha256 of a file as lowercase hex, streamed so a multi-GB GGUF never loads into
 /// memory. Hashing the finished `.part` (rather than incrementally during the
 /// stream) keeps the resume path correct: the bytes already on disk are included.
@@ -84,12 +104,7 @@ fn file_sha256(path: &Path) -> Res<String> {
         }
         hasher.update(&buf[..n]);
     }
-    let mut hex = String::with_capacity(64);
-    for b in hasher.finalize() {
-        use std::fmt::Write;
-        let _ = write!(hex, "{b:02x}");
-    }
-    Ok(hex)
+    Ok(hex_from_digest(hasher.finalize()))
 }
 
 pub struct ModelFiles {
@@ -122,6 +137,28 @@ fn base_cache_dir() -> Res<PathBuf> {
     } else {
         let home = std::env::var("HOME")?;
         Ok(PathBuf::from(home).join(".cache"))
+    }
+}
+
+/// Per-OS app-DATA base dir (user data, not regenerable cache): mirrors
+/// `base_cache_dir`'s XDG-first + OS switch but for data locations. Public so the
+/// GUI's SQLite store (`db.rs`) resolves its data dir with the same logic instead
+/// of re-deriving the OS ladder in a second crate.
+pub fn base_data_dir() -> Res<PathBuf> {
+    if let Ok(x) = std::env::var("XDG_DATA_HOME") {
+        if !x.is_empty() {
+            return Ok(PathBuf::from(x));
+        }
+    }
+    if cfg!(target_os = "macos") {
+        let home = std::env::var("HOME")?;
+        Ok(PathBuf::from(home).join("Library/Application Support"))
+    } else if cfg!(target_os = "windows") {
+        let appdata = std::env::var("APPDATA")?;
+        Ok(PathBuf::from(appdata))
+    } else {
+        let home = std::env::var("HOME")?;
+        Ok(PathBuf::from(home).join(".local/share"))
     }
 }
 

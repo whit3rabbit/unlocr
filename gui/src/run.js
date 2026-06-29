@@ -6,7 +6,6 @@
 import { requireTauri } from "./tauri.js";
 import { subscribeOcrEvents } from "./ocr-events.js";
 import { readRunOptions } from "./options.js";
-import { recordRunOutcome } from "./jobs.js";
 import { refreshModelStatus } from "./model.js";
 import { parentDirOf, splitPath, jobBaseName } from "./paths.js";
 import { showToast, removeToast, addNotification } from "./toasts.js";
@@ -21,8 +20,13 @@ import { showToast, removeToast, addNotification } from "./toasts.js";
  *  caller (drag-drop) can decide whether to keep importing the next file.
  *
  *  `ui` may be null when there is no transcript UI to drive (kept optional so a
- *  future background importer can reuse the path without a progress surface). */
-export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, board, outOverride) {
+ *  future background importer can reuse the path without a progress surface).
+ *
+ *  The job store record (running -> done/failed) is owned by the backend `run_ocr`
+ *  loop now; it emits `jobs://changed` and the Library/Board reload live (the
+ *  listener is wired once in main.js). This path only drives the transcript UI,
+ *  the review pane, and the toast/bell notifications. */
+export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) {
   let t;
   try {
     t = requireTauri();
@@ -98,6 +102,9 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, boar
       repeatPenalty: opts.repeatPenalty,
       firstPage: opts.firstPage,
       lastPage: opts.lastPage,
+      // Informational: recorded on the backend-written job row so the
+      // Library/Board show the quant the run used (the model is already warm).
+      quant: opts.quant,
     });
 
     // run_ocr always returns WRITTEN FILE PATHS here: outDir is never empty (it
@@ -145,7 +152,6 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, boar
         ui.setRunning(false);
         ui.fail("read failed: " + readError);
       }
-      await recordRunOutcome(path, opts, "failed", mdPath, "read failed: " + readError, library, board);
       const stem = (splitPath(path) || {}).name || path;
       showToast("run:" + path, {
         kind: "error",
@@ -157,22 +163,18 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, boar
       return false;
     }
 
-    // EH-0006: record the run's outcome so it shows in the Library grid. The
-    // status is "done" only when we actually have a result; a run that returned
-    // an empty results vec is still recorded as done (the backend decided to
-    // emit nothing) with an empty output path. best-effort: a store failure logs
-    // but never fails the run (recordRunOutcome swallows it).
-    const outPath = haveFile && results && results.length ? results[0] : "";
-    await recordRunOutcome(path, opts, "done", outPath, "", library, board);
-    // Surface completion: a momentary toast + a persisted bell notification.
+    // The job row is recorded by the backend (run_ocr) and the Library/Board
+    // reload via jobs://changed. Here just surface completion: a momentary toast +
+    // a persisted bell notification. mdPath is the written file path ("" for an
+    // in-memory run).
     const stem = (splitPath(path) || {}).name || path;
     showToast("run:" + path, {
       kind: "done",
       title: stem + " — OCR complete",
-      meta: outPath || "",
+      meta: mdPath || "",
     });
     removeToast("run:" + path, 5000);
-    addNotification("done", stem + " — OCR complete", outPath || "");
+    addNotification("done", stem + " — OCR complete", mdPath || "");
     return true;
   } catch (err) {
     // User-initiated stop is not a failure. The backend killed the local server
@@ -192,9 +194,8 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, boar
       // a stopped run).
       if (ui) ui.clearPartial();
       await refreshModelStatus(ui);
-      // Record as "failed" (the Board/Library buckets only know done/failed/queued;
-      // "stopped" would mis-bucket to queued). The error text carries the reason.
-      await recordRunOutcome(path, opts, "failed", "", "stopped by user", library, board);
+      // The backend already finished this file's job row as "failed: stopped by
+      // user" before returning the "stopped" error, so no frontend record here.
       const stem = (splitPath(path) || {}).name || path;
       showToast("run:" + path, { kind: "info", title: stem + " — stopped", meta: "reload the model to run again" });
       removeToast("run:" + path, 6000);
@@ -203,9 +204,10 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, boar
       // model was dropped; they would all fail "load a model first").
       return "stopped";
     }
-    // EH-0006: record the failed run too so the Library and Board show it as a
-    // failed card (not silently dropped). The user already saw the error in the UI.
-    await recordRunOutcome(path, opts, "failed", "", String(err), library, board);
+    // A per-file failure is recorded by the backend (it finishes the job row as
+    // failed before returning); an error thrown before any file started (e.g. "load
+    // a model first") writes no row, which is correct (no run began). The user sees
+    // the error here regardless.
     const stem = (splitPath(path) || {}).name || path;
     showToast("run:" + path, {
       kind: "error",
@@ -226,7 +228,7 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, library, boar
  *  record call is best-effort and never rolls back a delivered OCR result.
  *  EH-0012: getQueuedPaths() returns the current queued-file list so the button
  *  processes all imported files, not just the typed-path field. */
-export function wireRunButton(ui, mdPane, unlistensRef, library, board, getQueuedPaths) {
+export function wireRunButton(ui, mdPane, unlistensRef, getQueuedPaths) {
   const runBtn = document.getElementById("runBtn");
   const pathInput = document.getElementById("pdfPath");
   if (!runBtn) return;
@@ -267,7 +269,7 @@ export function wireRunButton(ui, mdPane, unlistensRef, library, board, getQueue
         ui.setStatus = (text) => originalSetStatus(prefix + text);
         let r;
         try {
-          r = await runOcrOnPath(path, ui, mdPane, unlistensRef, library, board, { dir: outDir, file: outFile });
+          r = await runOcrOnPath(path, ui, mdPane, unlistensRef, { dir: outDir, file: outFile });
         } finally {
           ui.setStatus = originalSetStatus;
         }
@@ -296,7 +298,7 @@ export function wireRunButton(ui, mdPane, unlistensRef, library, board, getQueue
  *  Runs are sequential: the backend spawns one llama-server per run_ocr, so a
  *  parallel fan-out would race on the model/port. Returns the unlisten so the
  *  caller can tear it down if needed (it lives for the app lifetime today). */
-export function wireLibraryDrop(ui, mdPane, unlistensRef, library, board) {
+export function wireLibraryDrop(ui, mdPane, unlistensRef) {
   let t;
   try {
     t = requireTauri();
@@ -364,7 +366,7 @@ export function wireLibraryDrop(ui, mdPane, unlistensRef, library, board) {
         // Honor the chosen output folder; dropped imports are batch-shaped, so no
         // custom filename (each writes {stem}.md into the folder / beside input).
         const outDir = (document.getElementById("outFolder") || {}).value || "";
-        const r = await runOcrOnPath(pdf, ui, mdPane, unlistensRef, library, board, { dir: outDir, file: null });
+        const r = await runOcrOnPath(pdf, ui, mdPane, unlistensRef, { dir: outDir, file: null });
         // User Stop dropped the model; halt the rest of the dropped batch.
         if (r === "stopped") break;
       }

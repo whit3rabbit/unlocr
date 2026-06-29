@@ -46,6 +46,10 @@ base64 = "0.22"
 sha2 = "0.10"   # verify downloaded GGUFs against pinned sha256 digests (supply-chain)
 tempfile = "3"
 glob = "0.3"   # in-binary glob expansion (PowerShell does not glob unquoted args)
+# Extract the Windows tool zips (pandoc/poppler/llama-server) fetched on demand by
+# src/tools.rs. default-features off: these are plain deflate archives, so skip the
+# bzip2/zstd/aes backends and their C deps.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [profile.release]
 opt-level = "z"   # small binary; this is a thin wrapper, not the hot path

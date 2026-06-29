@@ -10,24 +10,24 @@
 // Layout (commands split out of this file so each stays navigable):
 //   - state.rs      AppState + the held backend (Backend/LoadedModel).
 //   - cmd_model.rs  preflight, load/unload/stop, status, cache info/clear.
-//   - cmd_run.rs    render_pages, read_text_file, write_text_file, export_markdown, run_ocr.
+//   - cmd_run.rs    render_pages, read_text_file, write_text_file, export_markdown,
+//                   list_tools/download_tool (Windows dep downloader), run_ocr.
 //   - cmd_store.rs  job store, settings, and notification command wrappers.
 // This file keeps only the module wiring and the `run()` builder.
 
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager, RunEvent};
 
-// Shared helpers for the JSON-under-cache stores (atomic write + history cap),
-// used by store.rs / notifications.rs / settings.rs so the logic lives once.
-mod jsonstore;
-// Persisted job store (EH-0006 bite 1). Purely additive: a new module exposing
-// `list_jobs` / `record_job` commands. No existing command changes.
+// SQLite backing for the jobs/settings/notifications stores (single unlocr.db
+// under the app-data dir). Opened once in .setup(); accessed via db::with_db.
+mod db;
+// Persisted job store (SQLite `jobs` table). Library/Board views + the file-read
+// allowlist (`allowed_output_paths`) read it; `record_job` writes one row per run.
 mod store;
-// Persisted GUI settings (provider mode + engine defaults), same JSON-under-cache
-// pattern as store.rs.
+// Persisted GUI settings (provider mode + engine defaults), single-row `settings`
+// table in the same DB.
 mod settings;
-// Persisted notifications (terminal events surfaced in the bell panel), same
-// JSON-under-cache pattern as store.rs.
+// Persisted notifications (terminal events surfaced in the bell panel), same DB.
 mod notifications;
 
 // Managed state + command handlers (see module-doc comments above).
@@ -45,12 +45,13 @@ use cmd_model::{
     stop_ocr, unload_model,
 };
 use cmd_run::{
-    export_markdown, read_text_file, render_page, render_pages, run_ocr, write_text_file,
+    brew_available, brew_install, download_tool, export_markdown, host_os, list_tools,
+    read_text_file, render_page, render_pages, run_ocr, write_text_file,
 };
 use cmd_store::{
     add_notification, clear_all_notifications, clear_jobs, clear_notification, delete_job,
     get_settings, jobs_store_path, list_jobs, list_notifications, mark_notifications_read,
-    record_job, save_settings,
+    save_settings,
 };
 use state::AppState;
 
@@ -60,6 +61,25 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // Open the SQLite store before anything else: a GUI that cannot open
+            // its DB is broken, not merely empty, so fail startup with a clear
+            // message instead of the old silent-degrade. The single connection
+            // lives in db.rs's global slot; store modules reach it via with_db.
+            if let Err(e) = crate::db::init() {
+                eprintln!("[setup] db init failed: {e}");
+                return Err(e.into());
+            }
+
+            // No OCR run survives a process restart, so any row still marked
+            // `running` is a crash artifact: flip it to `failed` so the Board is
+            // accurate on launch instead of showing a phantom in-flight job.
+            // Best-effort: a reconcile failure logs but never aborts startup.
+            match crate::store::reconcile_interrupted() {
+                Ok(n) if n > 0 => eprintln!("[setup] reconciled {n} interrupted job(s)"),
+                Ok(_) => {}
+                Err(e) => eprintln!("[setup] job reconcile failed: {e}"),
+            }
+
             // Allow the asset protocol to read cached preview PNGs. The cache dir
             // is resolved per-OS at runtime, so the scope is extended here rather
             // than hardcoded in tauri.conf.json. Best-effort: a failure just means
@@ -69,9 +89,11 @@ pub fn run() {
                 let _ = std::fs::create_dir_all(&previews);
                 // SECURITY: scope is the `previews` SUBDIR only, never the cache root.
                 // Widening this to `cache` would expose every cached file (the GGUF
-                // weights, jobs.json, settings.json with the remote API key) to the
-                // renderer via `asset:` (img-src allows it in tauri.conf.json). Keep
-                // it pinned to previews; do not loosen this casually.
+                // weights, preview PNGs) to the renderer via `asset:` (img-src allows
+                // it in tauri.conf.json). The sensitive stores (jobs, settings with
+                // the remote API key, notifications) no longer live here at all: they
+                // moved to `<app-data>/unlocr/unlocr.db`, but keep the scope pinned
+                // to previews; do not loosen this casually.
                 debug_assert!(
                     previews.ends_with("previews"),
                     "asset scope must stay the previews subdir, not the cache root"
@@ -107,7 +129,7 @@ pub fn run() {
                     continue;
                 }
                 // try_lock, NOT lock: a run holds the model lock for its whole batch,
-                // so a failed try_lock means a run is in flight — skip this tick rather
+                // so a failed try_lock means a run is in flight; skip this tick rather
                 // than block (and never unload mid-run). Tight inner scope so the
                 // try_lock guard drops before `state` is reused below.
                 let unloaded = {
@@ -172,9 +194,13 @@ pub fn run() {
             read_text_file,
             write_text_file,
             export_markdown,
+            host_os,
+            list_tools,
+            download_tool,
+            brew_available,
+            brew_install,
             list_jobs,
             jobs_store_path,
-            record_job,
             delete_job,
             clear_jobs,
             load_model,
