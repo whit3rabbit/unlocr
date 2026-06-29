@@ -40,6 +40,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # exposes the clap-free run_ocr_job / OcrOptions / Progress API this bridge calls.
 # Additive: the unlocr package and its release profile are untouched.
 unlocr = { path = "../.." }
+keyring = "2"
 
 [dev-dependencies]
 tempfile = "3"   # temp dirs for the read_text_file allowlist unit tests

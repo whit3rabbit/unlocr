@@ -46,6 +46,8 @@ base64 = "0.22"
 sha2 = "0.10"   # verify downloaded GGUFs against pinned sha256 digests (supply-chain)
 tempfile = "3"
 glob = "0.3"   # in-binary glob expansion (PowerShell does not glob unquoted args)
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 # Extract the Windows tool zips (pandoc/poppler/llama-server) fetched on demand by
 # src/tools.rs. default-features off: these are plain deflate archives, so skip the
 # bzip2/zstd/aes backends and their C deps.
@@ -57,3 +59,9 @@ lto = true
 strip = true
 codegen-units = 1
 panic = "abort"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.186"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation", "Win32_Security"] }

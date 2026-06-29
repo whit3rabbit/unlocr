@@ -165,15 +165,62 @@ fn persist(conn: &Connection, s: &Settings) -> Result<(), String> {
 
 /// Load settings, falling back to defaults on a missing row or a DB error.
 pub fn load_settings() -> Settings {
-    crate::db::with_db(fetch).unwrap_or_else(|e| {
+    let mut s = crate::db::with_db(fetch).unwrap_or_else(|e| {
         eprintln!("[settings] load failed, using defaults: {e}");
         Settings::default()
-    })
+    });
+
+    // Check if there is an old plaintext key in the database
+    if !s.remote_api_key.is_empty() && s.remote_api_key != "__saved__" && s.remote_api_key != "••••••••" {
+        let key = s.remote_api_key.clone();
+        if let Ok(entry) = keyring::Entry::new("unlocr", "remote_api_key") {
+            if entry.set_password(&key).is_ok() {
+                // Clear plaintext from DB, mark as __saved__
+                s.remote_api_key = "__saved__".to_string();
+                if let Err(e) = crate::db::with_db(|c| persist(c, &s)) {
+                    eprintln!("[settings] failed to clear plaintext api key from database: {e}");
+                }
+            }
+        }
+    }
+
+    // Return a masked password to the UI if a key is saved, else empty
+    if s.remote_api_key == "__saved__" {
+        s.remote_api_key = "••••••••".to_string();
+    } else {
+        s.remote_api_key = String::new();
+    }
+
+    s
 }
 
 /// Persist settings (upsert the singleton row).
 pub fn save_settings(settings: &Settings) -> Result<(), String> {
-    crate::db::with_db(|c| persist(c, settings))
+    let mut s = settings.clone();
+    let key = std::mem::take(&mut s.remote_api_key); // Clear key from settings to save in DB as empty string or placeholder
+
+    if key == "••••••••" {
+        // Kept as is! No change to keyring, preserve the "__saved__" marker in DB
+        s.remote_api_key = "__saved__".to_string();
+    } else if key.is_empty() {
+        // Deleted! Remove from keyring, clear marker in DB
+        if let Ok(entry) = keyring::Entry::new("unlocr", "remote_api_key") {
+            let _ = entry.delete_password();
+        }
+        s.remote_api_key = String::new();
+    } else {
+        // Modified/new key! Save to keyring, set marker in DB
+        if let Ok(entry) = keyring::Entry::new("unlocr", "remote_api_key") {
+            entry.set_password(&key).map_err(|e| {
+                format!("failed to save API key to OS credential manager: {e}")
+            })?;
+        } else {
+            return Err("OS credential manager not available".to_string());
+        }
+        s.remote_api_key = "__saved__".to_string();
+    }
+
+    crate::db::with_db(|c| persist(c, &s))
 }
 
 #[cfg(test)]

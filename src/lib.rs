@@ -3,10 +3,15 @@
 // top of this. Keeping clap out of here is load-bearing: the GUI needs to drive
 // OCR with plain typed params and a progress sink, no Args/argv in sight.
 
+/// Model management and caching utilities.
 pub mod model;
+/// PDF rendering and processing utilities.
 pub mod pdf;
+/// System check and preflight diagnostics.
 pub mod preflight;
+/// OCR server management.
 pub mod server;
+/// Tool resolution and downloading utilities.
 pub mod tools;
 
 // Note: ocr.rs is intentionally NOT a lib module here. It is bin-only CLI glue
@@ -15,6 +20,7 @@ pub mod tools;
 // ocr.rs no longer has its own push_page; the lib's `push_page` below is the
 // single canonical page-assembly implementation used by both paths.
 
+/// Result type alias with a dynamic error type.
 pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
 use base64::Engine;
@@ -80,6 +86,53 @@ impl Default for OcrOptions {
     }
 }
 
+/// How assembled OCR markdown is laid out on disk. Kept out of `OcrOptions`
+/// (the loop-driving struct stays free of an output-dir concept); it only steers
+/// the shared `write_markdown_output` helper a caller invokes afterwards. Clap-free:
+/// the bin crate has its own value-enum and the GUI passes a string that
+/// `parse_output_mode` maps here.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum OutputMode {
+    /// One `{stem}.md` with every page concatenated (the original behaviour).
+    #[default]
+    Single,
+    /// A `{stem}/page-N.md` folder, one file per page.
+    Pages,
+    /// Both: the combined `{stem}.md` and the per-page folder.
+    Both,
+}
+
+/// Map the CLI/GUI string ("single"|"pages"|"both", case-insensitive) to
+/// `OutputMode`. Lives in the lib so the bin's clap enum and the GUI's string
+/// param resolve through one definition. Unknown -> error.
+pub fn parse_output_mode(s: &str) -> Res<OutputMode> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "single" => Ok(OutputMode::Single),
+        "pages" => Ok(OutputMode::Pages),
+        "both" => Ok(OutputMode::Both),
+        other => {
+            Err(format!("unknown output mode \"{other}\" (expected single|pages|both)").into())
+        }
+    }
+}
+
+/// The result of OCR'ing one input: the combined page-delimited markdown, the
+/// per-page texts (real 1-based page number + trimmed markdown), and, when
+/// `keep_images` is set, the directory the page PNGs were kept in. Carrying the
+/// per-page texts lets a caller write per-page files (`write_markdown_output`)
+/// without re-splitting the combined string on its `<!-- page N -->` delimiters.
+#[derive(Clone, Debug)]
+pub struct OcrOutput {
+    /// All pages joined with `<!-- page N -->` delimiters, leading whitespace
+    /// trimmed. This is what `{stem}.md` (single/both) holds.
+    pub combined: String,
+    /// One `(page, text)` per processed page, in order. `page` is the real
+    /// 1-based page number (accounts for `--pages` offsets).
+    pub pages: Vec<(usize, String)>,
+    /// `Some(dir)` when `keep_images` leaked the tempdir; `None` otherwise.
+    pub kept_images: Option<PathBuf>,
+}
+
 /// Progress events the OCR pipeline emits so a UI (or the CLI's println) can
 /// subscribe to download + per-page stages. Kept allocation-free and serializable.
 #[derive(Clone, Debug)]
@@ -106,16 +159,17 @@ pub enum Progress {
 /// through `on_progress`. This is the canonical, clap-free OCR entry point used
 /// by both the Tauri bridge and (after refactor) the CLI path.
 ///
-/// The caller owns writing the markdown to disk: the CLI writes `{stem}.md`,
-/// the GUI keeps it in memory / its own store. That keeps the lib free of an
-/// output-dir concept.
+/// The caller owns writing the markdown to disk: both the CLI and the GUI call
+/// the shared `write_markdown_output` helper (single file / per-page folder /
+/// both). That keeps the lib free of an output-dir concept in `OcrOptions`: the
+/// layout decision is a parameter to the write helper, not a field on the
+/// loop-driving struct.
 ///
 /// Spawns llama-server and kills it on drop (server::Server's Drop), so the
 /// success path does not orphan it.
 ///
-/// Returns the assembled markdown and, when `opts.keep_images` is set, the
-/// directory the page PNGs were kept in (None otherwise) so a caller can surface
-/// it instead of leaking the images with no way to find them. This is the GUI's
+/// Returns an `OcrOutput` (combined markdown + per-page texts + optional kept
+/// image dir) so a caller can lay it out however it likes. This is the GUI's
 /// entry point; the CLI drives `ocr_pages` directly.
 ///
 /// `resolved_tools` lets a caller pass already-resolved `preflight::Tools` to skip
@@ -128,7 +182,7 @@ pub fn run_ocr_job<P>(
     resolved_tools: Option<preflight::Tools>,
     opts: &OcrOptions,
     on_progress: &mut P,
-) -> Res<(String, Option<PathBuf>)>
+) -> Res<OcrOutput>
 where
     P: FnMut(Progress),
 {
@@ -165,12 +219,12 @@ where
     )?;
     on_progress(Progress::ServerReady { port: srv.port });
 
-    let (md, kept) = ocr_pages(&srv, &tools.pdftoppm, input, opts, on_progress, &|| false)?;
+    let out = ocr_pages(&srv, &tools.pdftoppm, input, opts, on_progress, &|| false)?;
 
-    // Drop kills llama-server. `kept` is Some(dir) only when keep_images is set;
-    // bubble it up so the caller can report where the PNGs went.
+    // Drop kills llama-server. `out.kept_images` is Some(dir) only when
+    // keep_images is set; bubble it up so the caller can report where the PNGs went.
     drop(srv);
-    Ok((md, kept))
+    Ok(out)
 }
 
 /// Rasterize a PDF's pages to PNGs in a content-keyed cache dir, reusing the
@@ -181,9 +235,9 @@ where
 /// Cache key = hash(canonical PDF path + mtime + dpi): a changed file (different
 /// mtime) or a different dpi misses and re-renders. `cache_root` is the resolved
 /// unlocr cache dir; previews live under `<cache_root>/previews/<key>/`.
-// ponytail: unbounded cache (no eviction). It is under the OS cache dir, so the
-// user/OS can clear it; add an LRU/size cap here if the previews dir grows.
 pub fn render_pages(pdftoppm: &Path, pdf: &Path, dpi: u32, cache_root: &Path) -> Res<Vec<PathBuf>> {
+    // ponytail: unbounded cache (no eviction). It is under the OS cache dir, so the
+    // user/OS can clear it; add an LRU/size cap here if the previews dir grows.
     let dir = preview_cache_dir(pdf, dpi, cache_root);
 
     // Cache hit: a prior render left page PNGs here. Reuse them (pdftoppm is
@@ -267,10 +321,12 @@ pub fn render_page(
 }
 
 /// Rasterize one PDF to PNGs and OCR each page in order, emitting a Page
-/// progress event per page. Returns the page-delimited markdown and, when
-/// `opts.keep_images` is set, the directory the page PNGs were kept in (so the
-/// CLI can report it; the handle is leaked there to keep the files on disk).
-/// Shared by run_ocr_job (lib) and, after bite 2, the CLI's ocr::run_pdf.
+/// progress event per page. Returns an `OcrOutput` carrying both the combined
+/// page-delimited markdown and the per-page texts (so a caller can write
+/// per-page files without re-splitting), plus, when `opts.keep_images` is set,
+/// the directory the page PNGs were kept in (so the CLI can report it; the handle
+/// is leaked there to keep the files on disk). Shared by run_ocr_job (lib) and,
+/// after bite 2, the CLI's ocr::run_pdf.
 pub fn ocr_pages<S, P>(
     srv: &S,
     pdftoppm: &Path,
@@ -278,7 +334,7 @@ pub fn ocr_pages<S, P>(
     opts: &OcrOptions,
     on_progress: &mut P,
     should_cancel: &dyn Fn() -> bool,
-) -> Res<(String, Option<PathBuf>)>
+) -> Res<OcrOutput>
 where
     S: server::ImageOcr,
     P: FnMut(Progress),
@@ -293,6 +349,9 @@ where
     let base = opts.pages.map(|(f, _)| f as usize).unwrap_or(1);
 
     let mut md = String::new();
+    // Capture each page's text separately so a caller can write per-page files
+    // (write_markdown_output) without re-splitting the combined string.
+    let mut pages_text: Vec<(usize, String)> = Vec::with_capacity(n);
     for (i, page) in pages.iter().enumerate() {
         // Stop (GUI) sets this; the local backend also kills llama-server so an
         // in-flight stream errors out, but checking here stops the remote backend
@@ -323,10 +382,15 @@ where
                     page: page_num,
                     chunk: chunk.to_string(),
                 });
+                !should_cancel()
             },
+            should_cancel,
         )?;
         // push_page writes page idx+1, so pass the real page number minus one.
         push_page(&mut md, page_num - 1, text.trim());
+        // Same trimmed text the combined string holds, retained per-page so a
+        // caller can write per-page files without re-splitting on the delimiter.
+        pages_text.push((page_num, text.trim().to_string()));
     }
 
     let kept = if opts.keep_images {
@@ -337,7 +401,11 @@ where
     } else {
         None
     };
-    Ok((md.trim_start().to_string(), kept))
+    Ok(OcrOutput {
+        combined: md.trim_start().to_string(),
+        pages: pages_text,
+        kept_images: kept,
+    })
 }
 
 /// Resolve the output `.md` path for one input. Shared by the CLI (`ocr::run_pdf`)
@@ -368,6 +436,58 @@ pub fn resolve_output_path(out_dir: &Path, out_file: Option<&Path>, stem: &str) 
     }
 }
 
+/// Write assembled OCR output to disk per `mode`, returning every path written
+/// (combined file first in `Both`). Shared by the CLI (`ocr::run_pdf`) and the
+/// GUI (`run_ocr`) so both front ends agree on layout. The caller owns any
+/// read-allowlist (the GUI inserts these into `AppState.read_allow`); this fn
+/// only writes files + their parent dirs.
+///
+/// - `Single`: one `{stem}.md` (or `out_file` if given) holding `output.combined`.
+/// - `Pages`: a `{out_dir}/{stem}/page-N.md` folder, one file per page. `out_file`
+///   is ignored for the folder name (the caller warns when it was set). Page
+///   numbers are zero-padded to the width of the largest page number so files
+///   sort lexicographically (page-01 before page-10).
+/// - `Both`: the combined file plus the per-page folder.
+pub fn write_markdown_output(
+    mode: OutputMode,
+    out_dir: &Path,
+    out_file: Option<&Path>,
+    stem: &str,
+    output: &OcrOutput,
+) -> Res<Vec<PathBuf>> {
+    let mut written: Vec<PathBuf> = Vec::new();
+
+    if matches!(mode, OutputMode::Single | OutputMode::Both) {
+        let combined_path = resolve_output_path(out_dir, out_file, stem);
+        if let Some(parent) = combined_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&combined_path, &output.combined)?;
+        written.push(combined_path);
+    }
+
+    if matches!(mode, OutputMode::Pages | OutputMode::Both) {
+        let folder = out_dir.join(stem);
+        std::fs::create_dir_all(&folder)?;
+        // Zero-pad to the largest page number's width (min 2) so a listing sorts
+        // page-01 before page-10. Width defaults to 2 when there are no pages
+        // (defensive: rasterize_range errors on zero pages before we get here).
+        let width = output
+            .pages
+            .last()
+            .map(|(n, _)| n.to_string().len())
+            .unwrap_or(2)
+            .max(2);
+        for (page_num, text) in &output.pages {
+            let path = folder.join(format!("page-{page_num:0width$}.md"));
+            std::fs::write(&path, text)?;
+            written.push(path);
+        }
+    }
+
+    Ok(written)
+}
+
 /// Append one page's text with a `<!-- page N -->` delimiter (1-based).
 /// Canonical implementation: ocr_pages (lib) and the CLI path (via run_pdf's
 /// delegation) both route through this, so page-delimited markdown is identical
@@ -378,416 +498,5 @@ pub fn push_page(md: &mut String, idx: usize, text: &str) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ocroptions_default_matches_cli() {
-        // Defaults must mirror the CLI flags so a no-op caller matches `unlocr`.
-        let o = OcrOptions::default();
-        assert_eq!(o.quant, "Q8_0");
-        assert_eq!(o.max_tokens, 4096);
-        assert_eq!(o.dpi, 144);
-        assert_eq!(o.prompt, "<|grounding|>Convert the document to markdown.");
-        assert_eq!(o.port, 0);
-        assert!(o.model_dir.is_none());
-        assert!(!o.keep_images);
-        assert!(o.pages.is_none());
-    }
-
-    #[test]
-    fn resolve_output_path_cases() {
-        let dir = Path::new("/out");
-        // Default: {stem}.md under out_dir.
-        assert_eq!(
-            resolve_output_path(dir, None, "doc"),
-            Path::new("/out/doc.md")
-        );
-        // Relative name, no extension -> append .md, joined under out_dir.
-        assert_eq!(
-            resolve_output_path(dir, Some(Path::new("report")), "doc"),
-            Path::new("/out/report.md")
-        );
-        // Relative name with .md -> preserved.
-        assert_eq!(
-            resolve_output_path(dir, Some(Path::new("report.md")), "doc"),
-            Path::new("/out/report.md")
-        );
-        // Non-.md extension -> left as typed (caller's choice).
-        assert_eq!(
-            resolve_output_path(dir, Some(Path::new("report.txt")), "doc"),
-            Path::new("/out/report.txt")
-        );
-        // Absolute path -> used verbatim, ignoring out_dir (ext appended when missing).
-        assert_eq!(
-            resolve_output_path(dir, Some(Path::new("/tmp/x")), "doc"),
-            Path::new("/tmp/x.md")
-        );
-        assert_eq!(
-            resolve_output_path(dir, Some(Path::new("/tmp/x.md")), "doc"),
-            Path::new("/tmp/x.md")
-        );
-    }
-
-    #[test]
-    fn push_page_assembles_delimiters() {
-        let mut md = String::new();
-        push_page(&mut md, 0, "first");
-        push_page(&mut md, 1, "second");
-        assert_eq!(
-            md.trim_start(),
-            "<!-- page 1 -->\n\nfirst\n\n<!-- page 2 -->\n\nsecond"
-        );
-    }
-
-    #[test]
-    fn run_ocr_job_rejects_missing_file() {
-        // Non-network path: run_ocr_job must fail fast on a non-existent input
-        // before touching preflight/network. Locks the early validation.
-        let mut progress = |_: Progress| {};
-        let err = run_ocr_job(
-            Path::new("/nonexistent/ferrum-bite-1.pdf"),
-            None,
-            &OcrOptions::default(),
-            &mut progress,
-        );
-        assert!(err.is_err());
-        let msg = err.unwrap_err().to_string();
-        assert!(msg.contains("not a file"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn preview_cache_dir_is_deterministic_and_dpi_keyed() {
-        // Same (file state, dpi) -> same dir; a different dpi -> different dir.
-        // No pdftoppm: this locks the cache keying that decides hit vs re-render.
-        let tmp = tempfile::tempdir().expect("tmp");
-        let pdf = tmp.path().join("doc.pdf");
-        std::fs::write(&pdf, b"%PDF-1.4 stub").expect("write stub");
-        let root = tmp.path();
-
-        let a = preview_cache_dir(&pdf, 144, root);
-        let b = preview_cache_dir(&pdf, 144, root);
-        let c = preview_cache_dir(&pdf, 72, root);
-        assert_eq!(a, b, "same inputs must key to the same dir");
-        assert_ne!(a, c, "different dpi must key to a different dir");
-        assert!(a.starts_with(root.join("previews")));
-    }
-
-    /// EH-0003 acceptance 2: exercise the ocr:// state sequence (ServerReady ->
-    /// Page 1 -> Page 2 ...) without a live desktop session.
-    ///
-    /// Strategy:
-    ///   1. Spin up a minimal HTTP stub on a free port that returns a valid
-    ///      OpenAI-style chat-completion response for any POST request.
-    ///   2. Create a Server::for_test(port) pointing at it (dummy child, real port).
-    ///   3. Rasterize a two-page fixture PDF via pdftoppm (skip on hosts without it).
-    ///   4. Run ocr_pages and capture every Progress event in order.
-    ///   5. Assert: exactly 2 Page events, page numbers 1 then 2, total always 2.
-    ///
-    /// This proves: listeners would receive events in the correct state order
-    /// (download events are emitted by model::ensure_with_progress before
-    /// run_ocr_job calls on_progress(ServerReady); the ServerReady -> Page
-    /// subsequence is fully exercised here).
-    #[test]
-    fn ocr_state_sequence_ordering() {
-        // Skip on hosts where pdftoppm is not installed (CI without poppler, etc.).
-        if std::process::Command::new("pdftoppm")
-            .arg("-v")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_err()
-        {
-            eprintln!("skipping ocr_state_sequence_ordering: pdftoppm not on PATH");
-            return;
-        }
-
-        // --- 1. Stub HTTP server + 2. Server::for_test ------------------------
-        let stub_port = spawn_stub_ocr_server();
-        let srv = server::Server::for_test(stub_port).expect("for_test");
-
-        // --- 3. Fixture PDF + pdftoppm ----------------------------------------
-        let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
-        let pdf_path = pdf_dir.path().join("fixture.pdf");
-        std::fs::write(&pdf_path, two_page_pdf_bytes()).expect("write fixture pdf");
-
-        // --- 4. Run ocr_pages + capture Progress events -----------------------
-        let pdftoppm_bin = std::path::Path::new("pdftoppm");
-        let opts = OcrOptions::default();
-        let mut events: Vec<Progress> = Vec::new();
-        let result = ocr_pages(
-            &srv,
-            pdftoppm_bin,
-            &pdf_path,
-            &opts,
-            &mut |p: Progress| {
-                events.push(p);
-            },
-            &|| false,
-        );
-        assert!(result.is_ok(), "ocr_pages failed: {:?}", result.err());
-
-        // --- 5. Assert ordering -----------------------------------------------
-        // Filter to Page events only (Download events are from model::ensure_with_progress
-        // which is not called by ocr_pages; ServerReady is emitted by run_ocr_job
-        // before calling ocr_pages). From ocr_pages we expect exactly 2 Page events.
-        let page_events: Vec<(usize, usize)> = events
-            .iter()
-            .filter_map(|e| {
-                if let Progress::Page { page, total } = e {
-                    Some((*page, *total))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        assert_eq!(
-            page_events.len(),
-            2,
-            "expected 2 Page events, got {:?}",
-            page_events
-        );
-        assert_eq!(
-            page_events[0],
-            (1, 2),
-            "first event should be Page{{page:1, total:2}}"
-        );
-        assert_eq!(
-            page_events[1],
-            (2, 2),
-            "second event should be Page{{page:2, total:2}}"
-        );
-        // ocr_pages emits Page plus PartialText (streamed OCR text). The stub
-        // replies with a plain JSON completion (no SSE framing); ocr_via_stream's
-        // non-streaming fallback delivers that text via on_token, so we expect one
-        // PartialText per page carrying the stub's content. No other variant.
-        for ev in &events {
-            assert!(
-                matches!(ev, Progress::Page { .. } | Progress::PartialText { .. }),
-                "ocr_pages emitted unexpected event variant: {ev:?}"
-            );
-        }
-        let partials: Vec<(usize, &str)> = events
-            .iter()
-            .filter_map(|e| match e {
-                Progress::PartialText { page, chunk } => Some((*page, chunk.as_str())),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            partials,
-            vec![(1, "# page text"), (2, "# page text")],
-            "expected one PartialText per page from the non-SSE fallback"
-        );
-    }
-
-    #[test]
-    fn render_pages_returns_cached_pngs_without_pdftoppm() {
-        // Cache-hit path: seed the keyed dir with page PNGs, then render_pages must
-        // return them sorted by page number and never run pdftoppm (a bogus binary
-        // path proves it is not invoked on a hit).
-        let tmp = tempfile::tempdir().expect("tmp");
-        let pdf = tmp.path().join("doc.pdf");
-        std::fs::write(&pdf, b"%PDF-1.4 stub").expect("write stub");
-        let root = tmp.path();
-
-        let dir = preview_cache_dir(&pdf, 144, root);
-        std::fs::create_dir_all(&dir).expect("mk cache dir");
-        // Out of order on disk; render_pages must return them 1,2,10.
-        for n in [10u32, 1, 2] {
-            std::fs::write(dir.join(format!("page-{n}.png")), b"\x89PNG").expect("seed png");
-        }
-
-        let bogus = Path::new("/nonexistent/pdftoppm");
-        let pages = render_pages(bogus, &pdf, 144, root).expect("cache hit");
-        let names: Vec<_> = pages
-            .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, vec!["page-1.png", "page-2.png", "page-10.png"]);
-    }
-
-    /// A page range OCRs only the selected pages AND labels them with the real page
-    /// number, not the loop index. Selecting page 2 of a 2-page PDF must produce a
-    /// single `<!-- page 2 -->` block (regression guard for the base+i numbering).
-    #[test]
-    fn ocr_pages_honors_page_range() {
-        if std::process::Command::new("pdftoppm")
-            .arg("-v")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_err()
-        {
-            eprintln!("skipping ocr_pages_honors_page_range: pdftoppm not on PATH");
-            return;
-        }
-
-        let stub_port = spawn_stub_ocr_server();
-        let srv = server::Server::for_test(stub_port).expect("for_test");
-
-        let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
-        let pdf_path = pdf_dir.path().join("fixture.pdf");
-        std::fs::write(&pdf_path, two_page_pdf_bytes()).expect("write fixture pdf");
-
-        let opts = OcrOptions {
-            pages: Some((2, Some(2))),
-            ..OcrOptions::default()
-        };
-        let mut events: Vec<Progress> = Vec::new();
-        let (md, _kept) = ocr_pages(
-            &srv,
-            std::path::Path::new("pdftoppm"),
-            &pdf_path,
-            &opts,
-            &mut |p: Progress| events.push(p),
-            &|| false,
-        )
-        .expect("ocr_pages with range");
-
-        // Exactly one page OCR'd, and it is reported/labeled as page 2.
-        let page_events: Vec<(usize, usize)> = events
-            .iter()
-            .filter_map(|e| match e {
-                Progress::Page { page, total } => Some((*page, *total)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            page_events,
-            vec![(2, 1)],
-            "should OCR only page 2 of 1 selected"
-        );
-        assert!(
-            md.contains("<!-- page 2 -->"),
-            "markdown must carry the real page number: {md}"
-        );
-        assert!(
-            !md.contains("<!-- page 1 -->"),
-            "page 1 must not be OCR'd: {md}"
-        );
-    }
-
-    /// A `should_cancel` that is true on entry aborts before OCRing any page: no Page
-    /// events, and an Err the GUI's run_ocr remaps to "stopped". Guards the page-loop
-    /// cancellation check that makes Stop responsive (esp. for the remote backend,
-    /// which has no llama-server pid to kill).
-    #[test]
-    fn ocr_pages_aborts_when_cancelled() {
-        if std::process::Command::new("pdftoppm")
-            .arg("-v")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_err()
-        {
-            eprintln!("skipping ocr_pages_aborts_when_cancelled: pdftoppm not on PATH");
-            return;
-        }
-
-        let stub_port = spawn_stub_ocr_server();
-        let srv = server::Server::for_test(stub_port).expect("for_test");
-
-        let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
-        let pdf_path = pdf_dir.path().join("fixture.pdf");
-        std::fs::write(&pdf_path, two_page_pdf_bytes()).expect("write fixture pdf");
-
-        let opts = OcrOptions::default();
-        let mut events: Vec<Progress> = Vec::new();
-        let result = ocr_pages(
-            &srv,
-            std::path::Path::new("pdftoppm"),
-            &pdf_path,
-            &opts,
-            &mut |p: Progress| events.push(p),
-            &|| true,
-        );
-
-        assert!(
-            result.is_err(),
-            "cancelled run must return Err, got {result:?}"
-        );
-        assert!(
-            !events.iter().any(|e| matches!(e, Progress::Page { .. })),
-            "no page should be OCR'd when cancelled on entry: {events:?}"
-        );
-    }
-
-    /// Spawn a throwaway HTTP server that returns a valid OpenAI chat-completion for
-    /// any POST and return its port. Used by the ocr_pages tests so they exercise the
-    /// real rasterize+request loop without a live llama-server. Drains the request
-    /// body before replying so ureq never sees a partial read.
-    fn spawn_stub_ocr_server() -> u16 {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub server");
-        let port = listener.local_addr().expect("local_addr").port();
-        let resp_body = serde_json::json!({
-            "choices": [{ "message": { "content": "# page text" } }]
-        })
-        .to_string();
-        let http_response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-            resp_body.len(),
-            resp_body,
-        );
-        std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader, Write};
-            for stream in listener.incoming() {
-                let Ok(s) = stream else { break };
-                let mut reader = BufReader::new(s.try_clone().expect("clone socket"));
-                let mut writer = s;
-                let mut content_length: usize = 0;
-                loop {
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                        break;
-                    }
-                    let trimmed = line.trim_end_matches(['\r', '\n']);
-                    if trimmed.is_empty() {
-                        break;
-                    }
-                    if trimmed.to_ascii_lowercase().starts_with("content-length:") {
-                        if let Some(v) = trimmed.split_once(':').map(|x| x.1) {
-                            content_length = v.trim().parse().unwrap_or(0);
-                        }
-                    }
-                }
-                let mut body = vec![0u8; content_length];
-                let _ = std::io::Read::read_exact(&mut reader, &mut body);
-                let _ = Write::write_all(&mut writer, http_response.as_bytes());
-            }
-        });
-        port
-    }
-
-    /// Minimal valid 2-page PDF (Catalog -> Pages with two text pages + computed
-    /// xref). Inlined so the tests add no binary fixture to the repo.
-    fn two_page_pdf_bytes() -> Vec<u8> {
-        let p1 = "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 4 0 R/Resources<</Font<</F1 7 0 R>>>>>>";
-        let p2 = "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 6 0 R/Resources<</Font<</F1 7 0 R>>>>>>";
-        let objs: [&str; 7] = [
-            "<</Type/Catalog/Pages 2 0 R>>",
-            "<</Type/Pages/Kids[3 0 R 5 0 R]/Count 2>>",
-            p1,
-            "<</Length 38>>stream\nBT /F1 12 Tf 10 80 Td (Page one) Tj ET\nendstream",
-            p2,
-            "<</Length 38>>stream\nBT /F1 12 Tf 10 80 Td (Page two) Tj ET\nendstream",
-            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
-        ];
-        let mut buf = String::from("%PDF-1.4\n");
-        let mut offsets: Vec<usize> = Vec::with_capacity(objs.len());
-        for (i, obj) in objs.iter().enumerate() {
-            offsets.push(buf.len());
-            buf.push_str(&format!("{} 0 obj{}\nendobj\n", i + 1, obj));
-        }
-        let xref_start = buf.len();
-        buf.push_str("xref\n0 8\n0000000000 65535 f \n");
-        for off in &offsets {
-            buf.push_str(&format!("{:010} 00000 n \n", off));
-        }
-        buf.push_str(&format!(
-            "trailer<</Size 8/Root 1 0 R>>\nstartxref\n{xref_start}\n%%EOF\n",
-        ));
-        buf.into_bytes()
-    }
-}
+#[path = "lib_tests.rs"]
+mod tests;
