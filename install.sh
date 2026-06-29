@@ -15,6 +15,45 @@ SRC="$ROOT"
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# macOS Homebrew check, path setup, and prompt
+if [ "$(uname -s)" = "Darwin" ]; then
+  # If brew is not in PATH, check common installation paths
+  if ! command -v brew >/dev/null 2>&1; then
+    if [ -x /opt/homebrew/bin/brew ]; then
+      eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [ -x /usr/local/bin/brew ]; then
+      eval "$(/usr/local/bin/brew shellenv)"
+    fi
+  fi
+
+  # If still not found, offer to install it
+  if ! command -v brew >/dev/null 2>&1; then
+    say "Homebrew is missing, which is highly recommended for installing dependencies on macOS (like poppler and llama.cpp)."
+    if [ -t 0 ]; then
+      printf "Would you like to install Homebrew now? [y/N]: "
+      read -r answer
+      case "$answer" in
+        [yY] | [yY][eE][sS])
+          say "Installing Homebrew..."
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          # Set up Homebrew path in current session
+          if [ -x /opt/homebrew/bin/brew ]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+          elif [ -x /usr/local/bin/brew ]; then
+            eval "$(/usr/local/bin/brew shellenv)"
+          fi
+          ;;
+        *)
+          say "Proceeding without Homebrew. Please note that you may need to install dependencies manually."
+          ;;
+      esac
+    else
+      say "Non-interactive shell. Skipping Homebrew installation prompt."
+      say "Please install Homebrew manually: https://brew.sh/"
+    fi
+  fi
+fi
+
 command -v cargo >/dev/null 2>&1 || die "cargo not found. Install Rust: https://rustup.rs"
 
 say "Building $NAME (release)..."
