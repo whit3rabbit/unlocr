@@ -208,6 +208,7 @@ For high-performance GPU serving of the unquantized model:
 
 ### Limitations & Security
 *   **Ctrl-C (SIGINT)**: Interrupting CLI does not clean up the background server process, which might orphan `llama-server`.
+*   **Abnormal exit (macOS)**: If the app is force-killed (`SIGKILL`/segfault) or panics (`panic=abort`), cleanup is skipped. Linux (`PR_SET_PDEATHSIG`) and Windows (Job Objects) kill `llama-server` with the parent; macOS has no equivalent, so a warm server can be orphaned. Recover with `pkill llama-server`.
 *   **Port Race**: Free-port allocation may occasionally conflict; pin using `--port N`.
 *   **Authentication**: The local `llama-server` binds to `127.0.0.1` without auth. On multi-user machines, other local users could access the server port during execution. Single-user environments are recommended.
 

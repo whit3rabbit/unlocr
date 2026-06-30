@@ -19,51 +19,41 @@ export function makePreviewPane() {
   // rasterizes 300 PNGs when the user may never leave page 1. (No look-ahead
   // prefetch: each page is rendered when first shown, then cached.)
   let pdfPath = null; // current PDF; null when cleared
-  let cache = {}; // 1-based page number -> asset URL (string), or null if out of range
+  let cache = {}; // "n:dpi" -> asset URL (string), or null if out of range
   let idx = 1; // current page (1-based)
   let lastPage = null; // known last page once an out-of-range render is hit; null = unknown
   let token = 0; // bumps on each show()/clear() so stale async renders are dropped
-  let lastDpi; // DPI the cache was filled at; a change invalidates cached page URLs
 
   // Render+cache one page (1-based). Returns its asset URL, or null when the page is
   // out of range (the backend render_page Errs past the last page). Never throws.
-  async function fetchPage(t, n) {
-    // Render the preview at the same DPI the run uses (#optDpi), not the backend's
-    // fixed default, so what you preview matches what gets OCR'd. Invalid/blank ->
-    // null lets the backend pick its default.
-    const dpiEl = document.getElementById("optDpi");
-    const dv = parseInt((dpiEl && dpiEl.value) || "", 10);
-    const dpi = Number.isFinite(dv) && dv > 0 ? dv : null;
-    // A DPI change invalidates every cached page URL (they point at PNGs rendered at
-    // the old DPI); drop the cache so the preview re-renders at the current DPI
-    // instead of serving a stale image that no longer matches what OCR will use.
-    if (dpi !== lastDpi) {
-      cache = {};
-      lastDpi = dpi;
-    }
-    if (n in cache) return cache[n];
+  async function fetchPage(t, n, dpi) {
+    const key = n + ":" + dpi;
+    if (key in cache) return cache[key];
     try {
       const p = await t.core.invoke("render_page", { pdfPath, page: n, dpi });
-      cache[n] = t.core.convertFileSrc(p);
+      cache[key] = t.core.convertFileSrc(p);
     } catch (err) {
       // Only an out-of-range page marks the end of the document: cache the null and
       // bound navigation. A REAL render failure (pdftoppm error, transient IPC) is
       // NOT cached, so a later navigation retries instead of permanently truncating
       // the preview at a page that would render fine on a second try.
       if (String(err).includes("out of range")) {
-        cache[n] = null;
+        cache[key] = null;
         if (lastPage === null || n - 1 < lastPage) lastPage = Math.max(0, n - 1);
       } else {
         return undefined; // transient: leave uncached so the next attempt retries
       }
     }
-    return cache[n];
+    return cache[key];
   }
 
   function paint(errorMsg) {
     if (!stage) return;
     stage.innerHTML = "";
-    const url = pdfPath ? cache[idx] : null;
+    const dpiEl = document.getElementById("optDpi");
+    const dv = parseInt((dpiEl && dpiEl.value) || "", 10);
+    const dpi = Number.isFinite(dv) && dv > 0 ? dv : null;
+    const url = pdfPath ? cache[idx + ":" + dpi] : null;
     if (url == null) {
       const p = document.createElement("p");
       p.className = "placeholder";
@@ -109,7 +99,10 @@ export function makePreviewPane() {
       return;
     }
     const my = token;
-    const url = await fetchPage(t, target);
+    const dpiEl = document.getElementById("optDpi");
+    const dv = parseInt((dpiEl && dpiEl.value) || "", 10);
+    const dpi = Number.isFinite(dv) && dv > 0 ? dv : null;
+    const url = await fetchPage(t, target, dpi);
     if (my !== token) return; // a newer show()/clear() superseded this render
     if (url == null) {
       paint(); // hit the end; nextBtn disables via lastPage
@@ -159,7 +152,10 @@ export function makePreviewPane() {
     cache = {};
     idx = 1;
     lastPage = null;
-    const url = await fetchPage(t, 1);
+    const dpiEl = document.getElementById("optDpi");
+    const dv = parseInt((dpiEl && dpiEl.value) || "", 10);
+    const dpi = Number.isFinite(dv) && dv > 0 ? dv : null;
+    const url = await fetchPage(t, 1, dpi);
     if (my !== token) return; // superseded by a newer show()/clear()
     paint(url == null ? "Preview render failed." : undefined);
   }

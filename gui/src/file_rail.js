@@ -76,14 +76,14 @@ export function makeFileRail() {
       setStage("tools", "");
     } else if (ok && report.llamaServer && report.pdftoppm) {
       // Soft warn if the build is known and below the min, even when ok.
-      setStage("tools", "is-ok");
+      setStage("tools", "ok");
     } else {
-      setStage("tools", "is-bad");
+      setStage("tools", "bad");
     }
 
     // Model GGUF + projector presence come straight off the report.
-    setStage("model", report && report.modelPresent ? "is-ok" : report ? "is-bad" : "");
-    setStage("mmproj", report && report.mmprojPresent ? "is-ok" : report ? "is-bad" : "");
+    setStage("model", report && report.modelPresent ? "ok" : report ? "bad" : "");
+    setStage("mmproj", report && report.mmprojPresent ? "ok" : report ? "bad" : "");
   }
 
   return { renderFiles, renderPipeline };

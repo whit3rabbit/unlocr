@@ -48,9 +48,11 @@ pub fn rasterize_range(
     }
 
     let pages = collect_pages(outdir);
-    if pages.is_empty() {
-        return Err("pdftoppm produced no pages".into());
-    }
+    // An empty result means pdftoppm ran cleanly but emitted nothing (the
+    // requested page/range is past EOF). That is a value, not an error: callers
+    // decide what an empty page set means (render_page -> out of range, ocr_pages
+    // -> explicit "produced no pages"). Real failures (non-zero exit, spawn,
+    // malformed PDF) already returned Err above.
     Ok(pages)
 }
 

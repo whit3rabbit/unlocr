@@ -100,9 +100,11 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
   calls `window.__TAURI__.dialog.open(...)` (exposed by the plugin's init IIFE
   under `withGlobalTauri`, no npm). Single-select seeds `#pdfPath`; batch import
   stays on drag-drop. Plugins added: `opener`, `dialog`. Ask before adding more.
-- `TASK_PROMPTS` (main.js) hardcodes the same prompt strings as Rust `Task::prompt()`
-  (src/main.rs); no shared source. Edit both. A Rust test asserts the `markdown`
-  preset equals `OcrOptions::default().prompt`, but only catches default drift.
+- `TASK_PROMPTS` (options.js, exported) hardcodes the same prompt strings as Rust
+  `Task::prompt()` (src/cli_args.rs); no shared source. Edit both. The Prompt box is an
+  optional override: empty -> the selected Task preset is sent (`readRunOptions`), filled
+  -> sent verbatim. Settings `default_prompt` defaults to "" (empty box); a non-empty
+  value seeds the run box. Unlimited-OCR uses NO system prompt; do not add one.
 
 ## Build / run (from gui/)
 - `node --check src/main.js`  # cheapest gate after a JS edit (no bundler/test on the static frontend)
@@ -127,6 +129,12 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
   its JS handler, and per-token DOM writes + forced reflow (`scrollTop`) starve the
   event loop so clicks (Stop) never run. Throttle DOM writes (buffer + flush per
   requestAnimationFrame) and cap rendered text. See ui.js `appendPartial`/`flushPartial`.
+- macOS orphan: the warm model is held in `AppState::model` for the whole app lifetime,
+  so a SIGKILL/segfault/`panic=abort` that skips `Drop` + the `RunEvent::Exit` cleanup
+  strands a multi-GB `llama-server`. Linux/Windows backstop this with
+  `PR_SET_PDEATHSIG`/Job Objects; macOS has neither, and a parent-side watchdog can't
+  help (it dies with the app). If a user force-quits, tell them to `pkill llama-server`.
+  See `src/server/local.rs` `Drop` + `Server::start`.
 
 ## Eatahorse run log (2026-06-27/28)
 

@@ -337,30 +337,10 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // Task preset -> fill the Prompt box. Keep these strings in sync with the CLI's
-  // Task::prompt() (src/main.rs). "custom" leaves whatever the user typed.
-  const TASK_PROMPTS = {
-    markdown: "<|grounding|>Convert the document to markdown.",
-    free: "Free OCR.",
-    figure: "Parse the figure.",
-  };
-  const taskEl = document.getElementById("optTask");
-  const promptEl = document.getElementById("optPrompt");
-  if (taskEl && promptEl) {
-    taskEl.addEventListener("change", () => {
-      const preset = TASK_PROMPTS[taskEl.value];
-      if (preset) {
-        promptEl.value = preset;
-        renderEffectiveSummary();
-      }
-    });
-    // A manual prompt edit means the box no longer matches a preset: flip to Custom
-    // so the dropdown does not falsely claim a preset is active.
-    promptEl.addEventListener("input", () => {
-      const match = Object.keys(TASK_PROMPTS).find((k) => TASK_PROMPTS[k] === promptEl.value);
-      taskEl.value = match || "custom";
-    });
-  }
+  // Task preset + Prompt box: the Task select picks the prompt actually sent; the
+  // Prompt box is an optional verbatim override (empty -> the Task preset). No autofill
+  // wiring needed -- options.js resolves the override and the #runOpts listener above
+  // refreshes the effective-values summary when either changes.
 
   // Surface the Q4_K_M loop caveat only when that quant is selected.
   const quantEl = document.getElementById("optQuant");

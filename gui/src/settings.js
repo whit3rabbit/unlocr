@@ -93,9 +93,8 @@ export async function wireSettings(onSaved) {
         llamaBin: (get(ids.llamaBin) && get(ids.llamaBin).value) || "",
         defaultDpi: num(ids.defaultDpi, 144),
         defaultMaxTokens: num(ids.defaultMaxTokens, 4096),
-        defaultPrompt:
-          (get(ids.defaultPrompt) && get(ids.defaultPrompt).value) ||
-          "<|grounding|>Convert the document to markdown.",
+        // Optional persistent override; empty = use the per-run Task preset.
+        defaultPrompt: (get(ids.defaultPrompt) && get(ids.defaultPrompt).value) || "",
         idleUnloadMinutes: numOrZero(ids.idleUnloadMinutes, 15),
       };
       try {

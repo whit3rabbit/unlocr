@@ -363,9 +363,14 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        // ponytail: Drop covers normal + error exit. Ctrl-C (SIGINT) does NOT
-        // run Drop, so it can orphan llama-server. Add a `ctrlc` handler if
-        // that turns out to bite.
+        // Drop covers normal + error exit. It does NOT run on Ctrl-C (SIGINT),
+        // SIGKILL, segfault, or panic (`panic=abort` skips Drop), so any of those
+        // can orphan llama-server. Linux/Windows are backstopped by
+        // PR_SET_PDEATHSIG / Job Objects (see `start`); macOS has neither, so a
+        // force-quit there strands the warm model — recover with `pkill
+        // llama-server`. A parent-side watchdog can't help: it dies with this
+        // process, and llama-server is not ours to patch. Add a `ctrlc` handler
+        // if SIGINT orphaning starts to bite.
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

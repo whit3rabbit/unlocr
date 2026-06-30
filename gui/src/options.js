@@ -3,25 +3,38 @@
 // "effective values" summary next to Run. Pure DOM; the summary reads from the
 // same readRunOptions() the Run button uses so it can never drift from the payload.
 
+// Task preset -> the user prompt actually sent. Unlimited-OCR uses NO system prompt;
+// the model needs a user-role task instruction (`<image>` is injected by llama.cpp's
+// mtmd from the image part, NOT this text). `<|grounding|>` is optional (enables layout
+// grounding), kept only on the markdown preset. The Prompt box overrides this when
+// non-empty. Keep in sync with the CLI's Task::prompt() (src/cli_args.rs).
+export const TASK_PROMPTS = {
+  markdown: "<|grounding|>Convert the document to markdown.",
+  free: "Free OCR.",
+  figure: "Parse the figure.",
+};
+
 /** Read the engine/options controls (EH-0005 bites 1 + 2) into the run_ocr invoke
  *  payload. Every control defaults to unlocr::OcrOptions::default() in the markup
- *  (quant=Q8_0, dpi=144, max_tokens=4096, keep_images=false, prompt="<|grounding|>
- *  Convert the document to markdown."), so a user who touches nothing sends
- *  CLI-parity values. Invalid/empty numbers fall back to the same defaults so a
- *  half-typed field never crashes a run. An empty prompt also falls back to the
- *  default so a run never sends a blank prompt. Keys are camelCase to match the
- *  Tauri command's parameter names. */
+ *  (quant=Q8_0, dpi=144, max_tokens=4096, keep_images=false), so a user who touches
+ *  nothing sends CLI-parity values. Invalid/empty numbers fall back to the same
+ *  defaults so a half-typed field never crashes a run. The Prompt box is an OPTIONAL
+ *  override: when empty it falls back to the selected Task preset, so a run never
+ *  sends a blank prompt. Keys are camelCase to match the Tauri command's parameter
+ *  names. */
 export function readRunOptions() {
   const quantEl = document.getElementById("optQuant");
   const dpiEl = document.getElementById("optDpi");
   const maxTokensEl = document.getElementById("optMaxTokens");
   const keepImagesEl = document.getElementById("optKeepImages");
   const promptEl = document.getElementById("optPrompt");
+  const taskEl = document.getElementById("optTask");
   const repeatPenaltyEl = document.getElementById("optRepeatPenalty");
 
   const DEFAULT_DPI = 144;
   const DEFAULT_MAX_TOKENS = 4096;
-  const DEFAULT_PROMPT = "<|grounding|>Convert the document to markdown.";
+  // Empty Prompt box -> the selected Task preset (markdown if the select is missing).
+  const taskPrompt = TASK_PROMPTS[taskEl && taskEl.value] || TASK_PROMPTS.markdown;
   const numOr = (el, fallback) => {
     const v = parseInt((el && el.value) || "", 10);
     return Number.isFinite(v) && v > 0 ? v : fallback;
@@ -45,7 +58,7 @@ export function readRunOptions() {
     dpi: numOr(dpiEl, DEFAULT_DPI),
     maxTokens: numOr(maxTokensEl, DEFAULT_MAX_TOKENS),
     keepImages: !!(keepImagesEl && keepImagesEl.checked),
-    prompt: promptOr(promptEl, DEFAULT_PROMPT),
+    prompt: promptOr(promptEl, taskPrompt),
     repeatPenalty: floatOrNull(repeatPenaltyEl),
     // 1-based inclusive page range; both null = all pages. The backend validates
     // first>=1 and last>=first (a direct invoke bypasses the form min= clamp).

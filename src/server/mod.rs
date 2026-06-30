@@ -249,6 +249,12 @@ pub(crate) fn ocr_via_stream(
                 let Ok(chunk_val) = serde_json::from_str::<serde_json::Value>(json_str) else {
                     continue;
                 };
+                // A 2xx stream can still carry a per-chunk provider error, e.g.
+                // {"error":{"message":"Context length exceeded"}}. Surface it
+                // instead of silently finishing with whatever partial text we have.
+                if let Some(msg) = provider_error(&chunk_val) {
+                    return Err(format!("provider error: {msg}").into());
+                }
                 if let Some(token) = chunk_val["choices"][0]["delta"]["content"].as_str() {
                     if !on_token(token) {
                         return Err(Box::<dyn std::error::Error>::from("stopped"));
@@ -264,6 +270,9 @@ pub(crate) fn ocr_via_stream(
             if let Some(json_str) = line.strip_prefix("data: ") {
                 if json_str.trim() != "[DONE]" {
                     if let Ok(chunk_val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        if let Some(msg) = provider_error(&chunk_val) {
+                            return Err(format!("provider error: {msg}").into());
+                        }
                         if let Some(token) = chunk_val["choices"][0]["delta"]["content"].as_str() {
                             if !on_token(token) {
                                 return Err(Box::<dyn std::error::Error>::from("stopped"));
@@ -297,8 +306,18 @@ pub(crate) fn ocr_via_stream(
 
 /// Pull the assistant message text out of an OpenAI-style chat completion.
 pub(crate) fn parse_completion(resp: &serde_json::Value) -> Res<String> {
+    if let Some(msg) = provider_error(resp) {
+        return Err(format!("provider error: {msg}").into());
+    }
     resp["choices"][0]["message"]["content"]
         .as_str()
         .map(|s| s.to_string())
         .ok_or_else(|| format!("unexpected response shape: {resp}").into())
+}
+
+fn provider_error(val: &serde_json::Value) -> Option<String> {
+    val.get("error")?
+        .get("message")?
+        .as_str()
+        .map(|s| s.to_string())
 }

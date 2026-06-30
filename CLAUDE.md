@@ -141,7 +141,11 @@ Thin wrapper. Full usage/benchmarks in README.md.
   `prctl(PR_SET_PDEATHSIG, SIGKILL)` and Windows assigns the child to a JobObject with
   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so llama-server dies with the parent (incl. a
   Ctrl-C/SIGINT exit that skips `Drop`). macOS has NEITHER, so a SIGINT there can still
-  orphan llama-server. (These pull in `libc`/`windows-sys` as per-OS deps in Cargo.toml.)
+  orphan llama-server. Abnormal exit (SIGKILL/segfault; also `panic=abort`) skips `Drop` on
+  every platform, and on macOS there is no kernel kill-on-parent-death to backstop it, so a
+  warm GUI model can be stranded. A parent-side watchdog cannot help (it dies with the parent),
+  and llama-server is not ours to patch; recover with `pkill llama-server`. (These pull in
+  `libc`/`windows-sys` as per-OS deps in Cargo.toml.)
 - Release profile tuned for size (opt-level=z, lto, panic=abort).
 - BSD sed (macOS) has no `\b`; use plain patterns or `[[:<:]]`/`[[:>:]]`.
 

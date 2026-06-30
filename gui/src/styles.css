@@ -79,7 +79,6 @@ button {
 
 /* Interactive titlebar children opt out of the drag region so clicks/typing
    reach them instead of moving the window. */
-.titlebar__search,
 .titlebar__mode,
 .titlebar__bell,
 .titlebar__brand {
@@ -132,30 +131,6 @@ button {
 
 .titlebar__spacer {
   flex: 1;
-}
-
-.titlebar__search {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 30px;
-  padding: 0 12px;
-  border-radius: 8px;
-  background: var(--bg);
-  border: 1px solid var(--bd);
-  color: var(--dim);
-  font-size: 12px;
-  min-width: 230px;
-}
-
-.titlebar__search-kbd {
-  margin-left: auto;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 11px;
-  color: var(--dim);
-  border: 1px solid var(--bd);
-  border-radius: 4px;
-  padding: 1px 5px;
 }
 
 .titlebar__mode {

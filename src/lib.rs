@@ -301,19 +301,11 @@ pub fn render_page(
     }
     std::fs::create_dir_all(&dir)?;
     // Render just this page, then re-scan for the specific page file (so a cache dir
-    // already holding OTHER pages cannot mask an out-of-range request).
-    //
-    // Distinguish the two reasons rasterize_range can fail:
-    //   - "produced no pages": pdftoppm ran cleanly but emitted nothing -> the page is
-    //     past the end. This is the out-of-range signal the GUI uses to bound nav.
-    //   - any other error (non-zero exit, spawn failure, malformed PDF): a REAL failure
-    //     that must surface, not be silently reported as end-of-document (which the GUI
-    //     would treat as "past the last page" and truncate navigation).
-    if let Err(e) = pdf::rasterize_range(pdftoppm, pdf, &dir, dpi, Some((page, Some(page)))) {
-        if !e.to_string().contains("produced no pages") {
-            return Err(e);
-        }
-    }
+    // already holding OTHER pages cannot mask an out-of-range request). A real
+    // pdftoppm failure (non-zero exit, spawn, malformed PDF) propagates via `?`;
+    // rasterize_range returns an empty Vec when the page is past EOF, which the
+    // find() below turns into the out-of-range error the GUI uses to bound nav.
+    pdf::rasterize_range(pdftoppm, pdf, &dir, dpi, Some((page, Some(page))))?;
     pdf::collect_pages(&dir)
         .into_iter()
         .find(|p| pdf::trailing_number(p) == Some(want))
@@ -341,6 +333,14 @@ where
 {
     let tmp = tempfile::tempdir()?;
     let pages = pdf::rasterize_range(pdftoppm, input, tmp.path(), opts.dpi, opts.pages)?;
+    // rasterize_range returns an empty Vec (not an Err) when pdftoppm runs clean
+    // but emits nothing. For an OCR run that means nothing was rendered (empty
+    // PDF or a page range past EOF): error out rather than write a silent empty
+    // file. render_page intentionally keeps empty as a value for out-of-range
+    // detection; this run path treats it as a failure.
+    if pages.is_empty() {
+        return Err("pdftoppm produced no pages".into());
+    }
     let n = pages.len();
 
     // With a page range, the first rasterized page is the range's start, not page 1.
@@ -488,7 +488,7 @@ pub fn write_markdown_output(
         }
         // Zero-pad to the largest page number's width (min 2) so a listing sorts
         // page-01 before page-10. Width defaults to 2 when there are no pages
-        // (defensive: rasterize_range errors on zero pages before we get here).
+        // (defensive: ocr_pages errors on zero pages before we get here).
         let width = output
             .pages
             .last()

@@ -76,8 +76,12 @@ fn default_dpi() -> u32 {
 fn default_max_tokens() -> u32 {
     OcrOptions::default().max_tokens
 }
+// Empty by default: the per-run Prompt box is an optional override, and an empty box
+// falls back to the selected Task preset (options.js). A non-empty persistent value here
+// seeds the run box. NOT OcrOptions::default().prompt: that would pre-fill the box and
+// read like mandatory boilerplate (Unlimited-OCR uses no system prompt).
 fn default_prompt() -> String {
-    OcrOptions::default().prompt
+    String::new()
 }
 fn default_idle_unload_minutes() -> u32 {
     15

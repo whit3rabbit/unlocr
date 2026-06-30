@@ -364,3 +364,99 @@ fn stream_falls_back_to_plain_json_completion() {
     // The fallback delivers the whole body as one on_token call.
     assert_eq!(tokens, vec!["plain json ok".to_string()]);
 }
+
+/// A 2xx stream that carries a provider error chunk (`{"error":{"message":..}}`)
+/// must surface as an Err carrying that message, not silently finish with the
+/// partial text gathered so far. Regression guard for the bug where the SSE loop
+/// only inspected `choices[0].delta.content` and let error chunks fall through,
+/// making a failed run look successful with empty/partial output.
+#[test]
+fn sse_streaming_surfaces_provider_error() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    // A single error chunk (vLLM/OpenAI-style), then [DONE]. No content chunks.
+    let sse_body = concat!(
+        "data: {\"error\":{\"message\":\"Context length exceeded\"}}\r\n",
+        "data: [DONE]\r\n",
+    );
+    let http_response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{}",
+        sse_body.len(),
+        sse_body,
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
+    let port = listener.local_addr().unwrap().port();
+
+    let http_resp_clone = http_response.clone();
+    std::thread::spawn(move || {
+        if let Ok(stream) = listener.accept() {
+            let (sock, _) = stream;
+            let mut reader = BufReader::new(sock.try_clone().expect("clone"));
+            let mut writer = sock;
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let t = line.trim_end_matches(['\r', '\n']);
+                if t.is_empty() {
+                    break;
+                }
+                if t.to_ascii_lowercase().starts_with("content-length:") {
+                    if let Some(v) = t.split_once(':').map(|x| x.1) {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            let _ = Read::read_exact(&mut reader, &mut body);
+            let _ = writer.write_all(http_resp_clone.as_bytes());
+        }
+    });
+
+    let base_url = format!("http://127.0.0.1:{port}");
+    let mut tokens: Vec<String> = Vec::new();
+    let result = ocr_via_stream(
+        &base_url,
+        None,
+        None,
+        "test prompt",
+        "data:image/png;base64,AAAA",
+        64,
+        None,
+        &mut |chunk: &str| {
+            tokens.push(chunk.to_string());
+            true
+        },
+        &|| false,
+    );
+
+    let err = result.expect_err("provider error chunk must surface as Err, not Ok");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Context length exceeded"),
+        "error message must carry the provider text, got: {msg}"
+    );
+    assert!(
+        tokens.is_empty(),
+        "no token should be emitted for an error chunk"
+    );
+}
+
+/// `provider_error` extracts the message from the OpenAI/vLLM/SGLang error
+/// object and returns None for a normal completion body. Pure, no network.
+#[test]
+fn provider_error_extracts_message() {
+    assert_eq!(
+        provider_error(&json!({"error": {"message": "boom", "code": 400}})),
+        Some("boom".to_string())
+    );
+    assert_eq!(
+        provider_error(&json!({"choices": [{"message": {"content": "ok"}}]})),
+        None
+    );
+    assert_eq!(provider_error(&json!({})), None);
+}
