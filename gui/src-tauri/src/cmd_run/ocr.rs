@@ -45,6 +45,15 @@ struct ImagesKept {
     dir: String,
 }
 
+/// Payload for `ocr://status`: a one-line message for a long, event-less phase
+/// (here, pdftoppm rasterizing every page up front before page 1's event) so the
+/// run popup does not sit frozen on "starting…".
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusMsg {
+    message: String,
+}
+
 /// Return value of `run_ocr`: every written file path (combined file first in
 /// single/both; first page file in pages) plus the in-memory combined markdown.
 /// `combined` lets the frontend render a preview in `pages` mode, where no
@@ -189,6 +198,14 @@ pub(crate) async fn run_ocr(
             let lm = guard.as_ref().ok_or("load a model first")?;
             is_local = matches!(&lm.backend, Backend::Local(_));
 
+            // Local GGUF quants fall into infinite-loop output on dense pages; a
+            // repeat penalty escapes it. Default to 1.1 when the user left the field
+            // blank (None). An explicit value wins; remote (full-precision vLLM) is
+            // left alone, it does not exhibit the quant loop.
+            if is_local && opts.repeat_penalty.is_none() {
+                opts.repeat_penalty = Some(1.1);
+            }
+
             for input in &inputs {
                 let input_path = PathBuf::from(input);
 
@@ -234,6 +251,16 @@ pub(crate) async fn run_ocr(
                     }
                     _ => {}
                 };
+
+                // ocr_pages rasterizes EVERY page with pdftoppm before the first
+                // page event; on a big PDF that is a long silent gap. Tell the popup
+                // so it does not look hung on "starting…".
+                let _ = app.emit(
+                    "ocr://status",
+                    StatusMsg {
+                        message: "rasterizing pages…".to_string(),
+                    },
+                );
 
                 let should_cancel = || state.cancel.load(Ordering::SeqCst);
                 let outcome = match &lm.backend {

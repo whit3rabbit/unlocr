@@ -58,6 +58,16 @@ export async function subscribeOcrEvents(ui) {
     },
   ]);
 
+  // Free-form status for a long, event-less phase (rasterizing every page before
+  // page 1) so the popup does not look frozen on "starting…". Stays indeterminate.
+  handlers.push([
+    "ocr://status",
+    (e) => {
+      const { message } = e.payload || {};
+      if (message) ui.setStatus(message);
+    },
+  ]);
+
   // llama-server healthy, about to OCR pages. Indeterminate until first page.
   handlers.push([
     "ocr://server-ready",

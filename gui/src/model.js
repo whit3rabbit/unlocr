@@ -307,6 +307,10 @@ export function attachLoadListeners() {
     const { name, pct } = (e && e.payload) || {};
     if (statusText) statusText.textContent = "downloading " + (name || "model") + " " + (pct || 0) + "%";
   });
+  t.event.listen("ocr://status", (e) => {
+    const { message } = (e && e.payload) || {};
+    if (statusText && message) statusText.textContent = message;
+  });
   t.event.listen("ocr://server-ready", (e) => {
     const { port } = (e && e.payload) || {};
     if (statusText) statusText.textContent = "server ready on :" + port;

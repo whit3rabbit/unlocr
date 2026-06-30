@@ -42,6 +42,15 @@ struct ServerReady {
     port: u16,
 }
 
+/// Payload for the `ocr://status` event: a free-form one-line message surfacing
+/// what a long, otherwise event-less phase is doing (model load into RAM,
+/// rasterization) so the UI does not look frozen.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusMsg {
+    message: String,
+}
+
 /// Load a model so it stays warm in RAM (litellm-style), gating Run OCR until it
 /// succeeds.
 #[allow(clippy::too_many_arguments)]
@@ -160,6 +169,15 @@ pub(crate) async fn load_model(
                 .map_err(|e| e.to_string())?;
 
                 let port = free_port().map_err(|e| e.to_string())?;
+                // Server::start blocks in await_health while llama-server loads the
+                // multi-GB GGUF into RAM, emitting nothing. Surface a status so the
+                // model bar does not sit frozen on "downloading 100%"/"loading…".
+                let _ = app.emit(
+                    "ocr://status",
+                    StatusMsg {
+                        message: "loading model into memory (can take a minute)…".to_string(),
+                    },
+                );
                 let srv = Server::start(
                     &tools.llama_server,
                     &files.model,

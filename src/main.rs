@@ -101,6 +101,12 @@ fn run() -> Res<()> {
         return run_remote(base_url, &inputs, &args);
     }
 
+    // Local GGUF path only (remote returned above): default the repeat penalty to
+    // 1.1 so the stock quants do not fall into infinite-loop output on dense pages.
+    // An explicit --repeat-penalty wins; remote/--gpu (full-precision vLLM) is left
+    // untouched since it does not exhibit the quant loop.
+    args.repeat_penalty = args.repeat_penalty.or(Some(1.1));
+
     // --mmproj alone is meaningless: it overrides the projector for a custom model,
     // but without --model the stock model + stock projector are the matched pair.
     // Checked before preflight so it fails fast without needing llama-server present.
