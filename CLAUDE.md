@@ -7,6 +7,10 @@ Thin wrapper. Full usage/benchmarks in README.md.
 - Cargo workspace lives in repo root. Source: `src/`.
   Modules / File Tree:
   - `lib.rs`: library entry point, exports `model`, `pdf`, `preflight`, `server`, `tools`.
+    Also splits the clap-free core into private `options`/`output`/`preview`/`job` mods
+    re-exported at the crate root (`OcrOptions`, `OutputMode`, `OcrOutput`, `Progress`,
+    `run_ocr_job`, `ocr_pages`, `render_pages`/`render_page`, `resolve_output_path`,
+    `write_markdown_output`, `duplicate_stems`); see the Public lib API gotcha below.
   - `main.rs`: CLI binary entry point, declares `ocr`, `cli_args`, `inputs`.
   - `cli_args.rs`: CLI argument parsing / clap definition.
   - `inputs.rs`: CLI input parsing and expansion.
@@ -24,7 +28,8 @@ Thin wrapper. Full usage/benchmarks in README.md.
   - `preflight.rs`: preflight checks and doctor diagnostics.
   - `preflight/`:
     - `hints.rs`: platform-specific installation hints.
-    - `system.rs`: environment checking (binary locate/permissions).
+    - `system.rs`: environment checking (binary locate/permissions) + RAM/CPU/disk/GPU probes.
+    - `sysreq.rs`: rates those probes against thresholds into `SystemInfo` for the GUI System Requirements panel.
   - `tools/`: folder containing the on-demand tool downloader.
     - `mod.rs`: PINS, download, extract_zip.
     - `tests.rs`: tests.
@@ -125,13 +130,15 @@ Thin wrapper. Full usage/benchmarks in README.md.
   per-request body field (in `ocr_via`/`ocr_via_stream`). `--task` is a CLI-side prompt
   preset; `--prompt` overrides it. Upstream Python knobs (`base_size`/`crop_mode`/
   gundam tiling, `no_repeat_ngram_size`) are NOT reachable via the OpenAI endpoint.
-- Numeric knobs need explicit range guards in BOTH places: CLI `run()` (clap does
-  not bounds-check) AND the GUI `run_ocr`/`load_model` commands (a direct `invoke()`
-  bypasses the HTML `min=` form clamp). Pattern: reject `0`/non-finite/`<=0` before
-  spawn (dpi, image-max-tokens, repeat-penalty all do this).
-  When both front ends route through one lib fn, put the guard there as a single
-  shared sink instead (e.g. `model::require_file` validates `--model`/`--mmproj` and
-  the GUI `model_file`/`mmproj_file` in one place).
+- Numeric knobs need explicit range guards: clap does not bounds-check the CLI, and
+  a direct `invoke()` bypasses the GUI's HTML `min=` form clamp. The single shared
+  sink is `OcrOptions::validate()` in `src/options.rs` (rejects dpi==0 /
+  max_tokens==0 / image_max_tokens==Some(0) / non-finite or <=0 repeat_penalty /
+  page first==0 or last<first). CLI `main.rs::run` and GUI
+  `cmd_run/ocr/validation.rs` BOTH call it, so add a new numeric knob's guard THERE,
+  not in two duplicated front-end checks. (`image_max_tokens` is a load-time flag, so
+  GUI `load_model` also guards it before `Server::start`.) `model::require_file` is the
+  analogous single sink for `--model`/`--mmproj`.
 - A per-request body knob must be added to BOTH `ocr_via` and `ocr_via_stream`
   (stream + non-stream paths). Route it through a shared helper (`apply_repeat_penalty`).
 - rust-analyzer inline diagnostics can lag the source (saw repeated false
@@ -148,6 +155,21 @@ Thin wrapper. Full usage/benchmarks in README.md.
   `libc`/`windows-sys` as per-OS deps in Cargo.toml.)
 - Release profile tuned for size (opt-level=z, lto, panic=abort).
 - BSD sed (macOS) has no `\b`; use plain patterns or `[[:<:]]`/`[[:>:]]`.
+- `src/preflight/system.rs` parses Linux `/proc/cpuinfo` with the literal prefix
+  `"core id\t\t: "` (TWO tabs) and `"physical id\t: "` (one tab). This is CORRECT, not
+  a bug: the x86 kernel (`arch/x86/kernel/cpu/proc.c`) prints
+  `seq_printf("core id\t\t: %d\n", ...)` with two tabs to align the colon. Do not
+  "fix" it to one tab (twice flagged in review, twice refuted against the kernel
+  source). ARM `/proc/cpuinfo` has no `core id`/`physical id` fields, so the fn
+  returns `None` there by design.
+- `Progress::Page { page, total }`: `total` is the number of pages processed THIS run
+  (the rendered `--pages` subset size), NOT the document's page count. A ranged run
+  (`--pages 5-15`) emits `total` = 11; the GUI progress bar reflects the run span,
+  not the whole PDF. The field doc says so explicitly now.
+- `preflight::sysreq` rates the `system.rs` probes into a `SystemInfo` the GUI renders.
+  The static probes (RAM/CPU/model/GPU) are memoized per-process via a `OnceLock`
+  (`detect_gpu` shells `system_profiler` ~1-2s on macOS / `lspci`+`nvidia-smi` on
+  Linux); only disk free is re-probed per call (it changes as models download).
 
 ## Tauri GUI run log (2026-06-28)
 

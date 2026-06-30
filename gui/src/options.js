@@ -14,6 +14,11 @@ export const TASK_PROMPTS = {
   figure: "Parse the figure.",
 };
 
+// EH-0013 bite 2: i18n hook. Named `tr` -- `t` is the range "to" page number in
+// readPageSelection(). TASK_PROMPTS above are model-instruction payloads and stay
+// canonical English on purpose (they are sent to the model, not shown to the user).
+const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
+
 /** Read the engine/options controls (EH-0005 bites 1 + 2) into the run_ocr invoke
  *  payload. Every control defaults to unlocr::OcrOptions::default() in the markup
  *  (quant=Q8_0, dpi=144, max_tokens=4096, keep_images=false), so a user who touches
@@ -107,8 +112,8 @@ export function wirePageSelection() {
     const mode = modeEl.value;
     wrap.hidden = mode === "all";
     if (toEl) toEl.hidden = mode !== "range";
-    if (label) label.textContent = mode === "range" ? "Pages" : "Page";
-    if (fromEl) fromEl.placeholder = mode === "range" ? "from" : "page";
+    if (label) label.textContent = mode === "range" ? tr("opts.pages") : tr("opts.pageSingular");
+    if (fromEl) fromEl.placeholder = mode === "range" ? tr("opts.from") : tr("opts.pagePh");
     renderEffectiveSummary();
   };
   // Visibility toggle on mode change; the summary is refreshed by the shared
@@ -139,16 +144,24 @@ export function renderEffectiveSummary() {
   let pagesNote = "";
   if (opts.firstPage != null || opts.lastPage != null) {
     const f = opts.firstPage != null ? opts.firstPage : 1;
-    if (opts.lastPage != null && opts.lastPage !== f) pagesNote = " · pages " + f + "-" + opts.lastPage;
-    else if (opts.lastPage == null) pagesNote = " · pages " + f + "-end";
-    else pagesNote = " · page " + f;
+    if (opts.lastPage != null && opts.lastPage !== f) pagesNote = tr("eff.pagesRange", { from: f, to: opts.lastPage });
+    else if (opts.lastPage == null) pagesNote = tr("eff.pagesToEnd", { from: f });
+    else pagesNote = tr("eff.pageSingle", { n: f });
   }
-  const modeNote = opts.outputMode === "single" ? "" : " · output " + opts.outputMode;
-  vals.textContent =
-    opts.quant +
-    " · " + opts.dpi + " DPI · " + opts.maxTokens + " tok · " +
-    "keep images " + (opts.keepImages ? "on" : "off") +
-    pagesNote +
-    modeNote +
-    " · prompt: “" + shown + ellipsis + "”";
+  const modeNote = opts.outputMode === "single" ? "" : tr("eff.output", { mode: opts.outputMode });
+  vals.textContent = tr("eff.summary", {
+    quant: opts.quant,
+    dpi: opts.dpi,
+    maxTokens: opts.maxTokens,
+    keepImages: tr(opts.keepImages ? "job.on" : "job.off"),
+    pages: pagesNote,
+    mode: modeNote,
+    prompt: shown + ellipsis,
+  });
+}
+
+// EH-0013: re-render the effective-values summary on a locale switch so its
+// composed string (DPI/tok/keep-images/prompt) retranslates instantly.
+if (typeof window !== "undefined" && window.unlocrI18n && window.unlocrI18n.onLocaleChange) {
+  window.unlocrI18n.onLocaleChange(renderEffectiveSummary);
 }

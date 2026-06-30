@@ -9,7 +9,10 @@
   --bd2: #1d2025;
   --hi: #e9eaed;
   --tx: #b4b8c0;
-  --dim: #6f757f;
+  /* EH-0003: raised from #6f757f, which measured 3.65-4.22:1 and failed WCAG AA
+     4.5:1 on every surface. #8b919b measures 5.33-6.17:1 (AA pass) while staying
+     clearly darker than --tx (8.5-9.8:1), so dim still reads as secondary. */
+  --dim: #8b919b;
   --amber: #e8a33d;
   --amberbg: rgba(232, 163, 61, 0.12);
   --green: #5cc98f;
@@ -28,7 +31,10 @@
   --glass: rgba(20, 22, 25, 0.62);
   --glass-bd: rgba(255, 255, 255, 0.07);
 
-  font-family: "IBM Plex Sans", Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  /* EH-0019/EH-0020/EH-0021: CJK fallbacks so Chinese/Japanese/Korean text renders
+     with a real font instead of tofu. Latin faces stay first; the CJK stack only
+     kicks in for glyphs the Latin faces lack. Chinese + Korean + Japanese families. */
+  font-family: "IBM Plex Sans", Inter, system-ui, Avenir, Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Noto Sans JP", sans-serif;
   font-size: 14px;
   line-height: 1.45;
   color: var(--tx);
@@ -53,6 +59,48 @@ body {
 button {
   font-family: inherit;
   color: inherit;
+}
+
+/* ---------- keyboard focus ring (EH-0002) ----------
+   Visible only for keyboard nav (:focus-visible), so a mouse click shows no ring.
+   --accent measures >=3:1 against --bg/--panel/--panel2 (4.27-4.95), so the ring
+   reads on every surface. The 2px offset lifts it off the control onto its
+   background, so an accent-filled button (e.g. .run-btn) still shows a ring.
+   :where() keeps specificity 0 so component :focus styles (border-color shifts)
+   compose instead of being overridden. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Visually hidden but available to screen readers (EH-0001 route announcer). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* EH-0011: skip link. Off-screen until focused, then visible on top of everything. */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 8px;
+  z-index: 200;
+}
+.skip-link:focus {
+  left: 8px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 /* ---------- app frame ---------- */
@@ -1127,6 +1175,27 @@ button {
   font-size: 12px;
 }
 
+/* Settings > System Requirements: same row layout as Dependencies.
+   Adds a warn (amber) state for marginal metrics and colored verdict labels. */
+.settings__sysreq {
+  margin-top: 18px;
+}
+.dep-row__status.is-warn {
+  color: var(--amber);
+}
+.sysreq__verdict.is-good {
+  color: var(--green);
+}
+.sysreq__verdict.is-marginal {
+  color: var(--amber);
+}
+.sysreq__verdict.is-insufficient {
+  color: var(--red);
+}
+.sysreq__verdict.is-unknown {
+  color: var(--dim);
+}
+
 /* ---------- EasyMDE dark-theme overrides ----------
    EasyMDE ships its own (light) CSS (assets/easymde.min.css). These rules retheme it
    to the app palette and make it fill the review pane. The toolbar uses text-label
@@ -1259,6 +1328,8 @@ button {
 }
 
 .library__grid {
+  list-style: none;
+  margin: 0;
   flex: 1;
   min-height: 0;
   overflow: auto;
@@ -1484,6 +1555,8 @@ button {
 }
 
 .board__col-list {
+  list-style: none;
+  margin: 0;
   flex: 1;
   min-height: 0;
   overflow-y: auto;

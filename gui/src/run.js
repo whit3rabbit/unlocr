@@ -6,6 +6,9 @@ import { requireTauri } from "./tauri.js";
 import { runOcrOnPath } from "./run_ocr.js";
 import { jobBaseName } from "./paths.js";
 
+// EH-0013 bite 2: i18n hook. Named `tr` -- `t` is the Tauri handle in wireLibraryDrop.
+const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
+
 // Shared across BOTH run entry points (the Run button and the drag-drop importer)
 // so a second batch cannot start while one is live. runOcrOnPath shares a single
 // unlistensRef; two concurrent batches would race its teardown/subscribe and leak
@@ -33,13 +36,13 @@ export function wireRunButton(ui, mdPane, unlistensRef, getQueuedPaths) {
     const fallback = (pathInput && pathInput.value || "").trim();
     const paths = queued.length > 0 ? queued : fallback ? [fallback] : [];
     if (paths.length === 0) {
-      ui.fail("import or type a PDF path first");
+      ui.fail(tr("run.noPath"));
       return;
     }
     // One batch at a time: a double-click (or the Board's "Run all" proxy) while a
     // run is live would start a second concurrent batch sharing unlistensRef.
     if (runInFlight) {
-      ui.setStatus("a run is already in progress");
+      ui.setStatus(tr("run.alreadyRunning"));
       return;
     }
     // Fire-and-forget: the click handler cannot await without holding the event.
@@ -133,8 +136,8 @@ export function wireLibraryDrop(ui, mdPane, unlistensRef) {
     if (grid) grid.classList.toggle("is-drop-target", on);
     if (empty) {
       empty.textContent = on
-        ? "Drop PDF files to import and run OCR."
-        : "No OCR jobs yet. Run OCR to populate the library.";
+        ? tr("run.dropHintActive")
+        : tr("run.libraryEmpty");
     }
   }
 
@@ -143,7 +146,7 @@ export function wireLibraryDrop(ui, mdPane, unlistensRef) {
   async function enqueueDrops(paths) {
     const pdfs = (paths || []).filter((p) => typeof p === "string" && p.trim());
     if (pdfs.length === 0) {
-      if (ui) ui.setStatus("drop ignored: no files");
+      if (ui) ui.setStatus(tr("run.dropNoFiles"));
       return;
     }
     const accepted = pdfs.filter((p) => p.toLowerCase().endsWith(".pdf"));
@@ -153,7 +156,7 @@ export function wireLibraryDrop(ui, mdPane, unlistensRef) {
       console.warn("[drop] skipped non-PDF drops:", rejected);
     }
     if (accepted.length === 0) {
-      if (ui) ui.setStatus("drop ignored: not a PDF");
+      if (ui) ui.setStatus(tr("run.dropNotPdf"));
       return;
     }
     if (runInFlight) {

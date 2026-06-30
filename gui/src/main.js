@@ -20,7 +20,7 @@ import {
   markCachedQuants,
   refreshModelStatus,
 } from "./model.js";
-import { wireSettings, wireCacheControls, wireDependencies } from "./settings.js";
+import { wireSettings, wireCacheControls, wireDependencies, wireSystemRequirements } from "./settings.js";
 import { initNotifications } from "./toasts.js";
 import { wirePageSelection, renderEffectiveSummary } from "./options.js";
 import { preflightOnLoad } from "./ocr-events.js";
@@ -117,6 +117,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   markCachedQuants();
   wireCacheControls();
+  wireSystemRequirements();
   wireDependencies();
   refreshModelStatus(ui);
   // The backend idle-unload watcher drops the warm model after N idle minutes and
@@ -124,6 +125,12 @@ window.addEventListener("DOMContentLoaded", () => {
   const unloadEv = window.__TAURI__ && window.__TAURI__.event;
   if (unloadEv && unloadEv.listen) {
     unloadEv.listen("model://unloaded", () => refreshModelStatus(ui));
+  }
+  // Retranslate the model status text + Local/Remote badge when the locale
+  // changes (or first loads): both are set imperatively from tr() in model.js,
+  // not data-i18n nodes, so without this they hold the launch-language strings.
+  if (window.unlocrI18n && window.unlocrI18n.onLocaleChange) {
+    window.unlocrI18n.onLocaleChange(() => refreshModelStatus(ui));
   }
   // Notification bell + panel + download toasts. Self-contained; silent in a
   // plain browser (no Tauri). Seeds the unread badge from the persisted store.
@@ -380,5 +387,76 @@ window.addEventListener("DOMContentLoaded", () => {
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn("[store] load skipped:", err.message);
+  }
+
+  // Accessibility global hotkeys
+  if (typeof hotkeys !== "undefined") {
+    // Inside an input/textarea/contenteditable, only honor the submit-style
+    // modifiers (Ctrl/Cmd) so the Run shortcut (ctrl+enter / cmd+enter) fires
+    // there too, including macOS Cmd. Alt is excluded in editables so Alt+Enter
+    // stays a normal key (newline / IME), not a hijacked Run trigger; Alt-based
+    // shortcuts still work when focus is not in a text field (return true).
+    hotkeys.filter = function(event) {
+      const target = event.target || event.srcElement;
+      const isEditable = target.tagName === "INPUT" || target.tagName === "TEXTAREA" || (target && target.isContentEditable);
+      if (isEditable) {
+        return event.ctrlKey || event.metaKey;
+      }
+      return true;
+    };
+
+    // 1. Navigation Rail Switching (Alt + W/L/B/R/S)
+    const routes = {
+      "alt+w": "workspace",
+      "alt+l": "library",
+      "alt+b": "board",
+      "alt+r": "review",
+      "alt+s": "settings",
+    };
+    Object.keys(routes).forEach((key) => {
+      hotkeys(key, (event) => {
+        event.preventDefault();
+        const btn = document.querySelector(`.rail__btn[data-route="${routes[key]}"]`);
+        if (btn) btn.click();
+      });
+    });
+
+    // 2. Import PDF (Alt + I)
+    hotkeys("alt+i", (event) => {
+      const activeView = document.querySelector(".view.is-shown");
+      if (activeView && (activeView.dataset.view === "workspace" || activeView.dataset.view === "board")) {
+        event.preventDefault();
+        const importBtn = document.getElementById("importBtn");
+        if (importBtn && !importBtn.disabled) importBtn.click();
+      }
+    });
+
+    // 3. Run OCR (Ctrl+Enter, Cmd+Enter, or Alt+Enter)
+    hotkeys("alt+enter,ctrl+enter,cmd+enter", (event) => {
+      const activeView = document.querySelector(".view.is-shown");
+      if (activeView && (activeView.dataset.view === "workspace" || activeView.dataset.view === "board")) {
+        event.preventDefault();
+        const runBtn = document.getElementById("runBtn");
+        if (runBtn && !runBtn.disabled) runBtn.click();
+      }
+    });
+
+    // 4. Toggle Notifications Panel (Alt + N)
+    hotkeys("alt+n", (event) => {
+      event.preventDefault();
+      const bell = document.getElementById("notifyBell");
+      if (bell) bell.click();
+    });
+
+    // 5. Focus Markdown editor on Review view (Alt + M)
+    hotkeys("alt+m", (event) => {
+      const activeView = document.querySelector(".view.is-shown");
+      if (activeView && activeView.dataset.view === "review") {
+        event.preventDefault();
+        if (mdPane && typeof mdPane.focus === "function") {
+          mdPane.focus();
+        }
+      }
+    });
   }
 });

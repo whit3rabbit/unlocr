@@ -19,6 +19,7 @@ pub struct Server {
 }
 
 #[cfg(windows)]
+/// Windows-specific process grouping helper using Job Objects.
 mod win_job {
     use std::os::windows::io::{AsRawHandle, RawHandle};
     use std::process::Child;
@@ -29,6 +30,9 @@ mod win_job {
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
 
+    /// A safe wrapper around a Windows Job Object handle.
+    ///
+    /// The wrapped handle is closed when this wrapper is dropped.
     pub struct JobHandle(HANDLE);
 
     unsafe impl Send for JobHandle {}
@@ -42,6 +46,10 @@ mod win_job {
         }
     }
 
+    /// Creates a Job Object with kill-on-close limits and binds the child process to it.
+    ///
+    /// This ensures that the child process is automatically terminated by the OS
+    /// if the parent process exits or is terminated.
     pub fn bind_child(child: &Child) -> Result<Option<JobHandle>, String> {
         unsafe {
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());

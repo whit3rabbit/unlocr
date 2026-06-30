@@ -27,3 +27,5 @@
 repomix-output.xml
 .vscode/
 CLAUDE.local.md
+# security-audit output (vulnerability inventory, do not commit)
+.security-audit/

@@ -16,7 +16,7 @@
 //   - cmd_store.rs  job store, settings, and notification command wrappers.
 // This file keeps only the module wiring and the `run()` builder.
 
-use tauri::menu::{MenuBuilder, SubmenuBuilder};
+use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager, RunEvent};
 
 // SQLite backing for the jobs/settings/notifications stores (single unlocr.db
@@ -43,7 +43,7 @@ pub use store::{Job, JobOptions};
 
 use cmd_model::{
     clear_model_cache, get_cache_info, list_local_models, load_model, model_status, preflight,
-    stop_ocr, unload_model,
+    stop_ocr, system_requirements, unload_model,
 };
 use cmd_run::{
     brew_available, brew_install, download_tool, export_markdown, host_os, list_tools,
@@ -155,10 +155,23 @@ pub fn run() {
             // frontend reuses the existing toolbar buttons (no logic forked
             // here). Exit uses the predefined quit item, which fires
             // RunEvent::Exit below and kills llama-server.
+            let load_pdf = MenuItemBuilder::new("Load PDF...")
+                .id("menu_load_pdf")
+                .accelerator("CmdOrCtrl+O")
+                .build(app)?;
+            let load_model = MenuItemBuilder::new("Load Model")
+                .id("menu_load_model")
+                .accelerator("CmdOrCtrl+M")
+                .build(app)?;
+            let unload_model = MenuItemBuilder::new("Unload Model")
+                .id("menu_unload_model")
+                .accelerator("CmdOrCtrl+Shift+U")
+                .build(app)?;
+
             let file = SubmenuBuilder::new(app, "File")
-                .text("menu_load_pdf", "Load PDF...")
-                .text("menu_load_model", "Load Model")
-                .text("menu_unload_model", "Unload Model")
+                .item(&load_pdf)
+                .item(&load_model)
+                .item(&unload_model)
                 .separator()
                 .quit()
                 .build()?;
@@ -218,7 +231,8 @@ pub fn run() {
             clear_notification,
             mark_notifications_read,
             clear_all_notifications,
-            stop_ocr
+            stop_ocr,
+            system_requirements
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

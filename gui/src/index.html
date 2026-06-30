@@ -12,10 +12,21 @@
          editor. DOMPurify first: EasyMDE's preview sanitizerFunction uses it. -->
     <script src="assets/purify.min.js"></script>
     <script src="assets/easymde.min.js"></script>
+    <!-- EH-0014: i18n runtime (classic script, exposes window.t / window.unlocrI18n
+         before main.js runs; self-inits on DOMContentLoaded). -->
+    <script src="assets/i18n.js"></script>
+    <!-- Keyboard shortcuts helper for accessibility -->
+    <script src="assets/hotkeys.min.js"></script>
     <script type="module" src="/main.js" defer></script>
   </head>
 
   <body>
+    <!-- EH-0011: skip link is the first focusable element; keyboard users jump
+         straight to the main view instead of tabbing through the titlebar/rail. -->
+    <a class="skip-link" href="#screen" data-i18n="nav.skipToMain">Skip to main content</a>
+    <!-- EH-0001: polite live region for route-change announcements (visually
+         hidden, read by screen readers). #screenTitle stays the visible label. -->
+    <div class="sr-only" id="routeAnnouncer" role="status" aria-live="polite"></div>
     <!-- unlocr shell, reproduced from the rendered mockup as static HTML/CSS.
          No template engine; placeholder panes hold the views until later cards
          wire preflight / ocr / ocr://page. The activity rail (left icons) is the
@@ -51,11 +62,11 @@
            list_notifications. Hidden until the bell is clicked. -->
       <div class="notify-panel" id="notifyPanel" hidden>
         <div class="notify-panel__head">
-          <span class="notify-panel__title">Notifications</span>
-          <button class="notify-panel__clear" id="notifyClearAll" type="button">Clear all</button>
+          <span class="notify-panel__title" data-i18n="notify.title">Notifications</span>
+          <button class="notify-panel__clear" id="notifyClearAll" type="button" data-i18n="notify.clearAll">Clear all</button>
         </div>
         <div class="notify-panel__list" id="notifyList">
-          <p class="notify-panel__empty">No notifications.</p>
+          <p class="notify-panel__empty" data-i18n="notify.empty">No notifications.</p>
         </div>
       </div>
 
@@ -63,41 +74,41 @@
       <div class="app__body">
         <!-- activity rail (icon nav) -->
         <nav class="rail" aria-label="Views">
-          <button class="rail__btn is-active" data-route="workspace" title="Workspace">
+          <button class="rail__btn is-active" data-route="workspace" title="Workspace" aria-label="Workspace" data-i18n-aria="nav.workspace" aria-current="page">
             <svg width="19" height="19" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="3" width="14" height="13" rx="2"></rect><line x1="7.5" y1="3" x2="7.5" y2="16"></line></svg>
           </button>
-          <button class="rail__btn" data-route="library" title="Library">
+          <button class="rail__btn" data-route="library" title="Library" aria-label="Library" data-i18n-aria="nav.library">
             <svg width="19" height="19" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="3" width="14" height="13" rx="2"></rect><line x1="2.5" y1="7.5" x2="16.5" y2="7.5"></line><line x1="2.5" y1="11.5" x2="16.5" y2="11.5"></line></svg>
           </button>
-          <button class="rail__btn" data-route="board" title="Workflow board">
+          <button class="rail__btn" data-route="board" title="Workflow board" aria-label="Workflow board" data-i18n-aria="nav.board">
             <svg width="19" height="19" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="3" width="4" height="13" rx="1.3"></rect><rect x="7.8" y="3" width="4" height="9" rx="1.3"></rect><rect x="13.1" y="3" width="4" height="11" rx="1.3"></rect></svg>
           </button>
-          <button class="rail__btn" data-route="review" title="Markdown review">
+          <button class="rail__btn" data-route="review" title="Markdown review" aria-label="Markdown review" data-i18n-aria="nav.review">
             <svg width="19" height="19" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="2.5" width="13" height="14" rx="2"></rect><line x1="6" y1="6.5" x2="13" y2="6.5"></line><line x1="6" y1="9.5" x2="13" y2="9.5"></line><line x1="6" y1="12.5" x2="10.5" y2="12.5"></line></svg>
           </button>
           <div class="rail__spacer"></div>
-          <button class="rail__btn" data-route="settings" title="Settings">
+          <button class="rail__btn" data-route="settings" title="Settings" aria-label="Settings" data-i18n-aria="nav.settings">
             <svg width="19" height="19" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><line x1="3" y1="5.5" x2="16" y2="5.5"></line><circle cx="7" cy="5.5" r="2" fill="var(--panel)"></circle><line x1="3" y1="13" x2="16" y2="13"></line><circle cx="12" cy="13" r="2" fill="var(--panel)"></circle></svg>
           </button>
         </nav>
 
         <!-- screen area: one pane per view, toggled by main.js -->
-        <main class="screen" id="screen">
+        <main class="screen" id="screen" tabindex="-1">
 
           <!-- WORKSPACE -->
-          <section class="view view--workspace is-shown" data-view="workspace">
+          <section class="view view--workspace is-shown" data-view="workspace" tabindex="-1" aria-label="Workspace">
             <div class="view__cols">
               <!-- file rail -->
               <aside class="panel file-rail">
                 <div class="panel__head">
-                  <span class="panel__label">Files</span>
+                  <span class="panel__label" data-i18n="label.files">Files</span>
                   <!-- EH-0004 bite 2: file count is derived state (the input
                        queued for the next run), updated by main.js. -->
                   <span class="panel__count" id="fileCount">0</span>
                 </div>
                 <button class="import-btn" id="importBtn" type="button">
                   <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="7" y1="2.5" x2="7" y2="11.5"></line><line x1="2.5" y1="7" x2="11.5" y2="7"></line></svg>
-                  Import PDF / image
+                  <span data-i18n="workspace.importBtn">Import PDF / image</span>
                 </button>
                 <!-- Manual path entry. The Import button also opens a native
                      file picker (tauri-plugin-dialog) that seeds this field;
@@ -108,6 +119,7 @@
                   id="pdfPath"
                   type="text"
                   placeholder="/absolute/path/to/file.pdf"
+                  data-i18n-ph="input.pdfPath"
                   spellcheck="false"
                 />
                 <!-- EH-0004 bite 2: file list is a real component. It reflects
@@ -124,22 +136,22 @@
                      main.js wires the folder picker, autofill, and single-file gate. -->
                 <div class="opts__output" id="outputOpts">
                   <label class="opts__field opts__field--full">
-                    <span class="opts__label">Output folder</span>
+                    <span class="opts__label" data-i18n="opts.outputFolder">Output folder</span>
                     <span class="opts__pages">
-                      <input class="opts__text" id="outFolder" type="text" placeholder="beside input (default)" spellcheck="false" />
-                      <button class="import-btn" id="outFolderBtn" type="button">Choose folder…</button>
+                      <input class="opts__text" id="outFolder" type="text" placeholder="beside input (default)" data-i18n-ph="opts.outFolderPh" spellcheck="false" />
+                      <button class="import-btn" id="outFolderBtn" type="button" data-i18n="opts.chooseFolder">Choose folder…</button>
                     </span>
                   </label>
                   <label class="opts__field opts__field--full">
-                    <span class="opts__label">Output filename</span>
-                    <input class="opts__text" id="outFile" type="text" placeholder="{stem}.md (single file only)" spellcheck="false" />
+                    <span class="opts__label" data-i18n="opts.outputFilename">Output filename</span>
+                    <input class="opts__text" id="outFile" type="text" placeholder="{stem}.md (single file only)" data-i18n-ph="opts.outFilePh" spellcheck="false" />
                   </label>
                   <label class="opts__field opts__field--full">
-                    <span class="opts__label">Output mode</span>
+                    <span class="opts__label" data-i18n="opts.outputMode">Output mode</span>
                     <select class="opts__select" id="optOutputMode">
-                      <option value="single" selected>Single file ({stem}.md)</option>
-                      <option value="pages">Per-page folder ({stem}/page-N.md)</option>
-                      <option value="both">Both (file + folder)</option>
+                      <option value="single" selected data-i18n="opts.outputSingle">Single file ({stem}.md)</option>
+                      <option value="pages" data-i18n="opts.outputPages">Per-page folder ({stem}/page-N.md)</option>
+                      <option value="both" data-i18n="opts.outputBoth">Both (file + folder)</option>
                     </select>
                   </label>
                 </div>
@@ -147,17 +159,17 @@
                      not a hardcoded label. Each stage lights up green/amber/red
                      from the report's tool + model flags. -->
                 <div class="pipeline" id="pipeline" aria-live="polite">
-                  <div class="panel__head"><span class="panel__label">OCR Pipeline</span></div>
+                  <div class="panel__head"><span class="panel__label" data-i18n="label.ocrPipeline">OCR Pipeline</span></div>
                   <div class="pipeline__engine" id="pipelineEngine">Unlimited-OCR &middot; —</div>
                   <ul class="pipeline__stages" id="pipelineStages">
                     <li class="stage" data-stage="tools">
-                      <span class="stage__dot"></span><span class="stage__name">Tools (llama-server, pdftoppm)</span>
+                      <span class="stage__dot"></span><span class="stage__name" data-i18n="pipeline.tools">Tools (llama-server, pdftoppm)</span>
                     </li>
                     <li class="stage" data-stage="model">
-                      <span class="stage__dot"></span><span class="stage__name">Model GGUF</span>
+                      <span class="stage__dot"></span><span class="stage__name" data-i18n="pipeline.model">Model GGUF</span>
                     </li>
                     <li class="stage" data-stage="mmproj">
-                      <span class="stage__dot"></span><span class="stage__name">Projector (mmproj)</span>
+                      <span class="stage__dot"></span><span class="stage__name" data-i18n="pipeline.mmproj">Projector (mmproj)</span>
                     </li>
                   </ul>
                 </div>
@@ -166,26 +178,26 @@
               <!-- center: PDF preview -->
               <div class="panel preview">
                 <div class="preview__head">
-                  <span class="preview__title">PDF Preview</span>
+                  <span class="preview__title" data-i18n="label.pdfPreview">PDF Preview</span>
                   <div class="preview__spacer"></div>
-                  <span class="chip chip--soft">Page 1</span>
-                  <span class="chip chip--ghost">Layout regions</span>
+                  <span class="chip chip--soft" data-i18n="preview.pageChip">Page 1</span>
+                  <span class="chip chip--ghost" data-i18n="preview.layoutRegions">Layout regions</span>
                 </div>
                 <div class="preview__stage">
-                  <p class="placeholder">Import a PDF to see a page preview here.</p>
+                  <p class="placeholder" data-i18n="preview.placeholder">Import a PDF to see a page preview here.</p>
                 </div>
                 <div class="preview__foot">
                   <div class="preview__spacer"></div>
-                  <button class="preview__nav" id="prevPage" type="button" aria-label="Previous page" title="Previous page">◀</button>
+                  <button class="preview__nav" id="prevPage" type="button" aria-label="Previous page" data-i18n-aria="preview.prevPage" title="Previous page">◀</button>
                   <span class="preview__pagecount">page 0 / 0</span>
-                  <button class="preview__nav" id="nextPage" type="button" aria-label="Next page" title="Next page">▶</button>
+                  <button class="preview__nav" id="nextPage" type="button" aria-label="Next page" data-i18n-aria="preview.nextPage" title="Next page">▶</button>
                 </div>
               </div>
 
               <!-- right: live transcript -->
               <div class="panel transcript">
                 <div class="transcript__head">
-                  <span class="transcript__title">Engine</span>
+                  <span class="transcript__title" data-i18n="label.engine">Engine</span>
                   <div class="transcript__spacer"></div>
                   <span class="status-pill status-pill--idle"><span class="status-dot"></span>Idle</span>
                 </div>
@@ -194,7 +206,7 @@
                      Effective/Run footer off-screen. See styles .transcript__config. -->
                 <div class="transcript__config">
                 <div class="transcript__engine">
-                  <span class="panel__label">OCR engine</span>
+                  <span class="panel__label" data-i18n="label.ocrEngine">OCR engine</span>
                   <!-- Backend preset. llamacpp = managed-local mode (unlocr spawns
                        llama-server, driven by the Quant control); vllm/sglang/custom
                        are remote OpenAI-compatible endpoints. Non-custom presets hide
@@ -206,13 +218,13 @@
                        behind the button instead of cluttering the panel. -->
                   <div class="transcript__engine-row">
                     <select class="opts__select" id="enginePreset">
-                      <option value="llamacpp" selected>llama.cpp (managed local)</option>
-                      <option value="gpu">GPU full model (vLLM · Unlimited-OCR)</option>
-                      <option value="vllm">vLLM (http://127.0.0.1:8000)</option>
-                      <option value="sglang">SGLang (http://127.0.0.1:30000)</option>
-                      <option value="custom">Custom endpoint</option>
+                      <option value="llamacpp" selected data-i18n="engine.llamacpp">llama.cpp (managed local)</option>
+                      <option value="gpu" data-i18n="engine.gpu">GPU full model (vLLM · Unlimited-OCR)</option>
+                      <option value="vllm" data-i18n="engine.vllm">vLLM (http://127.0.0.1:8000)</option>
+                      <option value="sglang" data-i18n="engine.sglang">SGLang (http://127.0.0.1:30000)</option>
+                      <option value="custom" data-i18n="engine.custom">Custom endpoint</option>
                     </select>
-                    <button class="model-btn model-btn--ghost" id="engineModifyBtn" type="button">Modify…</button>
+                    <button class="model-btn model-btn--ghost" id="engineModifyBtn" type="button" data-i18n="engine.modify">Modify…</button>
                   </div>
                   <!-- The full (non-GGUF) model runs on vLLM, not llama.cpp. This
                        preset just points the remote endpoint at a local vLLM serving
@@ -230,8 +242,8 @@
                      from the Quant control in Engine options. -->
                 <div class="model-bar" id="modelBar">
                   <div class="model-bar__row">
-                    <button class="model-btn" id="loadModelBtn" type="button">Load model</button>
-                    <button class="model-btn model-btn--ghost" id="unloadModelBtn" type="button" disabled>Unload</button>
+                    <button class="model-btn" id="loadModelBtn" type="button" data-i18n="model.load">Load model</button>
+                    <button class="model-btn model-btn--ghost" id="unloadModelBtn" type="button" disabled data-i18n="model.unload">Unload</button>
                     <span class="model-bar__status" id="modelStatusText">No model loaded</span>
                   </div>
                 </div>
@@ -242,10 +254,10 @@
                      these and forwards them into the run_ocr invoke payload. The
                      editable prompt lives in bite 2 (it gets its own row here). -->
                 <div class="opts" id="runOpts">
-                  <div class="panel__head"><span class="panel__label">Engine options</span></div>
+                  <div class="panel__head"><span class="panel__label" data-i18n="label.engineOptions">Engine options</span></div>
                   <div class="opts__grid">
                     <label class="opts__field">
-                      <span class="opts__label">Quant</span>
+                      <span class="opts__label" data-i18n="opts.quant">Quant</span>
                       <!-- Tiers map to CLI quant names: good=Q8_0 (default), less=Q4_K_M, best=BF16 -->
                       <select class="opts__select" id="optQuant">
                         <option value="Q8_0" selected>good (Q8_0)</option>
@@ -259,25 +271,25 @@
                       </span>
                     </label>
                     <label class="opts__field">
-                      <span class="opts__label">DPI</span>
+                      <span class="opts__label" data-i18n="opts.dpi">DPI</span>
                       <input class="opts__num" id="optDpi" type="number" min="72" max="600" step="1" value="144" />
                     </label>
                     <!-- Page selection: All (default) OCRs every page; Range/Single
                          map to pdftoppm -f/-l so a subset rasterizes only those
                          pages. wirePageSelection() in main.js shows the inputs. -->
                     <label class="opts__field">
-                      <span class="opts__label">Pages</span>
+                      <span class="opts__label" data-i18n="opts.pages">Pages</span>
                       <select class="opts__select" id="optPagesMode">
-                        <option value="all" selected>All</option>
-                        <option value="range">Range</option>
-                        <option value="single">Single</option>
+                        <option value="all" selected data-i18n="opts.pagesAll">All</option>
+                        <option value="range" data-i18n="opts.pagesRange">Range</option>
+                        <option value="single" data-i18n="opts.pagesSingle">Single</option>
                       </select>
                     </label>
                     <label class="opts__field" id="optPagesInputs" hidden>
                       <span class="opts__label" id="optPagesInputsLabel">Page</span>
                       <span class="opts__pages">
-                        <input class="opts__num" id="optPageFrom" type="number" min="1" step="1" placeholder="from" />
-                        <input class="opts__num" id="optPageTo" type="number" min="1" step="1" placeholder="to" hidden />
+                        <input class="opts__num" id="optPageFrom" type="number" min="1" step="1" placeholder="from" data-i18n-ph="opts.from" />
+                        <input class="opts__num" id="optPageTo" type="number" min="1" step="1" placeholder="to" data-i18n-ph="opts.toPh" hidden />
                       </span>
                     </label>
                   </div>
@@ -285,36 +297,36 @@
                        IDs unchanged so readRunOptions/load_model read them whether
                        open or closed (details keeps children mounted). -->
                   <details class="opts__advanced">
-                    <summary>Advanced</summary>
+                    <summary data-i18n="opts.advanced">Advanced</summary>
                     <div class="opts__grid">
                     <label class="opts__field">
-                      <span class="opts__label">Max tokens</span>
+                      <span class="opts__label" data-i18n="opts.maxTokens">Max tokens</span>
                       <input class="opts__num" id="optMaxTokens" type="number" min="256" max="32768" step="1" value="4096" />
                     </label>
                     <!-- DeepSeek-OCR detail knob (--image-max-tokens). Startup-only:
                          applies on the next model Load, not mid-run. Blank = model
                          default (the current behavior). -->
                     <label class="opts__field">
-                      <span class="opts__label">Image max tokens</span>
-                      <input class="opts__num" id="optImageMaxTokens" type="number" min="1" max="16384" step="1" placeholder="model default" />
+                      <span class="opts__label" data-i18n="opts.imageMaxTokens">Image max tokens</span>
+                      <input class="opts__num" id="optImageMaxTokens" type="number" min="1" max="16384" step="1" placeholder="model default" data-i18n-ph="opts.imageMaxTokensPh" />
                     </label>
                     <!-- llama-server --chat-template; startup-only (applies on Load). -->
                     <label class="opts__field">
-                      <span class="opts__label">Chat template</span>
+                      <span class="opts__label" data-i18n="opts.chatTemplate">Chat template</span>
                       <select class="opts__select" id="optChatTemplate">
-                        <option value="" selected>model default</option>
-                        <option value="deepseek-ocr">deepseek-ocr</option>
+                        <option value="" selected data-i18n="opts.chatModelDefault">model default</option>
+                        <option value="deepseek-ocr" data-i18n="opts.chatDeepseekOcr">deepseek-ocr</option>
                       </select>
                     </label>
                     <!-- Per-run sampling penalty; blank = server default. >1 (e.g.
                          1.1) helps break the Q4_K_M infinite-loop failure mode. -->
                     <label class="opts__field">
-                      <span class="opts__label">Repeat penalty</span>
-                      <input class="opts__num" id="optRepeatPenalty" type="number" min="1" max="2" step="0.05" placeholder="server default" />
+                      <span class="opts__label" data-i18n="opts.repeatPenalty">Repeat penalty</span>
+                      <input class="opts__num" id="optRepeatPenalty" type="number" min="1" max="2" step="0.05" placeholder="server default" data-i18n-ph="opts.repeatPenaltyPh" />
                     </label>
                     <label class="opts__toggle">
                       <input class="opts__check" id="optKeepImages" type="checkbox" />
-                      <span class="opts__toggle-label">Keep page images</span>
+                      <span class="opts__toggle-label" data-i18n="opts.keepImages">Keep page images</span>
                     </label>
                     </div>
                   </details>
@@ -323,37 +335,37 @@
                        preset; options.js resolves it). Unlimited-OCR uses NO system
                        prompt, so this task text is the whole instruction. -->
                   <label class="opts__field opts__field--full">
-                    <span class="opts__label">Task</span>
+                    <span class="opts__label" data-i18n="opts.task">Task</span>
                     <select class="opts__select" id="optTask">
-                      <option value="markdown" selected>Markdown (grounded)</option>
-                      <option value="free">Free OCR (plain text)</option>
-                      <option value="figure">Parse figure</option>
+                      <option value="markdown" selected data-i18n="opts.taskMarkdown">Markdown (grounded)</option>
+                      <option value="free" data-i18n="opts.taskFree">Free OCR (plain text)</option>
+                      <option value="figure" data-i18n="opts.taskFigure">Parse figure</option>
                     </select>
                   </label>
                   <!-- Optional override. Empty -> the Task preset is sent. When filled,
                        it is sent verbatim. spellcheck off because grounding tags are
                        code, not prose. Do NOT type `<image>`; llama.cpp injects it. -->
                   <label class="opts__field opts__field--full">
-                    <span class="opts__label">Prompt override (optional)</span>
+                    <span class="opts__label" data-i18n="opts.promptOverride">Prompt override (optional)</span>
                     <textarea
                       class="opts__textarea"
                       id="optPrompt"
                       rows="2"
                       spellcheck="false"
-                      placeholder="Leave empty to use the Task preset. Edit only for special instructions (no system prompt is sent)."
+                      placeholder="Leave empty to use the Task preset. Edit only for special instructions (no system prompt is sent)." data-i18n-ph="opts.promptPh"
                     ></textarea>
                   </label>
                 </div>
                 </div>
                 <div class="transcript__body" id="transcriptBody">
-                  <p class="placeholder" id="transcriptPlaceholder">Run OCR to stream the recognized markdown here.</p>
+                  <p class="placeholder" id="transcriptPlaceholder" data-i18n="transcript.placeholder">Run OCR to stream the recognized markdown here.</p>
                 </div>
                 <!-- progress bar + status text for the current run. Driven by the
                      ocr://progress / server-ready / page / done event listeners in
                      main.js. Single bar: indeterminate until a page total is known,
                      then determinate. -->
                 <div class="run-progress" id="runProgress" hidden>
-                  <div class="run-progress__bar"><div class="run-progress__fill" id="runProgressFill"></div></div>
+                  <div class="run-progress__bar" id="runProgressBar" role="progressbar" aria-label="OCR progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="run-progress__fill" id="runProgressFill"></div></div>
                   <span class="run-progress__status" id="runProgressStatus">Idle</span>
                 </div>
                 <!-- EH-0005 bite 2: a live "effective values" summary so the user
@@ -362,7 +374,7 @@
                      never drift from the actual payload. Updated on every control
                      change + once on load. -->
                 <div class="effective" id="effectiveSummary" aria-live="polite">
-                  <span class="effective__label">Effective</span>
+                  <span class="effective__label" data-i18n="label.effective">Effective</span>
                   <span class="effective__vals" id="effectiveVals">Q8_0 &middot; 144 DPI &middot; 4096 tok &middot; keep images off</span>
                 </div>
                 <div class="transcript__run">
@@ -380,27 +392,27 @@
                placeholder. EH-0006 bite 4: the grid is also a PDF drop target;
                dropping PDF files here enqueues a run_ocr job per file (handled in
                main.js wireLibraryDrop via the tauri://drag-drop event channel). -->
-          <section class="view" data-view="library">
+          <section class="view" data-view="library" tabindex="-1" aria-label="Library">
             <div class="panel panel--full library">
               <div class="library__head">
-                <span class="panel__label">Library</span>
+                <span class="panel__label" data-i18n="label.library">Library</span>
                 <span class="panel__count" id="libraryCount">0</span>
                 <div class="library__spacer"></div>
                 <!-- EH-0006 bite 4: hint that the grid accepts dropped PDFs. The
                      actual import runs through the OS-level drag-drop event, so
                      this is affordance only (not an HTML5 dropzone). -->
-                <span class="library__drop-hint">Drop PDFs to import</span>
-                <button class="library__refresh" id="libraryRefresh" type="button" title="Reload from store">Reload</button>
-                <button class="library__refresh" id="libraryRemoveAll" type="button" title="Remove all entries from the library (leaves files on disk)">Remove all</button>
-                <button class="library__refresh library__refresh--danger" id="libraryRemoveAllDelete" type="button" title="Remove all entries and delete their .md files from disk">Remove all + delete</button>
+                <span class="library__drop-hint" data-i18n="library.dropHint">Drop PDFs to import</span>
+                <button class="library__refresh" id="libraryRefresh" type="button" title="Reload from store" data-i18n="action.reload">Reload</button>
+                <button class="library__refresh" id="libraryRemoveAll" type="button" title="Remove all entries from the library (leaves files on disk)" data-i18n="library.removeAll">Remove all</button>
+                <button class="library__refresh library__refresh--danger" id="libraryRemoveAllDelete" type="button" title="Remove all entries and delete their .md files from disk" data-i18n="library.removeAllDelete">Remove all + delete</button>
               </div>
               <!-- grid of job cards. main.js rebuilds .job-card children here from
                    list_jobs(); aria-live so a screen reader announces a new run.
                    data-drop-zone marks this as the drag-drop target so main.js can
                    scope the highlight to the Library view. -->
-              <div class="library__grid" id="libraryGrid" data-drop-zone="library" aria-live="polite" aria-label="OCR jobs; drop PDF files here to import and run them">
-                <p class="placeholder placeholder--centered" id="libraryEmpty">No OCR jobs yet. Run OCR to populate the library.</p>
-              </div>
+              <ul class="library__grid" id="libraryGrid" data-drop-zone="library" aria-live="polite" aria-label="OCR jobs; drop PDF files here to import and run them">
+                <p class="placeholder placeholder--centered" id="libraryEmpty" data-i18n="run.libraryEmpty">No OCR jobs yet. Run OCR to populate the library.</p>
+              </ul>
             </div>
           </section>
 
@@ -410,18 +422,18 @@
                store as the Library grid. Each column lists the jobs that share
                its status (newest-first). main.js makeBoard() owns this DOM and
                reloads it on app start, after a Run, and on Board tab switch. -->
-          <section class="view" data-view="board">
+          <section class="view" data-view="board" tabindex="-1" aria-label="Workflow board">
             <div class="panel panel--full board">
               <div class="board__head">
-                <span class="panel__label">Workflow board</span>
+                <span class="panel__label" data-i18n="label.board">Workflow board</span>
                 <span class="panel__count" id="boardCount">0</span>
                 <div class="board__spacer"></div>
                 <!-- Bulk mode: Add PDFs reuses the workspace Import picker (appends to
                      the queue); Run all reuses the workspace Run button. Both delegate
                      in main.js so import/run have one code path. -->
-                <button class="board__refresh" id="boardAddBtn" type="button" title="Import PDFs into the queue">Add PDFs</button>
-                <button class="board__refresh" id="boardRunBtn" type="button" title="Run every queued PDF">Run all</button>
-                <button class="board__refresh" id="boardRefresh" type="button" title="Reload from store">Reload</button>
+                <button class="board__refresh" id="boardAddBtn" type="button" title="Import PDFs into the queue" data-i18n="board.addPdfs">Add PDFs</button>
+                <button class="board__refresh" id="boardRunBtn" type="button" title="Run every queued PDF" data-i18n="board.runAll">Run all</button>
+                <button class="board__refresh" id="boardRefresh" type="button" title="Reload from store" data-i18n="action.reload">Reload</button>
               </div>
               <!-- columns. Each .board__col renders one .board__col-list of
                    .job-card children (the same card the Library grid uses). aria-live
@@ -430,34 +442,34 @@
                 <div class="board__col board__col--queued">
                   <div class="board__col-head">
                     <span class="board__col-dot board__col-dot--queued"></span>
-                    <span class="board__col-name">Queued</span>
+                    <span class="board__col-name" data-i18n="status.queued">Queued</span>
                     <span class="board__col-count" id="boardColQueued">0</span>
                   </div>
-                  <div class="board__col-list" id="boardColQueuedList" aria-live="polite"></div>
+                  <ul class="board__col-list" id="boardColQueuedList" aria-live="polite"></ul>
                 </div>
                 <div class="board__col board__col--running">
                   <div class="board__col-head">
                     <span class="board__col-dot board__col-dot--running"></span>
-                    <span class="board__col-name">Running</span>
+                    <span class="board__col-name" data-i18n="status.running">Running</span>
                     <span class="board__col-count" id="boardColRunning">0</span>
                   </div>
-                  <div class="board__col-list" id="boardColRunningList" aria-live="polite"></div>
+                  <ul class="board__col-list" id="boardColRunningList" aria-live="polite"></ul>
                 </div>
                 <div class="board__col board__col--done">
                   <div class="board__col-head">
                     <span class="board__col-dot board__col-dot--done"></span>
-                    <span class="board__col-name">Done</span>
+                    <span class="board__col-name" data-i18n="status.done">Done</span>
                     <span class="board__col-count" id="boardColDone">0</span>
                   </div>
-                  <div class="board__col-list" id="boardColDoneList" aria-live="polite"></div>
+                  <ul class="board__col-list" id="boardColDoneList" aria-live="polite"></ul>
                 </div>
                 <div class="board__col board__col--failed">
                   <div class="board__col-head">
                     <span class="board__col-dot board__col-dot--failed"></span>
-                    <span class="board__col-name">Failed</span>
+                    <span class="board__col-name" data-i18n="status.failed">Failed</span>
                     <span class="board__col-count" id="boardColFailed">0</span>
                   </div>
-                  <div class="board__col-list" id="boardColFailedList" aria-live="polite"></div>
+                  <ul class="board__col-list" id="boardColFailedList" aria-live="polite"></ul>
                 </div>
               </div>
               <p class="placeholder placeholder--centered" id="boardEmpty" hidden>No OCR jobs yet. Run OCR to populate the board.</p>
@@ -465,28 +477,28 @@
           </section>
 
           <!-- REVIEW -->
-          <section class="view" data-view="review">
+          <section class="view" data-view="review" tabindex="-1" aria-label="Markdown review">
             <div class="panel panel--full md-pane">
               <div class="md-pane__head">
-                <span class="panel__label">Markdown review</span>
+                <span class="panel__label" data-i18n="label.review">Markdown review</span>
                 <div class="md-pane__spacer"></div>
                 <!-- the produced/opened stem.md lives on disk; this pane edits it via
                      EasyMDE and saves back in place (write_text_file). -->
                 <span class="chip chip--soft md-pane__source" id="mdSource" hidden></span>
                 <!-- Save overwrites the loaded .md on disk. Disabled until a file is
                      loaded (no path = in-memory result, nothing to overwrite). -->
-                <button class="md-pane__save" id="mdSave" type="button" disabled title="Save changes to the .md on disk">Save</button>
+                <button class="md-pane__save" id="mdSave" type="button" disabled title="Save changes to the .md on disk" data-i18n="review.save">Save</button>
                 <!-- Export the loaded .md to another format via pandoc (export_markdown).
                      Acts as a menu: picking a format fires the export, then resets. The
                      written file is a sibling of the source. Needs pandoc on PATH (a
                      missing-pandoc error is surfaced as a toast). Disabled until loaded. -->
                 <select class="md-pane__export" id="mdExport" disabled title="Export to another format (requires pandoc)">
-                  <option value="">Export…</option>
-                  <option value="html">HTML (.html)</option>
-                  <option value="docx">Word (.docx)</option>
-                  <option value="odt">OpenDocument (.odt)</option>
-                  <option value="rtf">Rich Text (.rtf)</option>
-                  <option value="txt">Plain text (.txt)</option>
+                  <option value="" data-i18n="review.export">Export…</option>
+                  <option value="html" data-i18n="review.exportHtml">HTML (.html)</option>
+                  <option value="docx" data-i18n="review.exportDocx">Word (.docx)</option>
+                  <option value="odt" data-i18n="review.exportOdt">OpenDocument (.odt)</option>
+                  <option value="rtf" data-i18n="review.exportRtf">Rich Text (.rtf)</option>
+                  <option value="txt" data-i18n="review.exportTxt">Plain text (.txt)</option>
                 </select>
               </div>
               <!-- Editor surface: EasyMDE wraps this textarea (toolbar + undo/redo +
@@ -502,23 +514,35 @@
           <!-- SETTINGS -->
           <!-- Persisted via get_settings/save_settings (unlocr.db under the app-data
                dir). Seeds the provider mode + engine-option defaults. -->
-          <section class="view" data-view="settings">
+          <section class="view" data-view="settings" tabindex="-1" aria-label="Settings">
             <div class="panel panel--full settings">
               <div class="panel__head">
-                <span class="panel__label">Settings</span>
+                <span class="panel__label" data-i18n="label.settings">Settings</span>
                 <div class="settings__spacer"></div>
-                <button class="model-btn" id="settingsSave" type="button">Save settings</button>
+                <button class="model-btn" id="settingsSave" type="button" data-i18n="settings.save">Save settings</button>
               </div>
               <div class="settings__form">
                 <label class="opts__field">
-                  <span class="opts__label">Provider mode</span>
-                  <select class="opts__select" id="setMode">
-                    <option value="local">Local (llama-server)</option>
-                    <option value="remote">Remote (OpenAI-compatible)</option>
+                  <span class="opts__label" data-i18n="settings.language">Language</span>
+                  <!-- Option labels are each language's NATIVE name (convention for
+                       locale pickers) so they are not data-i18n translated. i18n.js
+                       wires #localeSelect to setLocale() on change. -->
+                  <select class="opts__select" id="localeSelect">
+                    <option value="en">English</option>
+                    <option value="zh">简体中文</option>
+                    <option value="ko">한국어</option>
+                    <option value="ja">日本語</option>
                   </select>
                 </label>
                 <label class="opts__field">
-                  <span class="opts__label">Default quant</span>
+                  <span class="opts__label" data-i18n="settings.providerMode">Provider mode</span>
+                  <select class="opts__select" id="setMode">
+                    <option value="local" data-i18n="settings.modeLocal">Local (llama-server)</option>
+                    <option value="remote" data-i18n="settings.modeRemote">Remote (OpenAI-compatible)</option>
+                  </select>
+                </label>
+                <label class="opts__field">
+                  <span class="opts__label" data-i18n="settings.defaultQuant">Default quant</span>
                   <!-- Tiers map to CLI quant names: good=Q8_0 (default), less=Q4_K_M, best=BF16 -->
                   <select class="opts__select" id="setQuant">
                     <option value="Q8_0">good (Q8_0)</option>
@@ -531,43 +555,43 @@
                      llama-server's default (http://127.0.0.1:8080); expand to point
                      at a different port/IP. -->
                 <details class="settings__advanced opts__field--full">
-                  <summary>Server connection (advanced)</summary>
+                  <summary data-i18n="settings.serverConnection">Server connection (advanced)</summary>
                   <label class="opts__field opts__field--full">
-                    <span class="opts__label">Remote base URL</span>
+                    <span class="opts__label" data-i18n="settings.remoteUrl">Remote base URL</span>
                     <input class="path-input" id="setRemoteUrl" type="text" spellcheck="false"
                       placeholder="http://127.0.0.1:8080" />
                   </label>
                   <label class="opts__field opts__field--full">
-                    <span class="opts__label">Remote API key</span>
+                    <span class="opts__label" data-i18n="settings.remoteKey">Remote API key</span>
                     <input class="path-input" id="setRemoteKey" type="password" spellcheck="false"
                       placeholder="optional bearer token" />
                   </label>
                   <label class="opts__field opts__field--full">
-                    <span class="opts__label">Remote model name</span>
+                    <span class="opts__label" data-i18n="settings.remoteModel">Remote model name</span>
                     <input class="path-input" id="setRemoteModel" type="text" spellcheck="false"
                       placeholder="required by LiteLLM/vLLM gateways; optional for a bare llama-server" />
                   </label>
-                  <p class="settings__note">Only llama.cpp (PR #17400), vLLM, and SGLang are known to support Unlimited-OCR / DeepSeek-OCR. Ollama and LM Studio do not support these OCR models.</p>
+                  <p class="settings__note" data-i18n="note.supportedBackends">Only llama.cpp (PR #17400), vLLM, and SGLang are known to support Unlimited-OCR / DeepSeek-OCR. Ollama and LM Studio do not support these OCR models.</p>
                   <label class="opts__field opts__field--full">
-                    <span class="opts__label">llama-server path (optional override)</span>
+                    <span class="opts__label" data-i18n="settings.llamaBin">llama-server path (optional override)</span>
                     <input class="path-input" id="setLlamaBin" type="text" spellcheck="false"
                       placeholder="leave empty to resolve from PATH / Homebrew" />
                   </label>
                 </details>
                 <label class="opts__field">
-                  <span class="opts__label">Default DPI</span>
+                  <span class="opts__label" data-i18n="settings.defaultDpi">Default DPI</span>
                   <input class="opts__num" id="setDpi" type="number" min="72" max="600" step="1" value="144" />
                 </label>
                 <label class="opts__field">
-                  <span class="opts__label">Default max tokens</span>
+                  <span class="opts__label" data-i18n="settings.defaultMaxTokens">Default max tokens</span>
                   <input class="opts__num" id="setMaxTokens" type="number" min="256" max="32768" step="1" value="4096" />
                 </label>
                 <label class="opts__field">
-                  <span class="opts__label">Idle unload (min, 0 = never)</span>
+                  <span class="opts__label" data-i18n="settings.idleUnload">Idle unload (min, 0 = never)</span>
                   <input class="opts__num" id="setIdleMinutes" type="number" min="0" max="1440" step="1" value="15" />
                 </label>
                 <label class="opts__field opts__field--full">
-                  <span class="opts__label">Default prompt override (optional)</span>
+                  <span class="opts__label" data-i18n="settings.defaultPrompt">Default prompt override (optional)</span>
                   <textarea class="opts__textarea" id="setPrompt" rows="2" spellcheck="false"
                     placeholder="Empty = use the per-run Task preset. Set a persistent custom prompt here to seed the run box."></textarea>
                 </label>
@@ -576,14 +600,26 @@
                    main.js wireCacheControls() via get_cache_info on Settings open. -->
               <div class="settings__cache">
                 <div class="panel__head">
-                  <span class="panel__label">Model cache</span>
+                  <span class="panel__label" data-i18n="label.modelCache">Model cache</span>
                 </div>
                 <div class="settings__cache-row">
                   <span class="settings__cache-path" id="cacheDir">—</span>
                   <span class="settings__cache-size" id="cacheSizeBytes"></span>
                 </div>
-                <button class="model-btn model-btn--ghost" id="clearCacheBtn" type="button">Clear cached models</button>
+                <button class="model-btn model-btn--ghost" id="clearCacheBtn" type="button" data-i18n="settings.clearCache">Clear cached models</button>
                 <span class="settings__cache-status" id="clearCacheStatus" hidden></span>
+              </div>
+              <!-- System Requirements: CPU, RAM, GPU, disk. Detected on Settings open + Recheck.
+                   Populated by main.js wireSystemRequirements() via system_requirements command. -->
+              <div class="settings__sysreq">
+                <div class="panel__head">
+                  <span class="panel__label sysreq__verdict" id="sysreqVerdict">System Requirements</span>
+                  <div class="settings__spacer"></div>
+                  <button class="model-btn model-btn--ghost" id="sysreqRefresh" type="button">Recheck</button>
+                </div>
+                <div class="settings__deps-list" id="sysreqList" aria-live="polite">
+                  <p class="placeholder" id="sysreqEmpty">Checking…</p>
+                </div>
               </div>
               <!-- External tools: pdftoppm (OCR), llama-server (engine), pandoc (export).
                    Populated by main.js wireDependencies() via list_tools. On Windows each
@@ -592,17 +628,17 @@
                    manager hint (brew / apt / dnf). -->
               <div class="settings__deps">
                 <div class="panel__head">
-                  <span class="panel__label">Dependencies</span>
+                  <span class="panel__label" data-i18n="label.dependencies">Dependencies</span>
                   <div class="settings__spacer"></div>
-                  <button class="model-btn model-btn--ghost" id="depsRefresh" type="button">Recheck</button>
+                  <button class="model-btn model-btn--ghost" id="depsRefresh" type="button" data-i18n="action.recheck">Recheck</button>
                 </div>
                 <div class="settings__deps-list" id="depsList" aria-live="polite">
                   <p class="placeholder" id="depsEmpty">Checking…</p>
                 </div>
                 <p class="settings__note" id="depsHint" hidden></p>
               </div>
-              <p class="settings__note">API key is stored in plaintext in the app database (unlocr.db) under your user data dir. Use a key scoped to this device.</p>
-              <span class="settings__saved" id="settingsSaved" hidden>Saved.</span>
+              <p class="settings__note" data-i18n="settings.apiKeyNote">API key is stored in plaintext in the app database (unlocr.db) under your user data dir. Use a key scoped to this device.</p>
+              <span class="settings__saved" id="settingsSaved" data-i18n="settings.saved" hidden>Saved.</span>
             </div>
           </section>
 
@@ -618,16 +654,22 @@
          live token log + Stop. Close (×) or backdrop click minimizes to a clickable
          toast (ui.js). The backdrop dims the app behind it during a run. -->
     <div class="run-popup-backdrop" id="runPopupBackdrop" hidden></div>
-    <div class="run-popup" id="runPopup" hidden>
+    <!-- EH-0004: a real modal dialog (role=dialog + aria-modal). ui.js traps Tab
+         inside it, handles Escape, returns focus to the Run button, and sets the
+         app shell inert while open. Stays a div+backdrop (not native <dialog>) so
+         the existing minimize-to-toast flow and CSS are unchanged. -->
+    <div class="run-popup" id="runPopup" role="dialog" aria-modal="true" aria-labelledby="runPopupTitle" hidden>
       <div class="run-popup__head">
-        <span class="run-popup__title">Running OCR</span>
-        <button class="run-popup__close" id="runPopupClose" type="button" title="Minimize" aria-label="Minimize">×</button>
+        <span class="run-popup__title" id="runPopupTitle" data-i18n="run.title">Running OCR</span>
+        <button class="run-popup__close" id="runPopupClose" type="button" title="Minimize" aria-label="Minimize" data-i18n-aria="run.minimize">×</button>
       </div>
-      <div class="run-progress__bar"><div class="run-progress__fill" id="runPopupFill"></div></div>
-      <span class="run-progress__status" id="runPopupStatus">Idle</span>
-      <pre class="run-popup__log" id="runPopupLog" aria-live="polite"></pre>
+      <div class="run-progress__bar" id="runPopupBar" role="progressbar" aria-label="OCR progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="run-progress__fill" id="runPopupFill"></div></div>
+      <!-- EH-0005: the status LINE is the polite live region (download %, page N/M,
+           done). The token log below must NOT be live or the screen reader floods. -->
+      <span class="run-progress__status" id="runPopupStatus" aria-live="polite">Idle</span>
+      <pre class="run-popup__log" id="runPopupLog"></pre>
       <div class="run-popup__actions">
-        <button class="run-popup__stop" id="stopBtn" type="button" disabled>Stop</button>
+        <button class="run-popup__stop" id="stopBtn" type="button" disabled data-i18n="run.stop">Stop</button>
       </div>
     </div>
 
@@ -640,8 +682,8 @@
          free with showModal()). -->
     <dialog class="engine-dialog" id="engineDialog">
       <form method="dialog" class="engine-dialog__head">
-        <span class="engine-dialog__title">Engine connection</span>
-        <button class="run-popup__close" value="close" type="submit" title="Close" aria-label="Close">&times;</button>
+        <span class="engine-dialog__title" data-i18n="engine.connection">Engine connection</span>
+        <button class="run-popup__close" value="close" type="submit" title="Close" aria-label="Close" data-i18n-aria="action.close">&times;</button>
       </form>
       <div class="model-bar__remote" id="remoteFields" hidden>
         <input class="path-input" id="remoteUrl" type="text" spellcheck="false"
@@ -650,7 +692,7 @@
           placeholder="API key (optional)" />
         <input class="path-input" id="remoteModel" type="text" spellcheck="false"
           placeholder="model name (LiteLLM/vLLM gateways; optional for bare llama-server)" />
-        <p class="settings__note">Only llama.cpp (PR #17400), vLLM, and SGLang are known to support Unlimited-OCR / DeepSeek-OCR. Ollama and LM Studio do not.</p>
+        <p class="settings__note" data-i18n="note.supportedBackendsShort">Only llama.cpp (PR #17400), vLLM, and SGLang are known to support Unlimited-OCR / DeepSeek-OCR. Ollama and LM Studio do not.</p>
       </div>
       <!-- Custom-GGUF override (local mode only; toggled by applyPreset).
            Pick a model GGUF to skip the HF download + quant naming; the
@@ -658,17 +700,17 @@
            a chosen path to clear it. Wired in model.js wireGgufPicker(). -->
       <div class="model-bar__local" id="localFields">
         <div class="model-bar__row">
-          <button class="model-btn model-btn--ghost" id="pickModelBtn" type="button">Custom model GGUF…</button>
+          <button class="model-btn model-btn--ghost" id="pickModelBtn" type="button" data-i18n="engine.customGguf">Custom model GGUF…</button>
           <span class="model-bar__status" id="modelFilePath" title="">none</span>
         </div>
         <div class="model-bar__row">
-          <button class="model-btn model-btn--ghost" id="pickMmprojBtn" type="button">Custom projector (mmproj)…</button>
+          <button class="model-btn model-btn--ghost" id="pickMmprojBtn" type="button" data-i18n="engine.customMmproj">Custom projector (mmproj)…</button>
           <span class="model-bar__status" id="mmprojFilePath" title="">none</span>
         </div>
-        <p class="settings__note">Both optional. A custom model GGUF skips the HF download and the quant control. The projector is independent; leave it blank to use the stock one.</p>
+        <p class="settings__note" data-i18n="engine.customFieldsNote">Both optional. A custom model GGUF skips the HF download and the quant control. The projector is independent; leave it blank to use the stock one.</p>
       </div>
       <form method="dialog" class="engine-dialog__actions">
-        <button class="model-btn" value="done" type="submit">Done</button>
+        <button class="model-btn" value="done" type="submit" data-i18n="action.done">Done</button>
       </form>
     </dialog>
   </body>

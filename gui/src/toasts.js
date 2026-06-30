@@ -9,6 +9,14 @@
 
 import { requireTauri } from "./tauri.js";
 
+// EH-0013 bite 2: i18n hook. assets/i18n.js (a classic <script> in <head>,
+// loaded before this module) sets window.unlocrI18n; fall back to identity so a
+// missing/not-yet-loaded runtime never breaks rendering (the key shows, visible
+// only during extraction). Named `tr` -- NOT `t` -- because `t` is the Tauri
+// handle in this file (requireTauri()) and a module `t` would be shadowed inside
+// those functions, calling the handle as a function and crashing.
+const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
+
 /** Compact human byte size, e.g. 1503238553 -> "1.4 GB". */
 function fmtBytes(n) {
   if (n < 0) {
@@ -29,10 +37,10 @@ function fmtBytes(n) {
 function relTime(secs) {
   const now = Math.floor(Date.now() / 1000);
   const d = Math.max(0, now - (secs || 0));
-  if (d < 60) return d + "s ago";
-  if (d < 3600) return Math.floor(d / 60) + "m ago";
-  if (d < 86400) return Math.floor(d / 3600) + "h ago";
-  return Math.floor(d / 86400) + "d ago";
+  if (d < 60) return tr("reltime.seconds", { n: d });
+  if (d < 3600) return tr("reltime.minutes", { n: Math.floor(d / 60) });
+  if (d < 86400) return tr("reltime.hours", { n: Math.floor(d / 3600) });
+  return tr("reltime.days", { n: Math.floor(d / 86400) });
 }
 
 /** Create or update a toast by id (same id = update in place, used for live
@@ -125,7 +133,7 @@ export async function refreshNotifyPanel() {
   const listEl = document.getElementById("notifyList");
   if (!listEl) return;
   if (list.length === 0) {
-    listEl.innerHTML = '<p class="notify-panel__empty">No notifications.</p>';
+    listEl.innerHTML = '<p class="notify-panel__empty">' + tr("notify.empty") + '</p>';
     return;
   }
   listEl.innerHTML = "";
@@ -158,7 +166,7 @@ export async function refreshNotifyPanel() {
       const x = document.createElement("button");
       x.className = "notify-item__x";
       x.type = "button";
-      x.title = "Dismiss";
+      x.title = tr("notify.dismiss");
       x.textContent = "×";
       x.addEventListener("click", async (ev) => {
         ev.stopPropagation();
@@ -198,7 +206,7 @@ function wireDownloadToasts(t) {
       total > 0 ? fmtBytes(done) + " / " + fmtBytes(total) : fmtBytes(done || 0);
     showToast(id, {
       kind: "download",
-      title: "Downloading " + key,
+      title: tr("toast.downloading", { name: key }),
       meta:
         (pct != null ? pct + "%  ·  " : "") +
         sizeStr +
@@ -222,7 +230,7 @@ function wireDownloadToasts(t) {
     }
     if (dlHappened) {
       dlHappened = false;
-      addNotification("download", "Model download complete", "");
+      addNotification("download", tr("notify.modelDownloadComplete"), "");
     }
   });
 }
@@ -241,6 +249,14 @@ export function initNotifications() {
   const clearAll = document.getElementById("notifyClearAll");
 
   if (bell && panel) {
+    // EH-0011: hide the panel and (optionally) return focus to the bell. Shared by
+    // the click-outside and Escape paths so the two close behaviors can't drift.
+    function closePanel(returnFocus) {
+      if (panel.hidden) return;
+      panel.hidden = true;
+      bell.setAttribute("aria-expanded", "false");
+      if (returnFocus && typeof bell.focus === "function") bell.focus();
+    }
     bell.addEventListener("click", async (e) => {
       e.stopPropagation();
       const opening = panel.hidden;
@@ -260,8 +276,20 @@ export function initNotifications() {
     document.addEventListener("click", (e) => {
       if (panel.hidden) return;
       if (e.target === bell || bell.contains(e.target) || panel.contains(e.target)) return;
-      panel.hidden = true;
-      bell.setAttribute("aria-expanded", "false");
+      closePanel(false);
+    });
+    // EH-0011: Escape closes the panel and returns focus to the bell. Skip when
+    // focus is inside a real modal (run popup / engine dialog) so those keep their
+    // own Escape handling; the panel itself is not a dialog.
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || panel.hidden) return;
+      const dlg =
+        e.target && e.target.closest
+          ? e.target.closest('[role="dialog"], dialog')
+          : null;
+      if (dlg) return;
+      e.preventDefault();
+      closePanel(true);
     });
   }
   if (clearAll) {
@@ -273,6 +301,12 @@ export function initNotifications() {
       }
       refreshNotifyPanel();
     });
+  }
+
+  // EH-0013 bite 2: re-render the panel once the locale finishes loading. The
+  // initial render (below) can race the async locale fetch and show raw keys.
+  if (window.unlocrI18n && window.unlocrI18n.onLocaleChange) {
+    window.unlocrI18n.onLocaleChange(refreshNotifyPanel);
   }
 
   wireDownloadToasts(t);

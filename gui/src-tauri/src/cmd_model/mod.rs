@@ -13,6 +13,8 @@ use crate::state::{AppState, Backend, LoadedModel};
 
 mod cache;
 pub(crate) use cache::{clear_model_cache, get_cache_info, list_local_models, preflight};
+mod sysreq;
+pub(crate) use sysreq::system_requirements;
 
 /// Status payload for `model_status` / `load_model` returns.
 #[derive(Clone, Serialize)]

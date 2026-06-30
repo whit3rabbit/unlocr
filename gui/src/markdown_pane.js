@@ -34,6 +34,11 @@ export function makeMarkdownPane() {
       status: false,
       autosave: { enabled: false },
       placeholder: PLACEHOLDER,
+      // Change CodeMirror input style to contenteditable to make it accessible to
+      // screen readers and OS selection (similar design paradigm to CodeMirror 6).
+      codeMirrorOptions: {
+        inputStyle: "contenteditable"
+      },
       toolbar: [
         { name: "bold", action: EasyMDE.toggleBold, text: "B", title: "Bold" },
         { name: "italic", action: EasyMDE.toggleItalic, text: "I", title: "Italic" },
@@ -57,6 +62,17 @@ export function makeMarkdownPane() {
           typeof DOMPurify !== "undefined" ? DOMPurify.sanitize(html) : html,
       },
     });
+
+    // Post-process the toolbar buttons to assign explicit aria-label values for screen readers
+    const toolbarEl = el.parentNode ? el.parentNode.querySelector(".editor-toolbar") : document.querySelector(".editor-toolbar");
+    if (toolbarEl) {
+      toolbarEl.querySelectorAll("button").forEach((btn) => {
+        const title = btn.getAttribute("title");
+        if (title) {
+          btn.setAttribute("aria-label", title);
+        }
+      });
+    }
   }
 
   function setValue(markdown) {
@@ -176,6 +192,14 @@ export function makeMarkdownPane() {
     }
   }
 
+  function focus() {
+    if (editor && typeof editor.codemirror === "object" && typeof editor.codemirror.focus === "function") {
+      editor.codemirror.focus();
+    } else if (el && typeof el.focus === "function") {
+      el.focus();
+    }
+  }
+
   if (saveBtn) saveBtn.addEventListener("click", save);
   if (exportSel) {
     // The select acts as a menu: fire on pick, then reset to the "Export…" label.
@@ -186,5 +210,5 @@ export function makeMarkdownPane() {
     });
   }
 
-  return { render, clear, save, exportAs };
+  return { render, clear, save, exportAs, focus };
 }

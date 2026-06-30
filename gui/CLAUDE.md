@@ -16,9 +16,10 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
     - `jobs.js` & `./library.js`, `./board.js`, `./job_card.js`, `./rail.js`: library database grid, kanban board, and jobs view handlers.
     - `settings.js`: settings configuration pane.
     - `toasts.js`: notifications/toasts management.
+    - `assets/i18n.js` + `locales/{en,zh,ja,ko}.json`: i18n runtime + translation strings (see Internationalization below).
 - `src-tauri/`      Rust backend (crate `unlocr-gui`, lib name `gui_lib`).
   - `src/lib.rs`    `run()` builder + `generate_handler!`. `src/main.rs` calls `gui_lib::run()`.
-  - `src/cmd_model/` directory: model loading/management Tauri commands (`mod.rs`, `cache.rs`).
+  - `src/cmd_model/` directory: model loading/management Tauri commands (`mod.rs`, `cache.rs`, `sysreq.rs`).
   - `src/cmd_run/` directory: running, preflight, tools, and safe filesystem Tauri commands (`mod.rs`, `fs.rs`, `render.rs`, `tools.rs`).
   - `src/cmd_store.rs` Tauri commands wrapper for the jobs store.
   - `src/db.rs`     SQLite (`rusqlite`) backing for all persisted stores: one `unlocr.db`
@@ -77,10 +78,19 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
 ## Frontend conventions
 - `withGlobalTauri: true` (see tauri.conf.json), so JS uses `window.__TAURI__.core.invoke`,
   not an npm `@tauri-apps/api` import. No build step: edit JS, reload.
-- Vendored UMD libs (EasyMDE, DOMPurify) live in `src/assets/`, loaded as classic
+- Vendored UMD libs (`EasyMDE`, `DOMPurify`, `hotkeys`) live in `src/assets/`, loaded as classic
   `<script>` in `index.html <head>` BEFORE the deferred `main.js` module so the globals
   exist when `makeMarkdownPane()` runs. New frontend dep = drop the file + add the tag
   (no npm/bundler); ask first.
+- **Accessibility & Screen Readers**:
+  - Global hotkeys mapping (`Alt+W/L/B/R/S`, `Alt+I`, `Ctrl+Enter`, `Alt+M`, `Alt+N`) are registered via `hotkeys-js` at the end of `DOMContentLoaded` inside `main.js` to allow fast keyboard navigation.
+  - `hotkeys.filter` (set in `main.js`): inside an input/textarea/contenteditable it
+    returns `ctrlKey || metaKey` ONLY. That lets the Run shortcut (`ctrl+enter` /
+    `cmd+enter`) fire from a text field, INCLUDING macOS Cmd, while `Alt+Enter` is left
+    as a normal key (newline / IME), not a hijacked Run trigger. `Alt+*` nav shortcuts
+    still work when focus is NOT in a text field (the filter returns true). Do NOT add
+    `altKey` to the editable-branch filter: it hijacks text entry.
+  - The Markdown review editor is configured with `codeMirrorOptions: { inputStyle: "contenteditable" }` in `markdown_pane.js`. This exposes a native `contenteditable` container to screen readers and OS accessibility trees (mimicking CodeMirror 6's accessibility behavior within our CodeMirror 5-based EasyMDE instance) to fix virtual cursors and selection announcements.
 - EasyMDE's default toolbar icons are FontAwesome auto-fetched from a CDN -> blocked by
   our CSP (`style-src`/`font-src 'self'`) and broken offline. Use a text-label toolbar
   over EasyMDE's static actions + `autoDownloadFontAwesome:false` in `src/markdown_pane.js`.
@@ -105,6 +115,47 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
   optional override: empty -> the selected Task preset is sent (`readRunOptions`), filled
   -> sent verbatim. Settings `default_prompt` defaults to "" (empty box); a non-empty
   value seeds the run box. Unlimited-OCR uses NO system prompt; do not add one.
+
+## Internationalization (i18n)
+- Runtime: `src/assets/i18n.js` is a classic `<script>` in `<head>` (loads before the
+  deferred `main.js` module), exposing `window.unlocrI18n` (`t`, `apply`, `setLocale`,
+  `onLocaleChange`, `ready`) plus a short `window.t`. Strings live in
+  `src/locales/{en,zh,ja,ko}.json`: a flat `dotted.key` -> string map with
+  `{placeholder}` substitution via `t(key, { placeholder })`. A missing key renders as
+  the raw dotted key (visible, not blank), so the locale files MUST stay in KEY PARITY
+  (every file has the same key set).
+- Static text: HTML carries an English default plus a `data-i18n="key"` attr
+  (textContent), `data-i18n-ph` (placeholder), or `data-i18n-aria` (aria-label).
+  `applyText()` walks those on every locale load; the English default is the
+  progressive-enhancement fallback before the (async) locale fetch resolves.
+- Adding a string: add the `dotted.key` to ALL locale files (en + zh/ja/ko). Keep the
+  files sorted alphabetically, 2-space indent, raw UTF-8 (no `\uXXXX` escapes) by
+  re-dumping: `json.dumps(d, ensure_ascii=False, indent=2, sort_keys=True)` + trailing
+  newline (the existing files round-trip cleanly through exactly this). Verify parity
+  afterward: every locale must have the same key set (a one-line python key-set diff
+  against en catches a forgotten file).
+- Adding a locale: drop `locales/<tag>.json` with full key parity with en, add the tag
+  to `AVAILABLE` in `i18n.js`, and add the `<option value="<tag>">` to `#localeSelect`
+  in `index.html`. Locale resolution: exact tag, then primary subtag (zh-CN -> zh),
+  then en.
+- Persistence: the chosen locale is stored in `localStorage` (`unlocr.locale`), NOT
+  the SQLite settings store. It is a frontend-only preference (the Rust backend never
+  reads it), and localStorage is synchronous so `boot()` can restore it with no flash
+  of the wrong language and no DB schema migration. `boot()` order: saved locale >
+  `navigator.language`. The `#localeSelect` change handler calls `setLocale`, which
+  loads + applies + persists.
+- Dynamic text (set imperatively via `t()`, NOT a `data-i18n` node) does NOT
+  auto-translate: register an `onLocaleChange(fn)` listener so it re-renders on a live
+  switch AND on the initial load (listeners fire inside `useLocale` after the dict
+  loads, so this also covers the brief pre-load window). Existing hooks: model bar
+  (`refreshModelStatus` in main.js), quant labels (`markCachedQuants`), sysreq panel
+  (`wireSystemRequirements`), Load-button label (`updateLoadLabel`), notify panel.
+  NEVER infer UI state from a translated string: the old `updateLoadLabel` compared the
+  button's `textContent` to `tr("model.reload")` and broke on locale switch (the button
+  held the old-language text while `tr()` returned the new one). Track state in a
+  flag/variable (`modelLoaded`) and re-derive the label.
+- Gates after an i18n edit: `node --check src/assets/i18n.js` (and any edited module),
+  and confirm every `locales/*.json` parses and is in key parity.
 
 ## Build / run (from gui/)
 - `node --check src/main.js`  # cheapest gate after a JS edit (no bundler/test on the static frontend)
@@ -135,6 +186,16 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
   `PR_SET_PDEATHSIG`/Job Objects; macOS has neither, and a parent-side watchdog can't
   help (it dies with the app). If a user force-quits, tell them to `pkill llama-server`.
   See `src/server/local.rs` `Drop` + `Server::start`.
+- System Requirements panel: the `system_requirements` command returns the lib's
+  `unlocr::preflight::sysreq::SystemInfo` directly. Its `Status` enum serializes
+  lowercase (`good`/`marginal`/`insufficient`/`unknown`) and the struct is camelCase,
+  which is exactly what `settings.js` reads (`metrics[].status`, `verdict`,
+  `verdictLabel`). Do NOT re-declare a parallel `Metric`/report DTO + `status_str` in
+  the GUI; keep the one wire type in the lib. The static probes are memoized in the lib
+  (`OnceLock`), so startup + Recheck do not re-shell `system_profiler`/`lspci` each
+  time (disk free is re-probed live). Metric labels + the verdict are localized via
+  the `sysreq.label.*` / `sysreq.verdict.*` locale keys; the per-metric recommendation
+  HINTS still come from the backend as English (localizing them needs a Rust change).
 
 ## Eatahorse run log (2026-06-27/28)
 

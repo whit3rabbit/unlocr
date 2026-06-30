@@ -19,7 +19,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use unlocr::{model, preflight, server};
+use unlocr::{model, preflight, server, OcrOptions};
 
 /// Result type alias with a dynamic error type.
 pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
@@ -60,24 +60,20 @@ fn run() -> Res<()> {
         return Ok(());
     }
 
-    // Reject out-of-range numerics before they reach pdftoppm / llama-server.
-    // Mirrors the GUI run_ocr guards: dpi=0 makes pdftoppm produce no pages,
-    // image-max-tokens=0 is rejected by llama-server at spawn, and a repeat
-    // penalty <= 0 (or non-finite) drives the sampler into degenerate output.
-    if args.dpi == 0 {
-        return Err("--dpi must be greater than 0".into());
+    // Reject out-of-range numerics before any download/spawn, via the single
+    // shared lib sink (the same `OcrOptions::validate` the GUI runs in
+    // validation.rs, so the guard logic lives in one place). A throwaway
+    // OcrOptions carries just the guarded fields; `resolved_pages()` resolves
+    // the page range here so a bad --pages also fails fast, off the slow path.
+    OcrOptions {
+        dpi: args.dpi,
+        max_tokens: args.max_tokens,
+        image_max_tokens: args.image_max_tokens,
+        repeat_penalty: args.repeat_penalty,
+        pages: args.resolved_pages()?,
+        ..OcrOptions::default()
     }
-    if args.image_max_tokens == Some(0) {
-        return Err("--image-max-tokens must be greater than 0".into());
-    }
-    if let Some(rp) = args.repeat_penalty {
-        if !rp.is_finite() || rp <= 0.0 {
-            return Err("--repeat-penalty must be a finite value greater than 0".into());
-        }
-    }
-    // Surface a bad --pages value before any download/spawn (ocr::run_pdf reparses
-    // it per input, but failing here keeps the error off the slow path).
-    args.resolved_pages()?;
+    .validate()?;
 
     // Expand folders, globs, and --from-list into a concrete, deduped PDF list.
     let inputs = expand_inputs(&args.inputs, args.from_list.as_deref(), args.recursive)?;

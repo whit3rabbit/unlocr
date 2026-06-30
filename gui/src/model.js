@@ -5,6 +5,15 @@
 
 import { requireTauri } from "./tauri.js";
 
+// EH-0013 bite 2: i18n hook. Named `tr` -- `t` is the Tauri handle in every fn.
+const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
+
+// Last-known loaded state, stamped by refreshModelStatus. updateLoadLabel reads
+// THIS rather than inferring loaded state from the button's textContent, so a
+// live locale switch (which changes tr("model.reload") under the button) cannot
+// make it relabel a loaded model as "Load model".
+let modelLoaded = false;
+
 /** Update the titlebar Local/Remote/No-model badge from a model_status payload. */
 export function updateModeBadge(status) {
   const badge = document.getElementById("modeBadge");
@@ -12,7 +21,7 @@ export function updateModeBadge(status) {
   const loaded = !!(status && status.loaded);
   const mode = status && status.mode;
   const dotClass = !loaded ? "is-off" : mode === "remote" ? "is-remote" : "is-loaded";
-  const label = !loaded ? "No model" : mode === "remote" ? "Remote" : "Local";
+  const label = !loaded ? tr("status.noModel") : mode === "remote" ? tr("model.remote") : tr("model.local");
   badge.innerHTML = '<span class="titlebar__mode-dot ' + dotClass + '"></span>' + label;
 }
 
@@ -38,10 +47,11 @@ export async function refreshModelStatus(ui) {
   const loadBtn = document.getElementById("loadModelBtn");
   const unloadBtn = document.getElementById("unloadModelBtn");
   const statusText = document.getElementById("modelStatusText");
+  modelLoaded = !!status.loaded;
   if (unloadBtn) unloadBtn.disabled = !status.loaded;
-  if (loadBtn) loadBtn.textContent = status.loaded ? "Reload model" : "Load model";
+  if (loadBtn) loadBtn.textContent = status.loaded ? tr("model.reload") : tr("model.load");
   if (statusText) {
-    statusText.textContent = status.loaded ? "Loaded: " + status.label : "No model loaded";
+    statusText.textContent = status.loaded ? tr("model.loadedLabel", { label: status.label }) : tr("model.noModelLoaded");
   }
   // Upgrade the unloaded "Load model" label to "Download & load model" when the
   // selected local quant is not yet cached (best-effort; loaded state is left).
@@ -54,13 +64,13 @@ export async function refreshModelStatus(ui) {
  *  Best-effort: silent outside the webview or if list_local_models fails. */
 async function updateLoadLabel() {
   const loadBtn = document.getElementById("loadModelBtn");
-  if (!loadBtn || loadBtn.textContent === "Reload model") return; // loaded: leave it
+  if (!loadBtn || modelLoaded) return; // a model is loaded: leave the "Reload" label
   if (activeEngineMode() !== "local") {
-    loadBtn.textContent = "Load model";
+    loadBtn.textContent = tr("model.load");
     return;
   }
   if (pickedGguf("modelFilePath")) {
-    loadBtn.textContent = "Load model";
+    loadBtn.textContent = tr("model.load");
     return;
   }
   const quant = document.getElementById("optQuant")?.value;
@@ -71,8 +81,8 @@ async function updateLoadLabel() {
     return;
   }
   loadBtn.textContent = (cached || []).includes(quant)
-    ? "Load model"
-    : "Download & load model";
+    ? tr("model.load")
+    : tr("model.downloadLoad");
 }
 
 // Backend presets. llamacpp = managed-local spawn (Quant control drives it, no
@@ -182,7 +192,7 @@ function wireGgufPicker(btnId, spanId, label) {
       span.title = p;
     } else {
       delete span.dataset.path;
-      span.textContent = "none";
+      span.textContent = tr("model.none");
       span.title = "";
     }
     // A custom model GGUF skips the download, so the Load label drops the
@@ -234,7 +244,7 @@ export function wireModelBar(ui) {
       try {
         t = requireTauri();
       } catch (err) {
-        if (statusText) statusText.textContent = "unavailable outside the app";
+        if (statusText) statusText.textContent = tr("model.unavailableOutside");
         return;
       }
       const mode = activeEngineMode();
@@ -249,7 +259,7 @@ export function wireModelBar(ui) {
       const imtVal = imtEl ? parseInt(imtEl.value || "", 10) : NaN;
       loadBtn.disabled = true;
       if (unloadBtn) unloadBtn.disabled = true;
-      if (statusText) statusText.textContent = "loading…";
+      if (statusText) statusText.textContent = tr("model.loading");
       try {
         const status = await t.core.invoke("load_model", {
           mode,
@@ -265,7 +275,7 @@ export function wireModelBar(ui) {
         });
         if (ui) ui.applyModelStatus(status);
       } catch (err) {
-        if (statusText) statusText.textContent = "load failed: " + String(err);
+        if (statusText) statusText.textContent = tr("model.loadFailed", { error: String(err) });
       } finally {
         loadBtn.disabled = false;
         await refreshModelStatus(ui);
@@ -305,7 +315,7 @@ export function attachLoadListeners() {
   const statusText = document.getElementById("modelStatusText");
   t.event.listen("ocr://progress", (e) => {
     const { name, pct } = (e && e.payload) || {};
-    if (statusText) statusText.textContent = "downloading " + (name || "model") + " " + (pct || 0) + "%";
+    if (statusText) statusText.textContent = tr("model.downloadingPct", { name: name || tr("model.model"), pct: pct || 0 });
   });
   t.event.listen("ocr://status", (e) => {
     const { message } = (e && e.payload) || {};
@@ -313,7 +323,7 @@ export function attachLoadListeners() {
   });
   t.event.listen("ocr://server-ready", (e) => {
     const { port } = (e && e.payload) || {};
-    if (statusText) statusText.textContent = "server ready on :" + port;
+    if (statusText) statusText.textContent = tr("model.serverReady", { port });
   });
 }
 
@@ -323,7 +333,7 @@ export function attachLoadListeners() {
 export function quantTierLabel(quant) {
   const TIERS = { BF16: "best", Q8_0: "good", Q4_K_M: "less" };
   const tier = TIERS[quant];
-  return tier ? tier + " (" + quant + ")" : quant;
+  return tier ? tr("tier.format", { tier: tr("tier." + tier), quant }) : quant;
 }
 
 /** Mark which quant options are already cached on disk (list_local_models) by
@@ -350,7 +360,16 @@ export async function markCachedQuants() {
     Array.from(sel.options).forEach((opt) => {
       const base = opt.value;
       const label = quantTierLabel(base);
-      opt.textContent = set.has(base) ? label + " ✓ cached" : label;
+      opt.textContent = set.has(base) ? label + tr("model.cached") : label;
     });
   });
+}
+
+// EH-0013: re-render the quant tier labels and the model Load-button label on a
+// locale switch. Both re-derive via tr() (reading the freshly-updated dict), so
+// the quant <option> text and the Load/Download&load button flip language
+// instantly. (The model status TEXT is refreshed on the next status event.)
+if (typeof window !== "undefined" && window.unlocrI18n && window.unlocrI18n.onLocaleChange) {
+  window.unlocrI18n.onLocaleChange(markCachedQuants);
+  window.unlocrI18n.onLocaleChange(updateLoadLabel);
 }

@@ -7,10 +7,13 @@ use std::path::{Path, PathBuf};
 
 /// Installation hints and instructions.
 pub mod hints;
+/// System requirements checking and rating.
+pub mod sysreq;
 /// System information and check utilities.
 pub mod system;
 
 pub use hints::*;
+pub use sysreq::*;
 pub use system::*;
 
 // b8530, released 2026-03-25T18:57:40Z, is the exact merge build of

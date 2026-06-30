@@ -3,6 +3,9 @@ import { jobBaseName } from "./paths.js";
 import { renderJobCard, confirmDestructive } from "./job_card.js";
 import { loadJobs } from "./jobs.js";
 
+// EH-0013 bite 2: i18n hook. Named `tr` -- `t` is the Tauri handle in the actions.
+const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
+
 /** EH-0006 bite 2: controller over the Library grid. Reads the persisted job
  *  store via the `list_jobs` command and renders one card per run. The grid is the
  *  "all jobs" view (the Board view, bite 3, groups the same jobs by status). Cards
@@ -65,8 +68,8 @@ export function makeLibrary() {
     },
     async removeDelete(id, outputPath) {
       if (!id) return;
-      const name = jobBaseName(outputPath) || "this file";
-      if (!(await confirmDestructive("Delete " + name + " from disk? This cannot be undone.")))
+      const name = jobBaseName(outputPath) || tr("job.thisFile");
+      if (!(await confirmDestructive(tr("job.confirmDeleteOne", { name }))))
         return;
       try {
         const t = requireTauri();
@@ -88,7 +91,7 @@ export function makeLibrary() {
       load();
     },
     async removeAllDelete() {
-      if (!(await confirmDestructive("Delete every OCR output file from disk? This cannot be undone.")))
+      if (!(await confirmDestructive(tr("job.confirmDeleteAll"))))
         return;
       try {
         const t = requireTauri();

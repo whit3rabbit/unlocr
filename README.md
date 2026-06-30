@@ -4,7 +4,9 @@
 
 A fast, lightweight tool to OCR PDFs into clean Markdown. It is powered by the **[Unlimited-OCR](https://huggingface.co/sahilchachra/Unlimited-OCR-GGUF)** model (DeepSeek-OCR 3B VLM) running locally via **`llama.cpp`** (GGUF).
 
-Currently, a WIP.
+Currently, a WIP and has pretty tough system requirements. Do not expect it to work on low end devices. This was created to use unlimited-ocr on local computer and it is not affiliated with the original unlimited-ocr.
+
+This is vibe coded so don't expect everything to be perfect. Feel free to submit PR's. UI was done in Claude Design. 
 
 ### Key Features
 

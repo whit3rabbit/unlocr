@@ -5,6 +5,9 @@ import { refreshModelStatus } from "./model.js";
 import { parentDirOf, splitPath } from "./paths.js";
 import { showToast, removeToast, addNotification } from "./toasts.js";
 
+// EH-0013 bite 2: i18n hook. Named `tr` -- `t` is the Tauri handle in runOcrOnPath.
+const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
+
 /** Run OCR on a single PDF path end to end: subscribe events, invoke run_ocr,
  *  resolve the markdown result, and record the outcome to the job store. Shared by
  *  the Run button (typed path) and the drag-drop importer (dropped path) so both
@@ -35,7 +38,7 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
     ui.setRunning(true);
     ui.showProgress(true);
     ui.setIndeterminate(true);
-    ui.setStatus("starting…");
+    ui.setStatus(tr("run.starting"));
   }
   if (mdPane) mdPane.clear();
 
@@ -77,8 +80,8 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
     // Show/confirm the resolved output directory
     showToast("run-dir-info:" + path, {
       kind: "info",
-      title: "Saving output to:",
-      meta: outDir === "." ? "Current working directory (.)" : outDir
+      title: tr("run.savingOutputTo"),
+      meta: outDir === "." ? tr("run.cwd") : outDir
     });
     removeToast("run-dir-info:" + path, 4000);
 
@@ -126,7 +129,7 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
       } catch (readErr) {
         // File read failed (rare: written then removed). Surface in the review
         // pane so the user sees why no markdown is shown, but keep the run green.
-        if (mdPane) mdPane.render("could not read " + mdPath + ": " + String(readErr), mdPath);
+        if (mdPane) mdPane.render(tr("run.couldNotRead", { path: mdPath, error: String(readErr) }), mdPath);
         resolvedMd = "";
         readError = String(readErr);
       }
@@ -137,7 +140,7 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
     if (ui && !readError) {
       ui.setRunning(false);
       ui.setFill(100);
-      ui.setStatus("done");
+      ui.setStatus(tr("run.doneStatus"));
     }
 
     if (resolvedMd) {
@@ -151,16 +154,16 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
     if (readError) {
       if (ui) {
         ui.setRunning(false);
-        ui.fail("read failed: " + readError);
+        ui.fail(tr("run.readFailed", { error: readError }));
       }
       const stem = (splitPath(path) || {}).name || path;
       showToast("run:" + path, {
         kind: "error",
-        title: stem + " — OCR failed",
-        meta: "read failed: " + readError.slice(0, 140),
+        title: tr("run.ocrFailed", { stem }),
+        meta: tr("run.readFailed", { error: readError.slice(0, 140) }),
       });
       removeToast("run:" + path, 8000);
-      addNotification("error", stem + " — OCR failed", "read failed: " + readError);
+      addNotification("error", tr("run.ocrFailed", { stem }), tr("run.readFailed", { error: readError }));
       return false;
     }
 
@@ -171,11 +174,11 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
     const stem = (splitPath(path) || {}).name || path;
     showToast("run:" + path, {
       kind: "done",
-      title: stem + " — OCR complete",
+      title: tr("run.ocrComplete", { stem }),
       meta: mdPath || "",
     });
     removeToast("run:" + path, 5000);
-    addNotification("done", stem + " — OCR complete", mdPath || "");
+    addNotification("done", tr("run.ocrComplete", { stem }), mdPath || "");
     return true;
   } catch (err) {
     // User-initiated stop is not a failure. The backend killed the local server
@@ -184,7 +187,7 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
     if (ui) {
       ui.setRunning(false);
       if (wasStopped) {
-        ui.setStatus("stopped");
+        ui.setStatus(tr("run.stoppedStatus"));
       } else {
         ui.fail(String(err));
       }
@@ -198,9 +201,9 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
       // The backend already finished this file's job row as "failed: stopped by
       // user" before returning the "stopped" error, so no frontend record here.
       const stem = (splitPath(path) || {}).name || path;
-      showToast("run:" + path, { kind: "info", title: stem + " — stopped", meta: "reload the model to run again" });
+      showToast("run:" + path, { kind: "info", title: tr("run.ocrStopped", { stem }), meta: tr("run.reloadToRunAgain") });
       removeToast("run:" + path, 6000);
-      addNotification("info", stem + " — OCR stopped", "Stopped by user; reload the model to run again.");
+      addNotification("info", tr("run.ocrStoppedInfo", { stem }), tr("run.stoppedByUser"));
       // Sentinel so a batch loop can stop dispatching the remaining files (the
       // model was dropped; they would all fail "load a model first").
       return "stopped";
@@ -212,11 +215,11 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
     const stem = (splitPath(path) || {}).name || path;
     showToast("run:" + path, {
       kind: "error",
-      title: stem + " — OCR failed",
+      title: tr("run.ocrFailed", { stem }),
       meta: String(err).slice(0, 140),
     });
     removeToast("run:" + path, 8000);
-    addNotification("error", stem + " — OCR failed", String(err));
+    addNotification("error", tr("run.ocrFailed", { stem }), String(err));
     return false;
   }
 }

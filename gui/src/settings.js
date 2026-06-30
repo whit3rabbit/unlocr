@@ -7,6 +7,12 @@ import { requireTauri } from "./tauri.js";
 import { applyPreset, markCachedQuants } from "./model.js";
 import { renderEffectiveSummary } from "./options.js";
 
+// EH-0013 bite 2: i18n hook. Named `tr` -- `t` is the Tauri handle in every wire*
+// fn. Only the original wireSettings/wireCacheControls/wireDependencies strings are
+// translated here; wireSystemRequirements + SYSREQ_INFO belong to the concurrent
+// System Requirements feature and are left untouched.
+const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
+
 /** Apply persisted settings to the live workspace controls (engine defaults,
  *  provider mode, remote fields) so a user's saved defaults seed each session. */
 export function applySettingsToControls(s) {
@@ -112,11 +118,11 @@ export async function wireSettings(onSaved) {
         // eslint-disable-next-line no-console
         console.error("[settings] save failed", err);
         if (saved) {
-          saved.textContent = "Error saving settings: " + String(err);
+          saved.textContent = tr("settings.saveError", { error: String(err) });
           saved.hidden = false;
           setTimeout(() => {
             saved.hidden = true;
-            saved.textContent = "Saved.";
+            saved.textContent = tr("settings.saved");
           }, 3000);
         }
       }
@@ -160,7 +166,7 @@ export async function wireCacheControls() {
       if (dirEl) dirEl.textContent = (info && info.path) || "-";
       if (sizeEl) sizeEl.textContent = info ? fmtBytes(Number(info.sizeBytes) || 0) : "";
     } catch (err) {
-      if (dirEl) dirEl.textContent = "unavailable: " + String(err);
+      if (dirEl) dirEl.textContent = tr("settings.unavailable", { error: String(err) });
       if (sizeEl) sizeEl.textContent = "";
     }
   }
@@ -170,12 +176,12 @@ export async function wireCacheControls() {
   if (clearBtn) {
     clearBtn.addEventListener("click", async () => {
       clearBtn.disabled = true;
-      if (statusEl) { statusEl.hidden = false; statusEl.textContent = "clearing…"; }
+      if (statusEl) { statusEl.hidden = false; statusEl.textContent = tr("settings.clearing"); }
       try {
         await t.core.invoke("clear_model_cache");
-        if (statusEl) statusEl.textContent = "Cache cleared.";
+        if (statusEl) statusEl.textContent = tr("settings.cacheCleared");
       } catch (err) {
-        if (statusEl) statusEl.textContent = "Error: " + String(err);
+        if (statusEl) statusEl.textContent = tr("settings.cacheError", { error: String(err) });
       } finally {
         await refreshCacheInfo();
         // Re-mark cached quants (all gone after a clear).
@@ -187,6 +193,101 @@ export async function wireCacheControls() {
       }
     });
   }
+}
+
+// Human-facing labels + recommendation hints for system metrics, keyed by
+// the metric key from the backend.
+const SYSREQ_INFO = {
+  ram_total: { label: "RAM" },
+  cpu_cores: { label: "CPU cores" },
+  cpu_model: { label: "CPU model" },
+  gpu:       { label: "GPU" },
+  disk_free: { label: "Free disk space" },
+};
+
+/** Wire the Settings "System Requirements" panel: detect hardware specs and
+ *  rate each against known thresholds. Called once on startup and on Recheck.
+ *  Fail-soft outside the webview. Renders the same dep-row layout as Dependencies. */
+export async function wireSystemRequirements() {
+  let t;
+  try {
+    t = requireTauri();
+  } catch (err) {
+    return;
+  }
+  const list = document.getElementById("sysreqList");
+  const empty = document.getElementById("sysreqEmpty");
+  const refresh = document.getElementById("sysreqRefresh");
+  const verdict = document.getElementById("sysreqVerdict");
+  if (!list) return;
+
+  async function render() {
+    let report;
+    try {
+      report = await t.core.invoke("system_requirements");
+    } catch (err) {
+      if (empty) { empty.hidden = false; empty.textContent = tr("settings.unavailable", { error: String(err) }); }
+      return;
+    }
+    list.querySelectorAll(".dep-row").forEach((n) => n.remove());
+    if (empty) empty.hidden = true;
+
+    for (const metric of report.metrics || []) {
+      // Label is localized; fall back to the English SYSREQ_INFO label, then the
+      // raw key, if a locale is missing the entry.
+      const labelKey = "sysreq.label." + metric.key;
+      let label = tr(labelKey);
+      if (label === labelKey) label = (SYSREQ_INFO[metric.key] || {}).label || metric.key;
+      const row = document.createElement("div");
+      row.className = "dep-row";
+
+      const name = document.createElement("span");
+      name.className = "dep-row__name";
+      name.textContent = label;
+
+      const status = document.createElement("span");
+      status.className = "dep-row__status";
+      if (metric.status === "good") status.classList.add("is-ok");
+      else if (metric.status === "marginal") status.classList.add("is-warn");
+      else if (metric.status === "insufficient") status.classList.add("is-bad");
+      status.textContent = metric.value || "Unknown";
+
+      row.appendChild(name);
+      row.appendChild(status);
+
+      if (metric.hint) {
+        const hint = document.createElement("span");
+        hint.className = "dep-row__hint";
+        hint.textContent = metric.hint;
+        row.appendChild(hint);
+      }
+
+      list.appendChild(row);
+    }
+
+    // Set the overall verdict label and color on the section header.
+    if (verdict) {
+      verdict.className = "panel__label sysreq__verdict";
+      if (report.verdict === "good") verdict.classList.add("is-good");
+      else if (report.verdict === "marginal") verdict.classList.add("is-marginal");
+      else if (report.verdict === "insufficient") verdict.classList.add("is-insufficient");
+      else verdict.classList.add("is-unknown");
+      // Localized verdict; fall back to the backend's English label.
+      const verdictKey = "sysreq.verdict." + report.verdict;
+      let verdictText = tr(verdictKey);
+      if (verdictText === verdictKey) verdictText = report.verdictLabel || "System Requirements";
+      verdict.textContent = verdictText;
+    }
+  }
+
+  if (refresh) refresh.addEventListener("click", render);
+  // Re-render on a locale change (and on the initial locale load) so the metric
+  // labels and verdict retranslate; they come from tr(), not data-i18n nodes.
+  // The static hardware probes are cached in the backend, so this is cheap.
+  if (window.unlocrI18n && window.unlocrI18n.onLocaleChange) {
+    window.unlocrI18n.onLocaleChange(() => render());
+  }
+  await render();
 }
 
 // Human-facing labels + per-OS package-manager hints for the external tools, keyed by
@@ -251,7 +352,7 @@ export async function wireDependencies() {
     t.event.listen("tool://download", (e) => {
       const p = e.payload || {};
       const cell = list.querySelector('[data-tool-status="' + p.name + '"]');
-      if (cell) cell.textContent = "downloading… " + (p.pct || 0) + "%";
+      if (cell) cell.textContent = tr("deps.downloadingPct", { pct: (p.pct || 0) });
     });
   }
 
@@ -260,7 +361,7 @@ export async function wireDependencies() {
     try {
       tools = await t.core.invoke("list_tools");
     } catch (err) {
-      if (empty) { empty.hidden = false; empty.textContent = "unavailable: " + String(err); }
+      if (empty) { empty.hidden = false; empty.textContent = tr("settings.unavailable", { error: String(err) }); }
       return;
     }
     // Clear previous rows (keep the #depsEmpty node).
@@ -280,7 +381,7 @@ export async function wireDependencies() {
       const status = document.createElement("span");
       status.className = "dep-row__status" + (tool.found ? " is-ok" : " is-bad");
       status.dataset.toolStatus = tool.name;
-      status.textContent = tool.found ? "found" : "not found";
+      status.textContent = tool.found ? tr("deps.found") : tr("deps.notFound");
       if (tool.found && tool.path) status.title = tool.path;
 
       row.appendChild(name);
@@ -290,15 +391,15 @@ export async function wireDependencies() {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "model-btn model-btn--ghost dep-row__get";
-        btn.textContent = "Download";
+        btn.textContent = tr("deps.download");
         btn.addEventListener("click", async () => {
           btn.disabled = true;
-          status.textContent = "downloading…";
+          status.textContent = tr("deps.downloading");
           try {
             await t.core.invoke("download_tool", { name: tool.name });
             await render(); // re-check; the row rebuilds as "found"
           } catch (err) {
-            status.textContent = "failed";
+            status.textContent = tr("deps.failed");
             status.title = String(err);
             btn.disabled = false;
           }
@@ -310,15 +411,15 @@ export async function wireDependencies() {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "model-btn model-btn--ghost dep-row__get";
-        btn.textContent = "Install with Homebrew";
+        btn.textContent = tr("deps.installBrew");
         btn.addEventListener("click", async () => {
           btn.disabled = true;
-          status.textContent = "installing…";
+          status.textContent = tr("deps.installing");
           try {
             await t.core.invoke("brew_install", { formula: info.brew });
             await render();
           } catch (err) {
-            status.textContent = "failed";
+            status.textContent = tr("deps.failed");
             status.title = String(err);
             btn.disabled = false;
           }
@@ -332,8 +433,8 @@ export async function wireDependencies() {
         // to get poppler). Otherwise the OS-specific package-manager hint.
         h.textContent =
           os === "macos" && !brew
-            ? "needs Homebrew; see below, then `brew install " + (info.brew || tool.name) + "`"
-            : (info.hints && info.hints[os]) || "install via your package manager";
+            ? tr("deps.needsBrew", { formula: info.brew || tool.name })
+            : (info.hints && info.hints[os]) || tr("deps.installViaPm");
         row.appendChild(h);
       }
       list.appendChild(row);
@@ -345,8 +446,8 @@ export async function wireDependencies() {
         // elsewhere a generic recheck nudge.
         hint.textContent =
           os === "macos" && !brew
-            ? "Install Homebrew (https://brew.sh), then Recheck:\n" + HOMEBREW_INSTALL
-            : "Install the missing tools with your package manager, then click Recheck.";
+            ? tr("deps.installHomebrewHint", { cmd: HOMEBREW_INSTALL })
+            : tr("deps.installMissingHint");
       } else {
         hint.textContent = "";
       }

@@ -1,0 +1,177 @@
+use crate::model;
+use crate::options::{OcrOptions, OcrOutput, Progress};
+use crate::output::push_page;
+use crate::pdf;
+use crate::preflight;
+use crate::server;
+use crate::Res;
+use base64::Engine;
+use std::path::Path;
+
+/// Drive one PDF end to end and return the assembled markdown, emitting progress
+/// through `on_progress`. This is the canonical, clap-free OCR entry point used
+/// by both the Tauri bridge and (after refactor) the CLI path.
+///
+/// The caller owns writing the markdown to disk: both the CLI and the GUI call
+/// the shared `write_markdown_output` helper (single file / per-page folder /
+/// both). That keeps the lib free of an output-dir concept in `OcrOptions`: the
+/// layout decision is a parameter to the write helper, not a field on the
+/// loop-driving struct.
+///
+/// Spawns llama-server and kills it on drop (server::Server's Drop), so the
+/// success path does not orphan it.
+///
+/// Returns an `OcrOutput` (combined markdown + per-page texts + optional kept
+/// image dir) so a caller can lay it out however it likes. This is the GUI's
+/// entry point; the CLI drives `ocr_pages` directly.
+///
+/// `resolved_tools` lets a caller pass already-resolved `preflight::Tools` to skip
+/// the `preflight::check` call (which runs `llama-server --version`). Pass `None`
+/// to have `run_ocr_job` run the check itself (original behaviour). The GUI passes
+/// tools it resolved in its own `preflight` command call so `--version` is invoked
+/// only once per run.
+pub fn run_ocr_job<P>(
+    input: &Path,
+    resolved_tools: Option<preflight::Tools>,
+    opts: &OcrOptions,
+    on_progress: &mut P,
+) -> Res<OcrOutput>
+where
+    P: FnMut(Progress),
+{
+    if !input.is_file() {
+        return Err(format!("not a file: {}", input.display()).into());
+    }
+
+    // Locate llama-server + pdftoppm. Accept pre-resolved tools from the caller
+    // (e.g. the GUI that already ran preflight::check for its status panel) to
+    // avoid a second `llama-server --version` invocation per run. Fall back to
+    // check(None) when no tools are provided so the caller-agnostic path still works.
+    let tools = match resolved_tools {
+        Some(t) => t,
+        None => preflight::check(None)?,
+    };
+
+    let cache = model::cache_dir(opts.model_dir.clone())?;
+    // Route download events through the same sink as page events so the GUI can
+    // subscribe to both. model::ensure_with_progress emits Progress::Download;
+    // the plain model::ensure (CLI default) reproduces the original println
+    // output byte-for-byte.
+    let files = model::ensure_with_progress(&cache, &opts.quant, on_progress)?;
+
+    // Pass the raw port (0 = auto): Server::start owns free-port resolution AND the
+    // bind-race retry loop. Pre-resolving here would hand start a concrete port and
+    // silently disable that retry. Read the real port back from the started server.
+    let srv = server::Server::start(
+        &tools.llama_server,
+        &files.model,
+        &files.mmproj,
+        opts.port,
+        opts.image_max_tokens,
+        opts.chat_template.as_deref(),
+    )?;
+    on_progress(Progress::ServerReady { port: srv.port });
+
+    let out = ocr_pages(&srv, &tools.pdftoppm, input, opts, on_progress, &|| false)?;
+
+    // Drop kills llama-server. `out.kept_images` is Some(dir) only when
+    // keep_images is set; bubble it up so the caller can report where the PNGs went.
+    drop(srv);
+    Ok(out)
+}
+
+/// Rasterize one PDF to PNGs and OCR each page in order, emitting a Page
+/// progress event per page. Returns an `OcrOutput` carrying both the combined
+/// page-delimited markdown and the per-page texts (so a caller can write
+/// per-page files without re-splitting), plus, when `opts.keep_images` is set,
+/// the directory the page PNGs were kept in (so the CLI can report it; the handle
+/// is leaked there to keep the files on disk). Shared by run_ocr_job (lib) and,
+/// after bite 2, the CLI's ocr::run_pdf.
+pub fn ocr_pages<S, P>(
+    srv: &S,
+    pdftoppm: &Path,
+    input: &Path,
+    opts: &OcrOptions,
+    on_progress: &mut P,
+    should_cancel: &dyn Fn() -> bool,
+) -> Res<OcrOutput>
+where
+    S: server::ImageOcr,
+    P: FnMut(Progress),
+{
+    let tmp = tempfile::tempdir()?;
+    let pages = pdf::rasterize_range(pdftoppm, input, tmp.path(), opts.dpi, opts.pages)?;
+    // rasterize_range returns an empty Vec (not an Err) when pdftoppm runs clean
+    // but emits nothing. For an OCR run that means nothing was rendered (empty
+    // PDF or a page range past EOF): error out rather than write a silent empty
+    // file. render_page intentionally keeps empty as a value for out-of-range
+    // detection; this run path treats it as a failure.
+    if pages.is_empty() {
+        return Err("pdftoppm produced no pages".into());
+    }
+    let n = pages.len();
+
+    // With a page range, the first rasterized page is the range's start, not page 1.
+    // Derive the real page number so the `<!-- page N -->` delimiter and Progress
+    // events reflect the actual page, not the loop index.
+    let base = opts.pages.map(|(f, _)| f as usize).unwrap_or(1);
+
+    let mut md = String::new();
+    // Capture each page's text separately so a caller can write per-page files
+    // (write_markdown_output) without re-splitting the combined string.
+    let mut pages_text: Vec<(usize, String)> = Vec::with_capacity(n);
+    for (i, page) in pages.iter().enumerate() {
+        // Stop (GUI) sets this; the local backend also kills llama-server so an
+        // in-flight stream errors out, but checking here stops the remote backend
+        // (no pid to kill) at the next page boundary. Err is remapped to "stopped"
+        // by the GUI's run_ocr (cmd_run.rs); the CLI never cancels (|| false).
+        if should_cancel() {
+            return Err("stopped".into());
+        }
+        let page_num = base + i;
+        on_progress(Progress::Page {
+            page: page_num,
+            total: n,
+        });
+
+        let bytes = std::fs::read(page)?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let data_uri = format!("data:image/png;base64,{b64}");
+        // Use streaming so the GUI receives PartialText events as tokens arrive.
+        // The CLI's on_progress sink ignores PartialText (zero cost), while the
+        // Tauri bridge forwards each chunk to the frontend for live appending.
+        let text = srv.ocr_image_stream(
+            &opts.prompt,
+            &data_uri,
+            opts.max_tokens,
+            opts.repeat_penalty,
+            &mut |chunk: &str| {
+                on_progress(Progress::PartialText {
+                    page: page_num,
+                    chunk: chunk.to_string(),
+                });
+                !should_cancel()
+            },
+            should_cancel,
+        )?;
+        // push_page writes page idx+1, so pass the real page number minus one.
+        push_page(&mut md, page_num - 1, text.trim());
+        // Same trimmed text the combined string holds, retained per-page so a
+        // caller can write per-page files without re-splitting on the delimiter.
+        pages_text.push((page_num, text.trim().to_string()));
+    }
+
+    let kept = if opts.keep_images {
+        // Leak the temp handle so the PNGs survive; return the path for the
+        // caller (CLI) to report. `keep()` consumes the TempDir and returns
+        // the directory PathBuf (no longer auto-deleted).
+        Some(tmp.keep())
+    } else {
+        None
+    };
+    Ok(OcrOutput {
+        combined: md.trim_start().to_string(),
+        pages: pages_text,
+        kept_images: kept,
+    })
+}

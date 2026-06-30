@@ -1,6 +1,9 @@
 import { requireTauri } from "./tauri.js";
 import { jobBaseName, formatEpoch } from "./paths.js";
 
+// EH-0013 bite 2: i18n hook. Named `tr` -- `t` is the Tauri handle in openInReview.
+const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
+
 /** EH-0015: navigate to the Review view and render the .md for a done job.
  *  Called when the user clicks a job card whose status is "done" and has an
  *  outputPath. Switches the rail to "review", loads the markdown from disk via
@@ -22,7 +25,7 @@ export async function openInReview(outputPath, mdPane, buttons) {
   document.querySelectorAll(".view").forEach((v) => {
     v.classList.toggle("is-shown", v.dataset.view === "review");
   });
-  if (screenTitle) screenTitle.textContent = "Review";
+  if (screenTitle) screenTitle.textContent = tr("view.review");
 
   // Fetch the .md from disk via the backend command.
   let t;
@@ -41,7 +44,7 @@ export async function openInReview(outputPath, mdPane, buttons) {
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error("[library] re-open failed:", err);
-    if (mdPane) mdPane.render("could not read " + outputPath + ": " + String(err), outputPath);
+    if (mdPane) mdPane.render(tr("run.couldNotRead", { path: outputPath, error: String(err) }), outputPath);
   }
 }
 
@@ -61,7 +64,7 @@ export async function openInReview(outputPath, mdPane, buttons) {
  *  delete" (record + the .md on disk). Both stopPropagation so a click on a button
  *  does not also trigger the card's open-in-review. Board cards omit `actions`. */
 export function renderJobCard(job, mdPane, railButtons, actions) {
-  const card = document.createElement("div");
+  const card = document.createElement("li");
   const status = (job && job.status) || "queued";
   card.className = "job-card job-card--" + status;
 
@@ -73,7 +76,7 @@ export function renderJobCard(job, mdPane, railButtons, actions) {
   name.title = (job && job.inputPath) || "";
   const badge = document.createElement("span");
   badge.className = "job-card__status";
-  badge.textContent = status;
+  badge.textContent = tr("status." + status);
   head.appendChild(name);
   head.appendChild(badge);
   card.appendChild(head);
@@ -101,14 +104,14 @@ export function renderJobCard(job, mdPane, railButtons, actions) {
     span.textContent = label + " " + val;
     meta.appendChild(span);
   };
-  push("quant:", opts.quant);
-  push("dpi:", opts.dpi);
-  push("max-tok:", opts.maxTokens);
-  push("keep-img:", opts.keepImages ? "on" : "off");
+  push(tr("job.quant"), opts.quant);
+  push(tr("job.dpi"), opts.dpi);
+  push(tr("job.maxTok"), opts.maxTokens);
+  push(tr("job.keepImg"), opts.keepImages ? tr("job.on") : tr("job.off"));
   if (job && job.updatedAt) {
-    push("updated:", formatEpoch(job.updatedAt));
+    push(tr("job.updated"), formatEpoch(job.updatedAt));
   } else if (job && job.createdAt) {
-    push("queued:", formatEpoch(job.createdAt));
+    push(tr("job.queuedLabel"), formatEpoch(job.createdAt));
   }
   card.appendChild(meta);
 
@@ -118,10 +121,25 @@ export function renderJobCard(job, mdPane, railButtons, actions) {
   const outputPath = job && job.outputPath;
   if (mdPane && railButtons && status === "done" && outputPath) {
     card.classList.add("job-card--openable");
-    card.title = "Click to open the markdown in the Review pane";
+    card.title = tr("job.clickToOpen");
     card.style.cursor = "pointer";
+    card.setAttribute("role", "button");
+    card.tabIndex = 0;
     card.addEventListener("click", () => {
       openInReview(outputPath, mdPane, railButtons);
+    });
+    card.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        openInReview(outputPath, mdPane, railButtons);
+      } else if (ev.key === " ") {
+        ev.preventDefault(); // prevent page scroll
+      }
+    });
+    card.addEventListener("keyup", (ev) => {
+      if (ev.key === " ") {
+        openInReview(outputPath, mdPane, railButtons);
+      }
     });
   }
 
@@ -133,8 +151,8 @@ export function renderJobCard(job, mdPane, railButtons, actions) {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "job-card__action";
-    remove.textContent = "Remove";
-    remove.title = "Remove from library (leaves the file on disk)";
+    remove.textContent = tr("job.remove");
+    remove.title = tr("job.removeTitle");
     remove.addEventListener("click", (ev) => {
       ev.stopPropagation();
       actions.remove(job && job.id);
@@ -145,8 +163,8 @@ export function renderJobCard(job, mdPane, railButtons, actions) {
       const del = document.createElement("button");
       del.type = "button";
       del.className = "job-card__action job-card__action--danger";
-      del.textContent = "Remove + delete";
-      del.title = "Remove from library and delete the .md file from disk";
+      del.textContent = tr("job.removeDelete");
+      del.title = tr("job.removeDeleteTitle");
       del.addEventListener("click", (ev) => {
         ev.stopPropagation();
         actions.removeDelete(job && job.id, outputPath);
