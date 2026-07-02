@@ -249,12 +249,15 @@ impl Server {
     }
 
     /// Send one image + prompt, return the model's markdown.
+    #[allow(clippy::too_many_arguments)]
     pub fn ocr_image(
         &self,
         prompt: &str,
         data_uri: &str,
         max_tokens: u32,
         repeat_penalty: Option<f32>,
+        dry_multiplier: Option<f32>,
+        dry_base: Option<f32>,
     ) -> Res<String> {
         ocr_via(
             &format!("http://127.0.0.1:{}", self.port),
@@ -264,6 +267,8 @@ impl Server {
             data_uri,
             max_tokens,
             repeat_penalty,
+            dry_multiplier,
+            dry_base,
         )
     }
 }
@@ -310,8 +315,18 @@ impl ImageOcr for Server {
         data_uri: &str,
         max_tokens: u32,
         repeat_penalty: Option<f32>,
+        dry_multiplier: Option<f32>,
+        dry_base: Option<f32>,
     ) -> Res<String> {
-        Server::ocr_image(self, prompt, data_uri, max_tokens, repeat_penalty)
+        Server::ocr_image(
+            self,
+            prompt,
+            data_uri,
+            max_tokens,
+            repeat_penalty,
+            dry_multiplier,
+            dry_base,
+        )
     }
 
     fn ocr_image_stream(
@@ -320,6 +335,8 @@ impl ImageOcr for Server {
         data_uri: &str,
         max_tokens: u32,
         repeat_penalty: Option<f32>,
+        dry_multiplier: Option<f32>,
+        dry_base: Option<f32>,
         on_token: &mut dyn FnMut(&str) -> bool,
         should_cancel: &dyn Fn() -> bool,
     ) -> Res<String> {
@@ -331,6 +348,8 @@ impl ImageOcr for Server {
             data_uri,
             max_tokens,
             repeat_penalty,
+            dry_multiplier,
+            dry_base,
             on_token,
             should_cancel,
         )

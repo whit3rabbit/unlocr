@@ -179,9 +179,9 @@
               <div class="panel preview">
                 <div class="preview__head">
                   <span class="preview__title" data-i18n="label.pdfPreview">PDF Preview</span>
+                  <button class="preview__nav" id="pdfInfoBtn" type="button" disabled title="PDF info" aria-label="PDF info" aria-haspopup="dialog" data-i18n-aria="preview.infoTitle">ⓘ</button>
                   <div class="preview__spacer"></div>
                   <span class="chip chip--soft" data-i18n="preview.pageChip">Page 1</span>
-                  <span class="chip chip--ghost" data-i18n="preview.layoutRegions">Layout regions</span>
                 </div>
                 <div class="preview__stage">
                   <p class="placeholder" data-i18n="preview.placeholder">Import a PDF to see a page preview here.</p>
@@ -198,8 +198,6 @@
               <div class="panel transcript">
                 <div class="transcript__head">
                   <span class="transcript__title" data-i18n="label.engine">Engine</span>
-                  <div class="transcript__spacer"></div>
-                  <span class="status-pill status-pill--idle"><span class="status-dot"></span>Idle</span>
                 </div>
                 <!-- Scroll container for the config sections so a tall config
                      (Custom endpoint + Advanced expanded) never pushes the pinned
@@ -324,6 +322,18 @@
                       <span class="opts__label" data-i18n="opts.repeatPenalty">Repeat penalty</span>
                       <input class="opts__num" id="optRepeatPenalty" type="number" min="1" max="2" step="0.05" placeholder="server default" data-i18n-ph="opts.repeatPenaltyPh" />
                     </label>
+                    <!-- DRY sampler strength; blank = 1.0 on the local backend, 0 = off.
+                         Sequence-repetition penalty, the loop-killer repeat penalty isn't. -->
+                    <label class="opts__field">
+                      <span class="opts__label" data-i18n="opts.dryMultiplier">DRY multiplier</span>
+                      <input class="opts__num" id="optDryMultiplier" type="number" min="0" max="5" step="0.1" placeholder="1.0 (local default)" data-i18n-ph="opts.dryMultiplierPh" />
+                    </label>
+                    <!-- DRY penalty growth rate past dry_allowed_length; blank = server
+                         default (1.75). Only takes effect when DRY multiplier above is set. -->
+                    <label class="opts__field">
+                      <span class="opts__label" data-i18n="opts.dryBase">DRY base</span>
+                      <input class="opts__num" id="optDryBase" type="number" min="1" max="8" step="0.05" placeholder="1.75 (server default)" data-i18n-ph="opts.dryBasePh" />
+                    </label>
                     <label class="opts__toggle">
                       <input class="opts__check" id="optKeepImages" type="checkbox" />
                       <span class="opts__toggle-label" data-i18n="opts.keepImages">Keep page images</span>
@@ -337,7 +347,8 @@
                   <label class="opts__field opts__field--full">
                     <span class="opts__label" data-i18n="opts.task">Task</span>
                     <select class="opts__select" id="optTask">
-                      <option value="markdown" selected data-i18n="opts.taskMarkdown">Markdown (grounded)</option>
+                      <option value="markdown" selected data-i18n="opts.taskMarkdown">Markdown</option>
+                      <option value="grounding" data-i18n="opts.taskGrounding">Markdown (grounded)</option>
                       <option value="free" data-i18n="opts.taskFree">Free OCR (plain text)</option>
                       <option value="figure" data-i18n="opts.taskFigure">Parse figure</option>
                     </select>
@@ -360,13 +371,11 @@
                 <div class="transcript__body" id="transcriptBody">
                   <p class="placeholder" id="transcriptPlaceholder" data-i18n="transcript.placeholder">Run OCR to stream the recognized markdown here.</p>
                 </div>
-                <!-- progress bar + status text for the current run. Driven by the
-                     ocr://progress / server-ready / page / done event listeners in
-                     main.js. Single bar: indeterminate until a page total is known,
-                     then determinate. -->
+                <!-- status text for the current run. Driven by the ocr://page /
+                     done event listeners in main.js. The gradient progress bar was
+                     removed; the titlebar mode-light + this line carry the state. -->
                 <div class="run-progress" id="runProgress" hidden>
-                  <div class="run-progress__bar" id="runProgressBar" role="progressbar" aria-label="OCR progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="run-progress__fill" id="runProgressFill"></div></div>
-                  <span class="run-progress__status" id="runProgressStatus">Idle</span>
+                  <span class="run-progress__status" id="runProgressStatus" role="status" aria-live="polite">Idle</span>
                 </div>
                 <!-- EH-0005 bite 2: a live "effective values" summary so the user
                      sees exactly what the next Run will send before clicking it.
@@ -403,8 +412,17 @@
                      this is affordance only (not an HTML5 dropzone). -->
                 <span class="library__drop-hint" data-i18n="library.dropHint">Drop PDFs to import</span>
                 <button class="library__refresh" id="libraryRefresh" type="button" title="Reload from store" data-i18n="action.reload">Reload</button>
-                <button class="library__refresh" id="libraryRemoveAll" type="button" title="Remove all entries from the library (leaves files on disk)" data-i18n="library.removeAll">Remove all</button>
-                <button class="library__refresh library__refresh--danger" id="libraryRemoveAllDelete" type="button" title="Remove all entries and delete their .md files from disk" data-i18n="library.removeAllDelete">Remove all + delete</button>
+                <!-- Multi-select batch controls: a select-all checkbox, a live
+                     count of checked cards, and record-only / record+delete buttons
+                     that act on the checked selection. File deletion is .md-only
+                     and never touches the source PDFs (same sink as per-card). -->
+                <label class="library__select-all">
+                  <input class="library__check" id="librarySelectAll" type="checkbox" />
+                  <span data-i18n="job.selectAll">Select all</span>
+                </label>
+                <span class="library__count-selected" id="librarySelectedCount" hidden></span>
+                <button class="library__refresh" id="libraryRemoveSelected" type="button" title="Remove the selected entries from the library (leaves the .md files on disk)" data-i18n="job.removeSelected" disabled>Remove selected</button>
+                <button class="library__refresh library__refresh--danger" id="libraryRemoveSelectedDelete" type="button" title="Remove the selected entries and delete their .md output files from disk (the source PDFs are never deleted)" data-i18n="job.removeSelectedDelete" disabled>Remove selected + delete</button>
               </div>
               <!-- grid of job cards. main.js rebuilds .job-card children here from
                    list_jobs(); aria-live so a screen reader announces a new run.
@@ -434,6 +452,7 @@
                 <button class="board__refresh" id="boardAddBtn" type="button" title="Import PDFs into the queue" data-i18n="board.addPdfs">Add PDFs</button>
                 <button class="board__refresh" id="boardRunBtn" type="button" title="Run every queued PDF" data-i18n="board.runAll">Run all</button>
                 <button class="board__refresh" id="boardRefresh" type="button" title="Reload from store" data-i18n="action.reload">Reload</button>
+                <button class="board__refresh" id="boardClearDoneBtn" type="button" title="Remove all Done jobs from the board (keeps output files)" data-i18n="board.clearDone">Clear done</button>
               </div>
               <!-- columns. Each .board__col renders one .board__col-list of
                    .job-card children (the same card the Library grid uses). aria-live
@@ -663,7 +682,6 @@
         <span class="run-popup__title" id="runPopupTitle" data-i18n="run.title">Running OCR</span>
         <button class="run-popup__close" id="runPopupClose" type="button" title="Minimize" aria-label="Minimize" data-i18n-aria="run.minimize">×</button>
       </div>
-      <div class="run-progress__bar" id="runPopupBar" role="progressbar" aria-label="OCR progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="run-progress__fill" id="runPopupFill"></div></div>
       <!-- EH-0005: the status LINE is the polite live region (download %, page N/M,
            done). The token log below must NOT be live or the screen reader floods. -->
       <span class="run-progress__status" id="runPopupStatus" aria-live="polite">Idle</span>
@@ -711,6 +729,20 @@
       </div>
       <form method="dialog" class="engine-dialog__actions">
         <button class="model-btn" value="done" type="submit" data-i18n="action.done">Done</button>
+      </form>
+    </dialog>
+
+    <!-- PDF info popup: metadata for the PDF currently shown in the preview
+         pane (preview_pane.js wires #pdfInfoBtn / fills #pdfInfoBody via the
+         `pdf_info` command). Reuses the engine-dialog look (same class). -->
+    <dialog class="engine-dialog" id="pdfInfoDialog">
+      <form method="dialog" class="engine-dialog__head">
+        <span class="engine-dialog__title" data-i18n="pdfInfo.dialogTitle">PDF info</span>
+        <button class="run-popup__close" value="close" type="submit" title="Close" aria-label="Close" data-i18n-aria="action.close">&times;</button>
+      </form>
+      <div class="pdf-info__body" id="pdfInfoBody"></div>
+      <form method="dialog" class="engine-dialog__actions">
+        <button class="model-btn" value="close" type="submit" data-i18n="action.done">Done</button>
       </form>
     </dialog>
   </body>

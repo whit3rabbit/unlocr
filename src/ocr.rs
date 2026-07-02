@@ -43,23 +43,42 @@ pub fn run_pdf<S: ImageOcr>(backend: &S, pdftoppm: &Path, input: &Path, args: &A
         image_max_tokens: args.image_max_tokens,
         chat_template: args.chat_template.clone(),
         repeat_penalty: args.repeat_penalty,
+        dry_multiplier: args.dry_multiplier,
+        dry_base: args.dry_base,
         pages: args.resolved_pages()?,
     };
 
     let input_display = input.display().to_string();
     let mut header_printed = false;
-    // Progress closure reproduces the original CLI output exactly:
+    // A PDF small/fast enough that no Rasterizing tick ever printed keeps the
+    // original output byte-identical (no stray leading blank line).
+    let mut rasterizing_printed = false;
+    // Progress closure reproduces the original CLI output for the common case:
     //   "<input>: N page(s)\n" before the first page line, then
-    //   "\r  page i/N" per page.
-    let mut on_progress = |p: Progress| {
-        if let Progress::Page { page, total } = p {
+    //   "\r  page i/N" per page. A live "\r  rasterizing i[/N]" line (from
+    //   pdftoppm's poll-based progress) may print before that, in which case a
+    //   leading newline separates it from the header.
+    let mut on_progress = |p: Progress| match p {
+        Progress::Rasterizing { page, total } => {
+            match total {
+                Some(total) => print!("\r  rasterizing {page}/{total}"),
+                None => print!("\r  rasterizing {page}"),
+            }
+            rasterizing_printed = true;
+            let _ = std::io::stdout().flush();
+        }
+        Progress::Page { page, total } => {
             if !header_printed {
+                if rasterizing_printed {
+                    println!();
+                }
                 println!("{input_display}: {total} page(s)");
                 header_printed = true;
             }
             print!("\r  page {page}/{total}");
             let _ = std::io::stdout().flush();
         }
+        _ => {}
     };
 
     let out = ocr_pages(backend, pdftoppm, input, &opts, &mut on_progress, &|| false)?;

@@ -1,6 +1,6 @@
 use crate::model;
 use crate::options::{OcrOptions, OcrOutput, Progress};
-use crate::output::push_page;
+use crate::output::{push_page, strip_layout_annotations, AnnotationStripper};
 use crate::pdf;
 use crate::preflight;
 use crate::server;
@@ -100,7 +100,38 @@ where
     P: FnMut(Progress),
 {
     let tmp = tempfile::tempdir()?;
-    let pages = pdf::rasterize_range(pdftoppm, input, tmp.path(), opts.dpi, opts.pages)?;
+
+    // With a page range, the first rasterized page is the range's start, not page 1
+    // (also needed below for the OCR loop's page numbering).
+    let base = opts.pages.map(|(f, _)| f as usize).unwrap_or(1);
+
+    // Total for the Rasterizing progress event: an explicit `--pages a-b` range
+    // already tells us the count; otherwise fall back to a best-effort `pdfinfo`
+    // probe (None if pdfinfo isn't resolvable, in which case the event carries no
+    // denominator).
+    let raster_total = match opts.pages {
+        Some((_, Some(last))) => Some(last as usize - base + 1),
+        Some((first, None)) => pdf::total_pages(pdftoppm, input)
+            // `first` can exceed the real page count (e.g. `--pages 50-` on a
+            // shorter PDF); rasterize_range then renders nothing and the empty-
+            // pages check below errors out. saturating_sub avoids an underflow
+            // panic (debug) / wraparound (release) computing this progress total.
+            .map(|n| (n as usize).saturating_sub(first as usize) + 1),
+        None => pdf::total_pages(pdftoppm, input).map(|n| n as usize),
+    };
+    let pages = pdf::rasterize_range(
+        pdftoppm,
+        input,
+        tmp.path(),
+        opts.dpi,
+        opts.pages,
+        Some(&mut |count: usize| {
+            on_progress(Progress::Rasterizing {
+                page: base + count - 1,
+                total: raster_total,
+            });
+        }),
+    )?;
     // rasterize_range returns an empty Vec (not an Err) when pdftoppm runs clean
     // but emits nothing. For an OCR run that means nothing was rendered (empty
     // PDF or a page range past EOF): error out rather than write a silent empty
@@ -111,10 +142,12 @@ where
     }
     let n = pages.len();
 
-    // With a page range, the first rasterized page is the range's start, not page 1.
-    // Derive the real page number so the `<!-- page N -->` delimiter and Progress
-    // events reflect the actual page, not the loop index.
-    let base = opts.pages.map(|(f, _)| f as usize).unwrap_or(1);
+    // The model emits layout-grounded output (`label [x, y, x, y]content`) that
+    // upstream cleans in Python; we port that cleanup here (output.rs). Gate on
+    // the model-facing prompt itself instead of a parallel flag: the grounding
+    // task preset (CLI Task::Grounding, GUI TASK_PROMPTS.grounding) carries the
+    // `<|grounding|>` marker, and a user who typed it explicitly wants raw boxes.
+    let strip = !opts.prompt.contains("<|grounding|>");
 
     let mut md = String::new();
     // Capture each page's text separately so a caller can write per-page files
@@ -140,20 +173,70 @@ where
         // Use streaming so the GUI receives PartialText events as tokens arrive.
         // The CLI's on_progress sink ignores PartialText (zero cost), while the
         // Tauri bridge forwards each chunk to the frontend for live appending.
-        let text = srv.ocr_image_stream(
+        // When stripping, chunks are line-buffered through the stripper (an
+        // annotation prefix can be split across chunks), so the live transcript
+        // advances per completed line; the cancel check still runs every chunk.
+        let mut stripper = AnnotationStripper::new();
+        // Accumulate the already-stripped output as it streams, rather than
+        // re-running strip_layout_annotations over the raw text afterward: that
+        // both avoids scanning every page twice and guarantees the stored text
+        // is byte-identical to what the PartialText stream showed (the two
+        // strippers previously disagreed on a trailing newline when the raw
+        // text ended in "\n").
+        let mut stripped = String::new();
+        // Some ImageOcr impls (e.g. a stub that only implements ocr_image) fall
+        // back to ImageOcr::ocr_image_stream's default, which never calls
+        // on_token at all -- distinguish that from a real call delivering the
+        // whole body in one shot (the non-SSE fallback in ocr_via_stream),
+        // which DOES call on_token once with an unterminated line and must
+        // still flush through `stripper.finish()` below.
+        let mut streamed_any = false;
+        let raw_text = srv.ocr_image_stream(
             &opts.prompt,
             &data_uri,
             opts.max_tokens,
             opts.repeat_penalty,
+            opts.dry_multiplier,
+            opts.dry_base,
             &mut |chunk: &str| {
-                on_progress(Progress::PartialText {
-                    page: page_num,
-                    chunk: chunk.to_string(),
-                });
+                streamed_any = true;
+                let chunk = if strip {
+                    let s = stripper.push(chunk);
+                    stripped.push_str(&s);
+                    s
+                } else {
+                    chunk.to_string()
+                };
+                if !chunk.is_empty() {
+                    on_progress(Progress::PartialText {
+                        page: page_num,
+                        chunk,
+                    });
+                }
                 !should_cancel()
             },
             should_cancel,
         )?;
+        let text = if strip {
+            if streamed_any {
+                let tail = stripper.finish();
+                if !tail.is_empty() {
+                    on_progress(Progress::PartialText {
+                        page: page_num,
+                        chunk: tail.clone(),
+                    });
+                }
+                stripped.push_str(&tail);
+                stripped
+            } else {
+                // on_token was never called (default ImageOcr::ocr_image_stream
+                // fallback): nothing went through the stripper, so strip the raw
+                // text directly.
+                strip_layout_annotations(&raw_text)
+            }
+        } else {
+            raw_text
+        };
         // push_page writes page idx+1, so pass the real page number minus one.
         push_page(&mut md, page_num - 1, text.trim());
         // Same trimmed text the combined string holds, retained per-page so a

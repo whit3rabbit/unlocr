@@ -242,6 +242,15 @@ pub(crate) async fn load_model(
 /// Unload the currently-held model.
 #[tauri::command]
 pub(crate) fn unload_model(state: State<'_, AppState>) -> ModelStatus {
+    // Dropping the Server handle IS the kill: `Server::Drop` kills+waits the
+    // owned Child (identity-safe). We deliberately do NOT also kill by pid here.
+    // The pid guard (`pid_is_llama`) checks only the comm name, not process
+    // identity, so on the rare path where the managed server already died and
+    // the OS recycled its pid to another llama-server, a pid kill would terminate
+    // that unrelated process. `stop_ocr` still uses the pid kill because a run
+    // holds the model lock for the whole batch and it cannot drop the Server;
+    // unload takes the lock and drops. The frontend flips the badge off + shows
+    // "stopping server…" around this call, so the unload is visually honest.
     let mut g = state.model.lock().unwrap_or_else(|p| p.into_inner());
     *g = None;
     *state.server_pid.lock().unwrap_or_else(|p| p.into_inner()) = None;
@@ -262,16 +271,7 @@ pub(crate) fn stop_ocr(state: State<'_, AppState>) {
     state.cancel.store(true, Ordering::SeqCst);
     let pid = *state.server_pid.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(pid) = pid {
-        if pid_is_llama(pid) {
-            #[cfg(unix)]
-            let _ = std::process::Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .status();
-            #[cfg(windows)]
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F"])
-                .status();
-        }
+        kill_llama_pid(pid);
         *state.server_pid.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 }
@@ -297,6 +297,26 @@ fn pid_names_llama(proc_listing: &str) -> bool {
     proc_listing
         .lines()
         .any(|l| l.to_ascii_lowercase().contains("llama-server"))
+}
+
+/// Kill the llama-server process by pid: SIGKILL on Unix, `taskkill /F` on
+/// Windows. No-op if the pid is stale or no longer a llama-server process
+/// (`pid_is_llama`). Used only by `stop_ocr`, which cancels an in-flight run
+/// without taking the model lock (a run holds it for the whole batch), so it
+/// cannot drop the `Server` and must kill out-of-band. `unload_model` drops the
+/// Server instead, whose `Drop` is the identity-safe kill on the owned Child.
+fn kill_llama_pid(pid: u32) {
+    if !pid_is_llama(pid) {
+        return;
+    }
+    #[cfg(unix)]
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status();
+    #[cfg(windows)]
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .status();
 }
 
 /// Current load state for the titlebar badge + the Run OCR gate.

@@ -1,5 +1,6 @@
 use crate::options::{OcrOutput, OutputMode};
 use crate::Res;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 /// Resolve the output `.md` path for one input. Shared by the CLI (`ocr::run_pdf`)
@@ -129,6 +130,155 @@ pub fn duplicate_stems(inputs: &[PathBuf]) -> Vec<String> {
         .collect();
     dups.sort();
     dups
+}
+
+/// Strip DeepSeek-OCR layout annotations from a whole page of model output.
+///
+/// The Unlimited-OCR / DeepSeek-OCR family natively emits layout-grounded text:
+/// `<|det|>label [x1, y1, x2, y2]<|/det|>content` with 0-999-normalized
+/// coordinates, and upstream's Python `infer()` regex-cleans that to markdown.
+/// llama-server drops the special tokens and does no cleanup, so callers see
+/// `label [x, y, x, y]content` lines. This ports upstream's cleanup: it is the
+/// final-text sink; the streaming path uses `AnnotationStripper` (same per-line
+/// logic) because SSE chunks split annotations mid-prefix.
+pub fn strip_layout_annotations(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut first = true;
+    for line in text.lines() {
+        if let Some(l) = strip_layout_line(line) {
+            if !first {
+                out.push('\n');
+            }
+            out.push_str(&l);
+            first = false;
+        }
+    }
+    out
+}
+
+/// One line with its layout annotation removed, or `None` when the whole line
+/// was annotation (a bare region like `image [138, 346, 868, 835]`).
+///
+/// Leaked `<|ref|>`/`<|det|>` markers are deleted first (defensive: llama-server
+/// normally suppresses special tokens), then a line-start `label [n, n, n, n]`
+/// prefix is removed. `title` lines become `# ` headings (materially better
+/// markdown for one match arm); every other label keeps just its content.
+pub(crate) fn strip_layout_line(line: &str) -> Option<String> {
+    let mut line = Cow::Borrowed(line);
+    for tag in ["<|ref|>", "<|/ref|>", "<|det|>", "<|/det|>"] {
+        if line.contains(tag) {
+            line = Cow::Owned(line.replace(tag, ""));
+        }
+    }
+    match split_layout_prefix(&line) {
+        None => Some(line.into_owned()),
+        Some((label, rest)) => {
+            let rest = rest.trim_start();
+            if rest.is_empty() {
+                None
+            } else if label == "title" {
+                Some(format!("# {rest}"))
+            } else {
+                Some(rest.to_string())
+            }
+        }
+    }
+}
+
+/// Split a line-start layout annotation into `(label, rest)`; `None` when the
+/// line doesn't begin with one. Hand-rolled to avoid a regex dependency. The
+/// shape mirrors upstream's det_pattern: a label (`[A-Za-z_][A-Za-z0-9_-]*`,
+/// capped at 24 chars), optional spaces, then exactly four comma-separated
+/// unsigned integers. Each integer is capped at 3 digits (coordinates are
+/// 0-999 normalized upstream), which keeps prose like `see [1, 2]` or larger
+/// bracketed numbers out of the match.
+fn split_layout_prefix(line: &str) -> Option<(&str, &str)> {
+    let b = line.as_bytes();
+    if b.is_empty() || !(b[0].is_ascii_alphabetic() || b[0] == b'_') {
+        return None;
+    }
+    let mut i = 1;
+    while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'-') {
+        i += 1;
+    }
+    if i > 24 {
+        return None;
+    }
+    let label_end = i;
+    while i < b.len() && b[i] == b' ' {
+        i += 1;
+    }
+    if i >= b.len() || b[i] != b'[' {
+        return None;
+    }
+    i += 1;
+    for k in 0..4 {
+        while i < b.len() && b[i] == b' ' {
+            i += 1;
+        }
+        let digits_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        let n_digits = i - digits_start;
+        if n_digits == 0 || n_digits > 3 {
+            return None;
+        }
+        while i < b.len() && b[i] == b' ' {
+            i += 1;
+        }
+        if k < 3 {
+            if i >= b.len() || b[i] != b',' {
+                return None;
+            }
+            i += 1;
+        }
+    }
+    if i >= b.len() || b[i] != b']' {
+        return None;
+    }
+    Some((&line[..label_end], &line[i + 1..]))
+}
+
+/// Line-buffering wrapper around `strip_layout_line` for the streaming path.
+/// SSE chunks split annotations mid-prefix (`"tit"`, `"le [168,"`), so chunks
+/// are buffered until a newline completes each line. The tradeoff is that the
+/// live transcript updates per line (one layout block) instead of per token.
+pub(crate) struct AnnotationStripper {
+    buf: String,
+}
+
+impl AnnotationStripper {
+    pub(crate) fn new() -> Self {
+        AnnotationStripper { buf: String::new() }
+    }
+
+    /// Feed one streamed chunk; returns the stripped complete lines that became
+    /// available (each keeping its trailing newline), possibly empty.
+    pub(crate) fn push(&mut self, chunk: &str) -> String {
+        self.buf.push_str(chunk);
+        let Some(last_nl) = self.buf.rfind('\n') else {
+            return String::new();
+        };
+        let complete: String = self.buf.drain(..=last_nl).collect();
+        let mut out = String::new();
+        for line in complete.lines() {
+            if let Some(l) = strip_layout_line(line) {
+                out.push_str(&l);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// Strip and return the residual unterminated last line (empty when none).
+    pub(crate) fn finish(&mut self) -> String {
+        let rest = std::mem::take(&mut self.buf);
+        if rest.is_empty() {
+            return String::new();
+        }
+        strip_layout_line(&rest).unwrap_or_default()
+    }
 }
 
 /// Append one page's text with a `<!-- page N -->` delimiter (1-based).

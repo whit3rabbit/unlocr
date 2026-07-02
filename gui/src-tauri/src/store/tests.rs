@@ -129,17 +129,39 @@ fn job_delete_unknown_is_noop() {
     assert_eq!(db::list(&conn).unwrap().len(), 1);
 }
 
-/// clear wipes the table and returns only the non-empty output_paths.
+/// delete_many drops only the listed ids in one statement; output_paths_for
+/// returns just the (id, output_path) pairs for the requested subset (the per-id
+/// file-delete path the multi-select `delete_jobs` command relies on to keep only
+/// failed-file records). Empty id slices and unknown ids are no-ops.
 #[test]
-fn job_clear_returns_outputs() {
+fn job_delete_many_and_output_paths_for() {
     let conn = mem_db();
     db::insert(&conn, &job("a", "/tmp/a.md")).unwrap();
     db::insert(&conn, &job("b", "")).unwrap();
     db::insert(&conn, &job("c", "/tmp/c.md")).unwrap();
-    let outs = db::clear(&conn).unwrap();
-    assert_eq!(outs.len(), 2, "only non-empty output_paths returned");
-    assert!(outs.contains(&"/tmp/a.md".to_string()));
-    assert!(outs.contains(&"/tmp/c.md".to_string()));
+    db::insert(&conn, &job("d", "/tmp/d.md")).unwrap();
+
+    // Empty id slice: no-op on both.
+    assert!(db::output_paths_for(&conn, &[]).unwrap().is_empty());
+    db::delete_many(&conn, &[]).unwrap();
+    assert_eq!(db::list(&conn).unwrap().len(), 4);
+
+    // Subset peek: only a + c have outputs (b is empty), d is outside the subset.
+    // The id is paired with its path so delete_jobs can keep failed-file records.
+    let subset = ["a".to_string(), "b".to_string(), "c".to_string()];
+    let outs = db::output_paths_for(&conn, &subset).unwrap();
+    assert_eq!(outs.len(), 2, "only non-empty outputs of the subset");
+    assert!(outs.contains(&("a".to_string(), "/tmp/a.md".to_string())));
+    assert!(outs.contains(&("c".to_string(), "/tmp/c.md".to_string())));
+
+    // Remove the subset; d survives untouched.
+    db::delete_many(&conn, &subset).unwrap();
+    let got = db::list(&conn).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].id, "d");
+
+    // delete_many tolerates ids not present (no error, no over-delete).
+    db::delete_many(&conn, &["zzz".to_string(), "d".to_string()]).unwrap();
     assert!(db::list(&conn).unwrap().is_empty());
 }
 

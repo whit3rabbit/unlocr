@@ -70,6 +70,8 @@ fn run() -> Res<()> {
         max_tokens: args.max_tokens,
         image_max_tokens: args.image_max_tokens,
         repeat_penalty: args.repeat_penalty,
+        dry_multiplier: args.dry_multiplier,
+        dry_base: args.dry_base,
         pages: args.resolved_pages()?,
         ..OcrOptions::default()
     }
@@ -98,10 +100,16 @@ fn run() -> Res<()> {
     }
 
     // Local GGUF path only (remote returned above): default the repeat penalty to
-    // 1.1 so the stock quants do not fall into infinite-loop output on dense pages.
-    // An explicit --repeat-penalty wins; remote/--gpu (full-precision vLLM) is left
-    // untouched since it does not exhibit the quant loop.
-    args.repeat_penalty = args.repeat_penalty.or(Some(1.1));
+    // 1.15 so the stock quants do not fall into infinite-loop output on dense
+    // pages. An explicit --repeat-penalty wins; remote/--gpu (full-precision
+    // vLLM) is left untouched since it does not exhibit the quant loop.
+    args.repeat_penalty = args.repeat_penalty.or(Some(1.15));
+    // Same gating for the DRY sampler: every local GGUF (any quant) gets 1.0 by
+    // default because the loop-preventing ngram processor the upstream Python
+    // wrapper relies on does not ship in the GGUF; DRY is llama.cpp's analog.
+    // An explicit --dry-multiplier (including 0 = off) wins. --dry-base has no
+    // injected default (opt-in only, server default 1.75 applies when unset).
+    args.dry_multiplier = args.dry_multiplier.or(Some(1.0));
 
     // --mmproj alone is meaningless: it overrides the projector for a custom model,
     // but without --model the stock model + stock projector are the matched pair.

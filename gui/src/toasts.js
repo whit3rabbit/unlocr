@@ -18,7 +18,7 @@ import { requireTauri } from "./tauri.js";
 const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
 
 /** Compact human byte size, e.g. 1503238553 -> "1.4 GB". */
-function fmtBytes(n) {
+export function fmtBytes(n) {
   if (n < 0) {
     // eslint-disable-next-line no-console
     console.error("[toasts] fmtBytes: negative size:", n);

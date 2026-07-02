@@ -41,3 +41,15 @@ pub(crate) async fn render_page(
     .await
     .map_err(|e| format!("render worker join failed: {e}"))?
 }
+
+/// Metadata about the PDF currently shown in the preview pane (title, author,
+/// page count, file size, ...), for the info-icon popup next to "PDF Preview".
+#[tauri::command]
+pub(crate) async fn pdf_info(pdf_path: String) -> Result<unlocr::pdf::PdfInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<unlocr::pdf::PdfInfo, String> {
+        let pdftoppm = unlocr::preflight::pdftoppm().map_err(|e| e.to_string())?;
+        unlocr::pdf::info(&pdftoppm, Path::new(&pdf_path)).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("pdf info worker join failed: {e}"))?
+}

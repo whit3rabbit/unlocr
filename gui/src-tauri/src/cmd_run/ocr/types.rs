@@ -8,6 +8,17 @@ pub(crate) struct PageProgress {
     pub(crate) total: usize,
 }
 
+/// Serializable payload for the `ocr://rasterizing` event. `total` is `None`
+/// when the run's page count wasn't known upfront (whole-doc run with no
+/// resolvable `pdfinfo`); the frontend shows a running count with no
+/// denominator in that case.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RasterizeProgress {
+    pub(crate) page: usize,
+    pub(crate) total: Option<usize>,
+}
+
 /// Payload for the `ocr://partial-text` event.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

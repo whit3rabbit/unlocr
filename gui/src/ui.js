@@ -1,34 +1,27 @@
 // Transcript / progress UI controller. Owns the live transcript pane, the run
-// progress bar + status text, the run popup (with Stop), and the Run-gate state
-// (model loaded? run in flight?). subscribeOcrEvents routes every ocr:// event
-// through this api so the event handlers never reach for DOM they cannot see.
+// status line, the run popup (with Stop), and the Run-gate state (model loaded?
+// run in flight?). subscribeOcrEvents routes every ocr:// event through this api
+// so the event handlers never reach for DOM they cannot see.
 
 import { showToast, removeToast } from "./toasts.js";
 import { requireTauri } from "./tauri.js";
+import { updateModeBadge } from "./model.js";
 
 // EH-0013 bite 2: i18n hook (see toasts.js). Named `tr` because `t` is a local
-// (status text in setIndeterminate, Tauri handle in the stop handler) here.
+// (status text in setStatus, Tauri handle in the stop handler) here.
 const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
 
 /** Tiny controller over the transcript/progress DOM nodes. Keeps main flow flat. */
 export function makeUi() {
-  const statusPill = document.querySelector(".status-pill");
-  const statusDot = document.querySelector(".status-dot");
   const progress = document.getElementById("runProgress");
-  const fill = document.getElementById("runProgressFill");
   const statusText = document.getElementById("runProgressStatus");
-  // EH-0007: the progressbar track containers (role=progressbar live here), so
-  // setFill/setIndeterminate can mirror the visual width into aria-valuenow/text.
-  const bar = document.getElementById("runProgressBar");
-  const popupBar = document.getElementById("runPopupBar");
   const body = document.getElementById("transcriptBody");
   const placeholder = document.getElementById("transcriptPlaceholder");
   const runBtn = document.getElementById("runBtn");
-  // Run popup: a dismissible panel mirroring the progress bar + live token log,
+  // Run popup: a dismissible panel mirroring the run status + live token log,
   // with a Stop button. Closing it minimizes to a clickable toast that reopens.
   const popup = document.getElementById("runPopup");
   const backdrop = document.getElementById("runPopupBackdrop");
-  const popupFill = document.getElementById("runPopupFill");
   const popupStatus = document.getElementById("runPopupStatus");
   const popupLog = document.getElementById("runPopupLog");
   const stopBtn = document.getElementById("stopBtn");
@@ -146,18 +139,6 @@ export function makeUi() {
     window.unlocrI18n.onLocaleChange(gate);
   }
 
-  function setPill(state, label) {
-    if (statusPill) {
-      statusPill.className = "status-pill status-pill--" + state;
-    }
-    if (statusDot) {
-      statusDot.className = "status-dot";
-    }
-    if (statusPill) {
-      statusPill.innerHTML = '<span class="status-dot"></span>' + label;
-    }
-  }
-
   const api = {
     setStatus(text) {
       if (statusText) statusText.textContent = text;
@@ -165,53 +146,6 @@ export function makeUi() {
     },
     showProgress(show) {
       if (progress) progress.hidden = !show;
-    },
-    setIndeterminate(on) {
-      if (fill) fill.classList.toggle("is-indeterminate", on);
-      if (on && fill) fill.style.width = "";
-      if (popupFill) {
-        popupFill.classList.toggle("is-indeterminate", on);
-        if (on) popupFill.style.width = "";
-      }
-      // EH-0007: indeterminate = no percentage yet (server starting / page total
-      // unknown). Drop valuenow and expose a text label so AT does not read 0%.
-      let labelText = tr("run.working");
-      if (on) {
-        const t =
-          (popupStatus && popupStatus.textContent) ||
-          (statusText && statusText.textContent);
-        if (t) labelText = t;
-      }
-      [bar, popupBar].forEach((el) => {
-        if (!el) return;
-        if (on) {
-          el.removeAttribute("aria-valuenow");
-          el.setAttribute("aria-valuetext", labelText);
-        } else {
-          el.removeAttribute("aria-valuetext");
-        }
-      });
-    },
-    setFill(pct) {
-      const w = Math.max(0, Math.min(100, pct)) + "%";
-      const now = String(Math.max(0, Math.min(100, Math.round(pct))));
-      if (fill) {
-        fill.classList.remove("is-indeterminate");
-        fill.style.width = w;
-      }
-      if (popupFill) {
-        popupFill.classList.remove("is-indeterminate");
-        popupFill.style.width = w;
-      }
-      // EH-0007: mirror the determinate percentage into aria-valuenow.
-      if (bar) {
-        bar.setAttribute("aria-valuenow", now);
-        bar.removeAttribute("aria-valuetext");
-      }
-      if (popupBar) {
-        popupBar.setAttribute("aria-valuenow", now);
-        popupBar.removeAttribute("aria-valuetext");
-      }
     },
     openPopup() {
       if (!popup) return;
@@ -287,14 +221,12 @@ export function makeUi() {
       streamPre = null;
       if (popupLog) popupLog.textContent = "";
       this.showProgress(false);
-      this.setFill(0);
       this.setStatus(tr("status.idle"));
     },
     setRunning(on) {
       running = on;
       gate();
       setControlsDisabled(on);
-      setPill(on ? "running" : "idle", on ? tr("status.running") : tr("status.idle"));
       // EH-0005: mark the transcript region busy while a run is in flight so AT
       // treats it as loading, and clear it on done/failed/stopped.
       if (body) body.setAttribute("aria-busy", on ? "true" : "false");
@@ -309,15 +241,18 @@ export function makeUi() {
       }
     },
     /** Model load gate: enable Run only when a model is loaded. Called by
-     *  refreshModelStatus after load/unload and on startup. */
+     *  refreshModelStatus after load/unload and on startup. Also mirrors the
+     *  status into the titlebar model-light so the badge and the Run button can
+     *  never drift apart (both update from this one call, the path proven to
+     *  reflect loaded state). */
     applyModelStatus(status) {
       modelLoaded = !!(status && status.loaded);
       gate();
+      updateModeBadge(status);
     },
     fail(message) {
       this.showProgress(false);
       this.setStatus(tr("run.errorMessage", { message }));
-      setPill("idle", tr("status.error"));
     },
     /** Preflight is now informational, not the Run gate (the model-load gate is).
      *  A missing tool surfaces as a warning so the user knows what to install
@@ -330,7 +265,6 @@ export function makeUi() {
       gate();
       if (ok) {
         if (!modelLoaded) this.setStatus(tr("status.idle"));
-        setPill("idle", modelLoaded ? tr("status.idle") : tr("status.noModel"));
       } else {
         const reason = (report && report.error) || tr("run.envNotReady");
         this.setStatus(tr("run.envWarning", { reason }));

@@ -7,7 +7,7 @@ use unlocr::{OcrOptions, OutputMode, Progress};
 use crate::state::{AppState, Backend, LoadedModel};
 use crate::store::{self, JobOptions};
 
-use super::types::{ImagesKept, OcrDone, PageProgress, PartialText, StatusMsg};
+use super::types::{ImagesKept, OcrDone, PageProgress, PartialText, RasterizeProgress, StatusMsg};
 
 /// Best-effort notify the webview that the job store changed so the Library + Board reload live.
 pub(crate) fn emit_jobs_changed(app: &AppHandle) {
@@ -49,6 +49,9 @@ pub(crate) fn process_single_input(
     let mut buf = String::new();
     let mut buf_page = 0usize;
     let mut on_progress = |p: Progress| match p {
+        Progress::Rasterizing { page, total } => {
+            let _ = app_for_progress.emit("ocr://rasterizing", RasterizeProgress { page, total });
+        }
         Progress::Page { page, total } => {
             if !buf.is_empty() {
                 let _ = app_for_progress.emit(

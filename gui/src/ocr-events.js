@@ -68,27 +68,35 @@ export async function subscribeOcrEvents(ui) {
     },
   ]);
 
-  // llama-server healthy, about to OCR pages. Indeterminate until first page.
+  // llama-server healthy, about to OCR pages.
   handlers.push([
     "ocr://server-ready",
     (e) => {
       const { port } = e.payload || {};
       ui.setStatus(`server ready on :${port}`);
       ui.showProgress(true);
-      ui.setIndeterminate(true);
     },
   ]);
 
-  // Per-page progress: determinate bar, page/total of total.
+  // Rasterizing (PDF->PNG) progress, fired while pdftoppm is still running and
+  // before any OCR starts. `total` is null when the page count wasn't known
+  // upfront (whole-doc run, no resolvable pdfinfo); show a running count with
+  // no denominator in that case.
+  handlers.push([
+    "ocr://rasterizing",
+    (e) => {
+      const { page, total } = e.payload || {};
+      ui.showProgress(true);
+      ui.setStatus(total ? `rasterizing page ${page}/${total}` : `rasterizing page ${page}`);
+    },
+  ]);
+
+  // Per-page progress: page/total status line.
   handlers.push([
     "ocr://page",
     (e) => {
       const { page, total } = e.payload || {};
       ui.showProgress(true);
-      ui.setIndeterminate(false);
-      if (total > 0) {
-        ui.setFill(Math.round((page / total) * 100));
-      }
       ui.setStatus(`OCR page ${page}/${total > 0 ? total : "?"}`);
     },
   ]);

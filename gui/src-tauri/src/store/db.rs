@@ -1,5 +1,5 @@
 use super::{Job, JobOptions};
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, Connection};
 
 /// Upsert by id (insert-or-replace). Used by both the "record a fresh run"
 /// path and a future "mark a queued job done" update.
@@ -151,22 +151,49 @@ pub(crate) fn delete(conn: &Connection, id: &str) -> Result<Option<String>, Stri
     }
 }
 
-/// Drop every job. Returns the non-empty `output_path`s that were recorded so
-/// the caller can optionally delete those files (the "remove all and delete"
-/// variant).
-pub(crate) fn clear(conn: &Connection) -> Result<Vec<String>, String> {
-    let mut stmt = conn
-        .prepare("DELETE FROM jobs RETURNING output_path")
-        .map_err(|e| format!("could not prepare jobs clear: {e}"))?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|e| format!("could not clear jobs: {e}"))?;
-    let mut outs = Vec::new();
-    for row in rows {
-        let p = row.map_err(|e| format!("could not read cleared row: {e}"))?;
-        if !p.is_empty() {
-            outs.push(p);
-        }
+/// The `(id, output_path)` pairs for the given ids whose `output_path` is
+/// non-empty, without hydrating full rows or deleting anything. Returning the id
+/// alongside the path lets `delete_jobs` delete files per-id and keep ONLY the
+/// records whose file failed to delete (instead of stranding every record or
+/// orphaning every file). Mirrors `output_path` (one) and `output_paths` (all).
+/// An empty id slice is a fast empty vec.
+pub(crate) fn output_paths_for(
+    conn: &Connection,
+    ids: &[String],
+) -> Result<Vec<(String, String)>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(outs)
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        "SELECT id, output_path FROM jobs WHERE output_path != '' AND id IN ({placeholders})"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("could not prepare output_paths_for select: {e}"))?;
+    let rows = stmt
+        .query_map(params_from_iter(ids.iter().map(|s| s.as_str())), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("could not query output_paths_for: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("could not read output_paths_for row: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Remove several jobs by id in one statement. The caller has already (optionally)
+/// deleted their output files via `output_paths_for` + `delete_output_file`, so
+/// unlike `delete`/`clear` there is nothing to RETURN. Missing ids are a no-op.
+/// An empty id slice returns early.
+pub(crate) fn delete_many(conn: &Connection, ids: &[String]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!("DELETE FROM jobs WHERE id IN ({placeholders})");
+    conn.execute(&sql, params_from_iter(ids.iter().map(|s| s.as_str())))
+        .map_err(|e| format!("could not delete jobs: {e}"))?;
+    Ok(())
 }

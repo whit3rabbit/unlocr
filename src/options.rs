@@ -32,6 +32,20 @@ pub struct OcrOptions {
     /// default). >1.0 (e.g. 1.1) discourages the infinite-loop output some quants
     /// (notably Q4_K_M) fall into on dense pages.
     pub repeat_penalty: Option<f32>,
+    /// DRY sampler strength (llama.cpp `dry_multiplier`), sent per request. None
+    /// omits every DRY field (remote body unchanged); the front ends default it
+    /// to 1.0 on the managed-local llama-server path (any GGUF quant), where it
+    /// stands in for the no-repeat-ngram logits processor upstream Python uses
+    /// for loop prevention. 0.0 is a valid explicit "off". When set, the shared
+    /// request builder also sends `dry_allowed_length: 4` (see `apply_sampling`).
+    pub dry_multiplier: Option<f32>,
+    /// llama.cpp `dry_base`: growth rate of the DRY penalty past
+    /// `dry_allowed_length` (server default 1.75). Only reaches the wire when
+    /// `dry_multiplier` is also set (see `apply_sampling`); a base with DRY
+    /// disabled is inert. Opt-in only: unlike `repeat_penalty`/`dry_multiplier`,
+    /// no local default is injected for this one, since it's newer/less
+    /// battle-tested.
+    pub dry_base: Option<f32>,
     /// Page span to OCR, 1-based inclusive `(first, last)`. None = all pages. An
     /// open upper bound (`last == None`) means "first..end of document": pdftoppm
     /// renders `-f first` with no `-l` to the last page natively. Maps to pdftoppm
@@ -48,13 +62,15 @@ impl Default for OcrOptions {
             quant: "Q8_0".to_string(),
             max_tokens: 4096,
             dpi: 144,
-            prompt: "<|grounding|>Convert the document to markdown.".to_string(),
+            prompt: "document parsing.".to_string(),
             port: 0,
             model_dir: None,
             keep_images: false,
             image_max_tokens: None,
             chat_template: None,
             repeat_penalty: None,
+            dry_multiplier: None,
+            dry_base: None,
             pages: None,
         }
     }
@@ -85,6 +101,21 @@ impl OcrOptions {
         if let Some(rp) = self.repeat_penalty {
             if !rp.is_finite() || rp <= 0.0 {
                 return Err("repeat_penalty must be a finite value greater than 0".into());
+            }
+        }
+        // Unlike repeat_penalty, 0.0 is meaningful here: it is the sampler's
+        // own "disabled" value, so an explicit 0 is the documented way to turn
+        // DRY off while leaving the field present.
+        if let Some(dm) = self.dry_multiplier {
+            if !dm.is_finite() || dm < 0.0 {
+                return Err("dry_multiplier must be a finite value of 0 or greater".into());
+            }
+        }
+        // Unlike dry_multiplier, 0 has no "off" meaning for a DRY base: the
+        // exponential growth formula requires a positive base.
+        if let Some(db) = self.dry_base {
+            if !db.is_finite() || db <= 0.0 {
+                return Err("dry_base must be a finite value greater than 0".into());
             }
         }
         if let Some((first, last)) = self.pages {
@@ -168,6 +199,14 @@ pub enum Progress {
     /// processed THIS run (the rendered subset size, not the document's page
     /// count: with `--pages 5-10` on a 100-page PDF, `total` is 6).
     Page { page: usize, total: usize },
+    /// One page rasterized (PDF->PNG) so far, fired while `pdftoppm` is still
+    /// running and before any OCR starts. `page` is the real 1-based page
+    /// number (accounts for a `--pages` offset). `total` is `Some` when the
+    /// run's page count is known upfront (an explicit `--pages a-b` range, or
+    /// a best-effort `pdfinfo` probe for the whole-document case); `None` when
+    /// neither is available, in which case a UI shows a running count with no
+    /// denominator.
+    Rasterizing { page: usize, total: Option<usize> },
     /// One streaming token chunk emitted during OCR of a page. `page` is 1-based.
     /// The GUI appends `chunk` to the live transcript; the CLI may ignore it.
     PartialText { page: usize, chunk: String },

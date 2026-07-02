@@ -14,14 +14,26 @@ const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
 // make it relabel a loaded model as "Load model".
 let modelLoaded = false;
 
-/** Update the titlebar Local/Remote/No-model badge from a model_status payload. */
+// True only while a load is in flight (set on Load click, cleared in its finally).
+// The ocr://progress / status / server-ready listeners are gated on this so a
+// late-arriving server-ready event cannot clobber the resting "Loaded: ..." text
+// after refreshModelStatus has already set it.
+let loadingModel = false;
+
+/** Paint the titlebar model-light + label from a model_status payload. This is
+ *  the single at-a-glance status (the model-bar text below carries detail):
+ *  green dot + the loaded model label (e.g. "Unlimited-OCR Q8_0") for a local
+ *  model, violet dot + the label for a remote endpoint, gray dot + "No model"
+ *  when nothing is loaded. The dot color carries loaded/idle/remote state, so
+ *  no "Local"/"Loaded:" prefix is needed. */
 export function updateModeBadge(status) {
   const badge = document.getElementById("modeBadge");
   if (!badge) return;
   const loaded = !!(status && status.loaded);
   const mode = status && status.mode;
   const dotClass = !loaded ? "is-off" : mode === "remote" ? "is-remote" : "is-loaded";
-  const label = !loaded ? tr("status.noModel") : mode === "remote" ? tr("model.remote") : tr("model.local");
+  const fallback = mode === "remote" ? tr("model.remote") : tr("model.local");
+  const label = !loaded ? tr("status.noModel") : (status && status.label) || fallback;
   badge.innerHTML = '<span class="titlebar__mode-dot ' + dotClass + '"></span>' + label;
 }
 
@@ -260,6 +272,7 @@ export function wireModelBar(ui) {
       loadBtn.disabled = true;
       if (unloadBtn) unloadBtn.disabled = true;
       if (statusText) statusText.textContent = tr("model.loading");
+      loadingModel = true;
       try {
         const status = await t.core.invoke("load_model", {
           mode,
@@ -274,10 +287,21 @@ export function wireModelBar(ui) {
           mmprojFile: pickedGguf("mmprojFilePath"),
         });
         if (ui) ui.applyModelStatus(status);
+        // Paint the badge + status text DIRECTLY from the known load result
+        // instead of waiting on refreshModelStatus's model_status re-fetch (a
+        // late ocr://server-ready event can otherwise land after it and pin the
+        // text on "server ready on :PORT"). loadingModel is dropped in finally
+        // BEFORE that re-fetch, so those listeners cannot clobber this.
+        updateModeBadge(status);
+        if (statusText) statusText.textContent = tr("model.loadedLabel", { label: status.label });
       } catch (err) {
         if (statusText) statusText.textContent = tr("model.loadFailed", { error: String(err) });
       } finally {
         loadBtn.disabled = false;
+        // Clear the gate BEFORE refreshModelStatus's await: otherwise a late
+        // ocr://server-ready landing during that re-fetch passes the gate and
+        // overwrites the "Loaded: ..." label above with "server ready on :PORT".
+        loadingModel = false;
         await refreshModelStatus(ui);
       }
     });
@@ -291,6 +315,13 @@ export function wireModelBar(ui) {
       } catch (err) {
         return;
       }
+      // Feedback + badge flip immediately: the backend kill/drop is fast, but
+      // without this the model bar sits on "server ready on :PORT" until
+      // refreshModelStatus lands "No model loaded". loadingModel is false here,
+      // so the gated load listeners cannot overwrite this.
+      loadingModel = false;
+      if (statusText) statusText.textContent = tr("model.stopping");
+      updateModeBadge({ loaded: false, mode: "", label: "" });
       try {
         await t.core.invoke("unload_model");
       } catch (err) {
@@ -314,14 +345,17 @@ export function attachLoadListeners() {
   }
   const statusText = document.getElementById("modelStatusText");
   t.event.listen("ocr://progress", (e) => {
+    if (!loadingModel) return;
     const { name, pct } = (e && e.payload) || {};
     if (statusText) statusText.textContent = tr("model.downloadingPct", { name: name || tr("model.model"), pct: pct || 0 });
   });
   t.event.listen("ocr://status", (e) => {
+    if (!loadingModel) return;
     const { message } = (e && e.payload) || {};
     if (statusText && message) statusText.textContent = message;
   });
   t.event.listen("ocr://server-ready", (e) => {
+    if (!loadingModel) return;
     const { port } = (e && e.payload) || {};
     if (statusText) statusText.textContent = tr("model.serverReady", { port });
   });

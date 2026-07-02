@@ -3,12 +3,23 @@
 use crate::Res;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 /// Run `pdftoppm -png -r <dpi> <pdf> <outdir>/page` and collect the PNGs sorted
 /// by page number. Renders all pages; thin wrapper over `rasterize_range`.
 pub fn rasterize(pdftoppm: &Path, pdf: &Path, outdir: &Path, dpi: u32) -> Res<Vec<PathBuf>> {
-    rasterize_range(pdftoppm, pdf, outdir, dpi, None)
+    rasterize_range(pdftoppm, pdf, outdir, dpi, None, None)
 }
+
+/// How often `rasterize_range` polls `outdir` for newly-written pages while
+/// pdftoppm is still running. Short enough to feel live, long enough that
+/// polling overhead is noise next to a page render. Shorter under test so a
+/// real (tiny, fast) fixture PDF reliably produces an observable tick instead
+/// of a flaky race against process exit.
+#[cfg(not(test))]
+const POLL_INTERVAL: Duration = Duration::from_millis(150);
+#[cfg(test)]
+const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Like `rasterize`, but when `range` is `Some((first, last))` (1-based inclusive)
 /// passes `-f`/`-l` so pdftoppm renders only that page span. An open upper bound
@@ -18,12 +29,19 @@ pub fn rasterize(pdftoppm: &Path, pdf: &Path, outdir: &Path, dpi: u32) -> Res<Ve
 /// working and the caller can recover the true page number. pdftoppm zero-pads the
 /// suffix based on page count, so we sort by the parsed trailing integer rather
 /// than lexically.
+///
+/// `on_page`, when `Some`, is called with the number of pages written so far
+/// each time that count increases, while pdftoppm is still running (not after
+/// it exits). pdftoppm writes each `page-N.png` fully before starting the
+/// next, so a rising file count is a reliable progress signal. Pass `None`
+/// for callers that don't need live feedback (the GUI preview cache).
 pub fn rasterize_range(
     pdftoppm: &Path,
     pdf: &Path,
     outdir: &Path,
     dpi: u32,
     range: Option<(u32, Option<u32>)>,
+    mut on_page: Option<&mut dyn FnMut(usize)>,
 ) -> Res<Vec<PathBuf>> {
     let prefix = outdir.join("page");
     // pdftoppm has no `--` end-of-options guard, so a relative path that begins
@@ -42,7 +60,31 @@ pub fn rasterize_range(
             cmd.arg("-l").arg(last.to_string());
         }
     }
-    let status = cmd.arg(&pdf_arg).arg(&prefix).status()?;
+    let mut child = cmd.arg(&pdf_arg).arg(&prefix).spawn()?;
+    let mut last_count = 0usize;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                // try_wait() itself failed (rare OS-level condition): the child
+                // may still be running. Child::drop does not kill or wait on the
+                // process, so reap/kill it here before propagating rather than
+                // orphaning pdftoppm.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.into());
+            }
+        }
+        std::thread::sleep(POLL_INTERVAL);
+        let count = collect_pages(outdir).len();
+        if count != last_count {
+            last_count = count;
+            if let Some(cb) = on_page.as_mut() {
+                cb(count);
+            }
+        }
+    };
     if !status.success() {
         return Err(format!("pdftoppm failed ({status})").into());
     }
@@ -75,6 +117,87 @@ pub fn collect_pages(outdir: &Path) -> Vec<PathBuf> {
     pages.into_iter().map(|(_, p)| p).collect()
 }
 
+/// Find a `pdfinfo` binary next to `pdftoppm` (the same poppler install ships
+/// both, on every platform this app supports). Returns `None` when there's no
+/// directory component (a bare command name resolved via PATH at spawn time,
+/// not a concrete path) or no such file sits beside it.
+fn sibling_pdfinfo(pdftoppm: &Path) -> Option<PathBuf> {
+    let dir = pdftoppm.parent()?;
+    let exe = if cfg!(windows) {
+        "pdfinfo.exe"
+    } else {
+        "pdfinfo"
+    };
+    let pdfinfo = dir.join(exe);
+    pdfinfo.is_file().then_some(pdfinfo)
+}
+
+/// Best-effort total page count for `pdf`, used to give a rasterizing progress
+/// event a denominator when the caller didn't already pass an explicit
+/// `--pages` range. Returns `None` on anything unexpected (no sibling
+/// `pdfinfo`, spawn failure, non-zero exit, unparsable output) -- this is a
+/// nice-to-have, not a hard dependency, so failures degrade silently.
+pub fn total_pages(pdftoppm: &Path, pdf: &Path) -> Option<u32> {
+    info(pdftoppm, pdf).ok().map(|i| i.pages)
+}
+
+/// Metadata about a PDF, shown by the GUI's "PDF info" popup. `file_size_bytes`
+/// comes from the filesystem (locale-independent); everything else is parsed
+/// from `pdfinfo`'s `Label:   value` output lines.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfInfo {
+    pub pages: u32,
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub producer: Option<String>,
+    pub creation_date: Option<String>,
+    pub page_size: Option<String>,
+    pub pdf_version: Option<String>,
+    pub encrypted: Option<bool>,
+    pub file_size_bytes: u64,
+}
+
+/// User-triggered (not best-effort like `total_pages`): a missing `pdfinfo` or
+/// a failed run is a real `Err` the GUI surfaces in the info dialog, rather
+/// than a silently degraded field.
+pub fn info(pdftoppm: &Path, pdf: &Path) -> Res<PdfInfo> {
+    let pdfinfo = sibling_pdfinfo(pdftoppm).ok_or(
+        "pdfinfo not found next to pdftoppm (it ships in the same poppler install; \
+         reinstalling poppler should add it)",
+    )?;
+    let out = Command::new(&pdfinfo).arg(pdf).output()?;
+    if !out.status.success() {
+        return Err(format!("pdfinfo failed ({})", out.status).into());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    let field = |label: &str| -> Option<String> {
+        text.lines().find_map(|l| {
+            let v = l.strip_prefix(label)?.trim();
+            (!v.is_empty()).then(|| v.to_string())
+        })
+    };
+
+    let pages = field("Pages:")
+        .and_then(|v| v.parse().ok())
+        .ok_or("pdfinfo output had no parsable Pages: line")?;
+    let encrypted = field("Encrypted:").map(|v| v.starts_with("yes"));
+    let file_size_bytes = std::fs::metadata(pdf)?.len();
+
+    Ok(PdfInfo {
+        pages,
+        title: field("Title:"),
+        author: field("Author:"),
+        producer: field("Producer:"),
+        creation_date: field("CreationDate:"),
+        page_size: field("Page size:"),
+        pdf_version: field("PDF version:"),
+        encrypted,
+        file_size_bytes,
+    })
+}
+
 /// Pull the trailing integer out of a stem like "page-12" -> 12. Pub(crate) so
 /// `render_page` (lib.rs) can pick a specific page file out of a populated preview
 /// cache dir (pdftoppm zero-pads the suffix by total page count, so the exact
@@ -92,7 +215,7 @@ pub(crate) fn trailing_number(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::trailing_number;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn extracts_page_number() {
@@ -201,6 +324,61 @@ mod tests {
         }
     }
 
+    // Locks the spawn+poll rewrite of rasterize_range (previously a blocking
+    // `.status()` call): the callback must see at least one tick (POLL_INTERVAL
+    // is 5ms under test, so a real pdftoppm invocation reliably crosses it),
+    // counts must never decrease, and the final return value must be unchanged
+    // by the refactor (still 2 pages, in order). Skips without pdftoppm.
+    #[test]
+    fn rasterize_range_reports_incremental_progress() {
+        if std::process::Command::new("pdftoppm")
+            .arg("-v")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!(
+                "skipping rasterize_range_reports_incremental_progress: pdftoppm not on PATH"
+            );
+            return;
+        }
+
+        let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
+        let pdf_path = pdf_dir.path().join("fixture.pdf");
+        std::fs::write(&pdf_path, minimal_two_page_pdf()).expect("write fixture pdf");
+        let pdftoppm = Path::new("pdftoppm");
+        let out = tempfile::tempdir().expect("tmp page dir");
+
+        let mut seen: Vec<usize> = Vec::new();
+        let mut on_page = |n: usize| seen.push(n);
+        let pages = super::rasterize_range(
+            pdftoppm,
+            &pdf_path,
+            out.path(),
+            72,
+            None,
+            Some(&mut on_page),
+        )
+        .expect("rasterize with progress callback");
+
+        assert_eq!(pages.len(), 2, "callback must not change the render result");
+        assert!(
+            !seen.is_empty(),
+            "expected at least one progress tick before pdftoppm exits"
+        );
+        for w in seen.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "progress counts must strictly increase: {seen:?}"
+            );
+        }
+        assert!(
+            *seen.last().unwrap() <= 2,
+            "reported count must not exceed the real page count: {seen:?}"
+        );
+    }
+
     // Open upper bound (`Some((first, None))`) must render `first..EOF`, not a
     // single page: this is the fix for the GUI "pages N-end" path that previously
     // collapsed to one page. On the 2-page fixture, `(2, None)` yields exactly page
@@ -226,9 +404,15 @@ mod tests {
 
         // (2, None) = from page 2 to end -> just page 2 on a 2-page PDF.
         let out_tail = tempfile::tempdir().expect("tmp tail dir");
-        let tail =
-            super::rasterize_range(pdftoppm, &pdf_path, out_tail.path(), 72, Some((2, None)))
-                .expect("rasterize open tail");
+        let tail = super::rasterize_range(
+            pdftoppm,
+            &pdf_path,
+            out_tail.path(),
+            72,
+            Some((2, None)),
+            None,
+        )
+        .expect("rasterize open tail");
         assert_eq!(
             tail.len(),
             1,
@@ -239,8 +423,15 @@ mod tests {
 
         // (1, None) = whole document -> both pages.
         let out_all = tempfile::tempdir().expect("tmp all dir");
-        let all = super::rasterize_range(pdftoppm, &pdf_path, out_all.path(), 72, Some((1, None)))
-            .expect("rasterize open all");
+        let all = super::rasterize_range(
+            pdftoppm,
+            &pdf_path,
+            out_all.path(),
+            72,
+            Some((1, None)),
+            None,
+        )
+        .expect("rasterize open all");
         assert_eq!(
             all.len(),
             2,
@@ -348,6 +539,76 @@ mod tests {
         let again =
             crate::render_page(pdftoppm, &pdf_path, 72, cache.path(), 1).expect("cache hit");
         assert_eq!(again, p1, "cache hit must return the same page path");
+    }
+
+    // Both total_pages and info() need a resolvable `pdftoppm` AND a sibling
+    // `pdfinfo` next to it, which a bare `Path::new("pdftoppm")` (PATH lookup,
+    // no directory component) can't give us. Resolve the real binary path via
+    // `which` (unix-only, matching this test environment) and return None if
+    // either that or a sibling pdfinfo isn't available, so callers can skip
+    // cleanly instead of duplicating this lookup per test.
+    fn resolve_pdftoppm_with_pdfinfo() -> Option<PathBuf> {
+        let which = std::process::Command::new("which").arg("pdftoppm").output();
+        let resolved = match which {
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            }
+            _ => return None,
+        };
+        let pdftoppm = PathBuf::from(resolved);
+        let has_pdfinfo = pdftoppm
+            .parent()
+            .map(|dir| {
+                dir.join(if cfg!(windows) {
+                    "pdfinfo.exe"
+                } else {
+                    "pdfinfo"
+                })
+                .is_file()
+            })
+            .unwrap_or(false);
+        has_pdfinfo.then_some(pdftoppm)
+    }
+
+    #[test]
+    fn total_pages_matches_known_fixture() {
+        let Some(pdftoppm) = resolve_pdftoppm_with_pdfinfo() else {
+            eprintln!(
+                "skipping total_pages_matches_known_fixture: pdftoppm/sibling pdfinfo not resolvable"
+            );
+            return;
+        };
+
+        let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
+        let pdf_path = pdf_dir.path().join("fixture.pdf");
+        std::fs::write(&pdf_path, minimal_two_page_pdf()).expect("write fixture pdf");
+
+        assert_eq!(
+            super::total_pages(&pdftoppm, &pdf_path),
+            Some(2),
+            "pdfinfo-derived page count must match the 2-page fixture"
+        );
+    }
+
+    #[test]
+    fn info_reports_known_fixture_fields() {
+        let Some(pdftoppm) = resolve_pdftoppm_with_pdfinfo() else {
+            eprintln!("skipping info_reports_known_fixture_fields: pdftoppm/sibling pdfinfo not resolvable");
+            return;
+        };
+
+        let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
+        let pdf_path = pdf_dir.path().join("fixture.pdf");
+        let bytes = minimal_two_page_pdf();
+        std::fs::write(&pdf_path, &bytes).expect("write fixture pdf");
+
+        let info = super::info(&pdftoppm, &pdf_path).expect("pdfinfo on 2-page fixture");
+        assert_eq!(info.pages, 2, "must match the 2-page fixture");
+        assert_eq!(
+            info.file_size_bytes,
+            bytes.len() as u64,
+            "file size must come from the filesystem, not pdfinfo"
+        );
     }
 
     // Smallest valid 2-page PDF pdftoppm accepts: a Catalog -> Pages with two

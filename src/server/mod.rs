@@ -38,45 +38,86 @@ pub fn free_port() -> Res<u16> {
 /// `lib::ocr_pages` drive either a local `Server` or a `RemoteEndpoint` without
 /// caring which. The body it sends is provider-agnostic (OpenAI chat-completions).
 pub trait ImageOcr {
+    #[allow(clippy::too_many_arguments)]
     fn ocr_image(
         &self,
         prompt: &str,
         data_uri: &str,
         max_tokens: u32,
         repeat_penalty: Option<f32>,
+        dry_multiplier: Option<f32>,
+        dry_base: Option<f32>,
     ) -> Res<String>;
 
     /// Stream completions: like `ocr_image` but calls `on_token` with each partial
     /// text chunk as it arrives (SSE delta), and returns the full assembled text.
     /// The default falls back to the non-streaming path (safe for stub servers
     /// and callers that do not need partial-token events).
+    #[allow(clippy::too_many_arguments)]
     fn ocr_image_stream(
         &self,
         prompt: &str,
         data_uri: &str,
         max_tokens: u32,
         repeat_penalty: Option<f32>,
+        dry_multiplier: Option<f32>,
+        dry_base: Option<f32>,
         on_token: &mut dyn FnMut(&str) -> bool,
         should_cancel: &dyn Fn() -> bool,
     ) -> Res<String> {
         let _ = on_token; // default: ignore the sink
         let _ = should_cancel;
-        self.ocr_image(prompt, data_uri, max_tokens, repeat_penalty)
+        self.ocr_image(
+            prompt,
+            data_uri,
+            max_tokens,
+            repeat_penalty,
+            dry_multiplier,
+            dry_base,
+        )
     }
 }
 
-/// Attach the optional llama.cpp `repeat_penalty` extension to a request body.
-/// No-op when None so the baseline body is byte-for-byte unchanged. Shared by the
-/// streaming and non-streaming request builders.
-pub(crate) fn apply_repeat_penalty(body: &mut serde_json::Value, repeat_penalty: Option<f32>) {
+/// Attach the optional llama.cpp sampling extensions to a request body. No-op
+/// when both are None so the baseline body is byte-for-byte unchanged (a remote
+/// vLLM/SGLang endpoint never sees the extra fields). Shared by the streaming
+/// and non-streaming request builders (repo rule: one helper, both paths).
+///
+/// `dry_multiplier` enables llama.cpp's DRY sampler, the closest analog of the
+/// sliding-window no-repeat-ngram logits processor the upstream Python wrapper
+/// uses for loop prevention (that processor doesn't ship in the GGUF). When set,
+/// `dry_allowed_length` is raised from the server default 2 to 4: OCR output
+/// legitimately repeats short in-line runs (table separators, repeated units),
+/// while runaway loops repeat far longer sequences, so 4 keeps the loop-killing
+/// power at zero cost to real document structure. `dry_penalty_last_n` and the
+/// sequence breakers (which include `\n`, protecting row-by-row tables) stay at
+/// server defaults. `dry_base` (growth rate of the penalty past
+/// `dry_allowed_length`, server default 1.75) is an opt-in override: only sent
+/// when `dry_multiplier` is also set (it is inert in llama.cpp without DRY
+/// enabled), and no local default is injected for it (unlike repeat_penalty/
+/// dry_multiplier) since it is newer/less battle-tested.
+pub(crate) fn apply_sampling(
+    body: &mut serde_json::Value,
+    repeat_penalty: Option<f32>,
+    dry_multiplier: Option<f32>,
+    dry_base: Option<f32>,
+) {
     if let Some(rp) = repeat_penalty {
         body["repeat_penalty"] = serde_json::json!(rp);
+    }
+    if let Some(dm) = dry_multiplier {
+        body["dry_multiplier"] = serde_json::json!(dm);
+        body["dry_allowed_length"] = serde_json::json!(4);
+        if let Some(db) = dry_base {
+            body["dry_base"] = serde_json::json!(db);
+        }
     }
 }
 
 /// POST one image + prompt to an OpenAI-compatible `{base_url}/v1/chat/completions`
 /// and return the assistant text. Shared by the local `Server` and `RemoteEndpoint`;
 /// the only difference is the base URL and an optional bearer token.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ocr_via(
     base_url: &str,
     api_key: Option<&str>,
@@ -85,6 +126,8 @@ pub(crate) fn ocr_via(
     data_uri: &str,
     max_tokens: u32,
     repeat_penalty: Option<f32>,
+    dry_multiplier: Option<f32>,
+    dry_base: Option<f32>,
 ) -> Res<String> {
     let url = format!("{base_url}/v1/chat/completions");
     let mut body = serde_json::json!({
@@ -101,7 +144,7 @@ pub(crate) fn ocr_via(
     if let Some(m) = model {
         body["model"] = serde_json::Value::String(m.to_string());
     }
-    apply_repeat_penalty(&mut body, repeat_penalty);
+    apply_sampling(&mut body, repeat_penalty, dry_multiplier, dry_base);
     let api_key = api_key.map(|s| s.to_string());
 
     block_on(async move {
@@ -135,6 +178,8 @@ pub(crate) fn ocr_via_stream(
     data_uri: &str,
     max_tokens: u32,
     repeat_penalty: Option<f32>,
+    dry_multiplier: Option<f32>,
+    dry_base: Option<f32>,
     on_token: &mut dyn FnMut(&str) -> bool,
     should_cancel: &dyn Fn() -> bool,
 ) -> Res<String> {
@@ -154,7 +199,7 @@ pub(crate) fn ocr_via_stream(
     if let Some(m) = model {
         body["model"] = serde_json::Value::String(m.to_string());
     }
-    apply_repeat_penalty(&mut body, repeat_penalty);
+    apply_sampling(&mut body, repeat_penalty, dry_multiplier, dry_base);
     let api_key = api_key.map(|s| s.to_string());
 
     let mut full = String::new();

@@ -5,11 +5,13 @@
 
 // Task preset -> the user prompt actually sent. Unlimited-OCR uses NO system prompt;
 // the model needs a user-role task instruction (`<image>` is injected by llama.cpp's
-// mtmd from the image part, NOT this text). `<|grounding|>` is optional (enables layout
-// grounding), kept only on the markdown preset. The Prompt box overrides this when
-// non-empty. Keep in sync with the CLI's Task::prompt() (src/cli_args.rs).
+// mtmd from the image part, NOT this text). `<|grounding|>` lives only on the grounding
+// preset (markdown + layout coordinates); the default `markdown` preset emits clean
+// markdown with no boxes. The Prompt box overrides this when non-empty. Keep in sync
+// with the CLI's Task::prompt() (src/cli_args.rs).
 export const TASK_PROMPTS = {
-  markdown: "<|grounding|>Convert the document to markdown.",
+  markdown: "document parsing.",
+  grounding: "<|grounding|>Convert the document to markdown.",
   free: "Free OCR.",
   figure: "Parse the figure.",
 };
@@ -35,6 +37,8 @@ export function readRunOptions() {
   const promptEl = document.getElementById("optPrompt");
   const taskEl = document.getElementById("optTask");
   const repeatPenaltyEl = document.getElementById("optRepeatPenalty");
+  const dryMultiplierEl = document.getElementById("optDryMultiplier");
+  const dryBaseEl = document.getElementById("optDryBase");
 
   const DEFAULT_DPI = 144;
   const DEFAULT_MAX_TOKENS = 4096;
@@ -48,6 +52,12 @@ export function readRunOptions() {
   const floatOrNull = (el) => {
     const v = parseFloat((el && el.value) || "");
     return Number.isFinite(v) && v > 0 ? v : null;
+  };
+  // Same, but 0 is a real value (DRY: an explicit 0 means "off" and must reach
+  // the backend, or the local-path 1.0 default would override it).
+  const floatOrNullMin0 = (el) => {
+    const v = parseFloat((el && el.value) || "");
+    return Number.isFinite(v) && v >= 0 ? v : null;
   };
   const promptOr = (el, fallback) => {
     const v = (el && el.value) || "";
@@ -65,6 +75,9 @@ export function readRunOptions() {
     keepImages: !!(keepImagesEl && keepImagesEl.checked),
     prompt: promptOr(promptEl, taskPrompt),
     repeatPenalty: floatOrNull(repeatPenaltyEl),
+    dryMultiplier: floatOrNullMin0(dryMultiplierEl),
+    // No "0 = off" meaning for a DRY base; blank/invalid/0 -> null (server default).
+    dryBase: floatOrNull(dryBaseEl),
     // 1-based inclusive page range; both null = all pages. The backend validates
     // first>=1 and last>=first (a direct invoke bypasses the form min= clamp).
     firstPage: pages.firstPage,

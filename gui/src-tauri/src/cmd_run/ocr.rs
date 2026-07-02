@@ -28,6 +28,8 @@ pub(crate) async fn run_ocr(
     prompt: Option<String>,
     keep_images: Option<bool>,
     repeat_penalty: Option<f32>,
+    dry_multiplier: Option<f32>,
+    dry_base: Option<f32>,
     first_page: Option<u32>,
     last_page: Option<u32>,
     quant: Option<String>,
@@ -41,6 +43,8 @@ pub(crate) async fn run_ocr(
         prompt,
         keep_images,
         repeat_penalty,
+        dry_multiplier,
+        dry_base,
         first_page,
         last_page,
         output_mode.as_deref(),
@@ -88,11 +92,19 @@ pub(crate) async fn run_ocr(
             is_local = matches!(&lm.backend, Backend::Local(_));
 
             // Local GGUF quants fall into infinite-loop output on dense pages; a
-            // repeat penalty escapes it. Default to 1.1 when the user left the field
-            // blank (None). An explicit value wins; remote (full-precision vLLM) is
-            // left alone, it does not exhibit the quant loop.
+            // repeat penalty escapes it. Default to 1.15 when the user left the
+            // field blank (None). An explicit value wins; remote (full-precision
+            // vLLM) is left alone, it does not exhibit the quant loop.
             if is_local && opts.repeat_penalty.is_none() {
-                opts.repeat_penalty = Some(1.1);
+                opts.repeat_penalty = Some(1.15);
+            }
+            // Same gating for the DRY sampler (any local GGUF quant): it stands in
+            // for the loop-preventing ngram processor that does not ship in the
+            // GGUF. Explicit value (including 0 = off) wins; remote is left alone
+            // (llama.cpp-only field). dry_base has no injected default (opt-in
+            // only, server default 1.75 applies when unset).
+            if is_local && opts.dry_multiplier.is_none() {
+                opts.dry_multiplier = Some(1.0);
             }
 
             for input in &inputs {

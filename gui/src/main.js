@@ -159,7 +159,12 @@ window.addEventListener("DOMContentLoaded", () => {
   // button processes queuedPaths in order, with per-file status.
   const pathInput = document.getElementById("pdfPath");
   const importBtn = document.getElementById("importBtn");
-  const preview = makePreviewPane();
+  // Clicking the empty preview stage reuses the Import button's flow (native
+  // picker -> queue.add -> preview.show, incl. the plain-browser focus fallback),
+  // so there's a single import path. importBtn is assigned above, in scope here.
+  const preview = makePreviewPane({
+    onImportRequest: () => importBtn && importBtn.click(),
+  });
 
   // Output filename is single-file only: enable it when exactly one PDF is queued,
   // otherwise disable + clear so a stale name can't apply to a batch (the backend
@@ -221,6 +226,8 @@ window.addEventListener("DOMContentLoaded", () => {
     if (pathInput) pathInput.value = paths.length === 1 ? paths[0] : "";
     updateOutFileState();
     autofillOutputs();
+    // Drop the preview if its file was removed; advance to the next if any remain.
+    preview.sync(paths);
   }
   queue.onChange(syncQueueUi);
   // Bulk mode: the board's Queued column mirrors the in-memory queue; a Remove on a

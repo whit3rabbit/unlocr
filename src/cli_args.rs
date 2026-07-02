@@ -66,8 +66,9 @@ pub struct Args {
     #[arg(long, default_value_t = 4096)]
     pub max_tokens: u32,
 
-    /// Task preset that picks the OCR prompt: markdown (grounded markdown, default),
-    /// free (plain text), figure (parse a chart/figure). Ignored when --prompt is set.
+    /// Task preset that picks the OCR prompt: markdown (clean markdown, default),
+    /// grounding (markdown + layout coordinates), free (plain text), figure (parse a
+    /// chart/figure). Ignored when --prompt is set.
     #[arg(long, value_enum, default_value_t = Task::Markdown)]
     pub task: Task,
 
@@ -95,12 +96,29 @@ pub struct Args {
     #[arg(long)]
     pub chat_template: Option<String>,
 
-    /// Sampling repetition penalty (e.g. 1.1) sent with every page. Helps escape the
-    /// infinite-loop output some quants (notably Q4_K_M) hit on dense pages. Defaults
-    /// to 1.1 on the local GGUF path; pass a value to override. Inert/omitted for
-    /// remote (`--endpoint`/`--gpu`) mode, which does not exhibit the quant loop.
+    /// Sampling repetition penalty (e.g. 1.15) sent with every page. Helps escape
+    /// the infinite-loop output some quants (notably Q4_K_M) hit on dense pages.
+    /// Defaults to 1.15 on the local GGUF path; pass a value to override.
+    /// Inert/omitted for remote (`--endpoint`/`--gpu`) mode, which does not
+    /// exhibit the quant loop.
     #[arg(long)]
     pub repeat_penalty: Option<f32>,
+
+    /// DRY sampler strength (llama.cpp `dry_multiplier`) sent with every page.
+    /// Penalizes repeated *sequences* (the analog of upstream's no-repeat-ngram
+    /// processor), catching the loops a mild repeat penalty cannot. Defaults to
+    /// 1.0 on the local GGUF path; pass 0 to disable. Inert/omitted for remote
+    /// (`--endpoint`/`--gpu`) mode, whose server rejects llama.cpp-only fields.
+    #[arg(long)]
+    pub dry_multiplier: Option<f32>,
+
+    /// Base for llama.cpp's DRY exponential penalty growth (`dry_base`), sent
+    /// only when --dry-multiplier is also set (a dry_base with DRY disabled is
+    /// inert). Server default (1.75) applies when omitted; no local default is
+    /// injected here. Higher values ramp the penalty more aggressively past
+    /// dry_allowed_length. Inert/omitted for remote (`--endpoint`/`--gpu`) mode.
+    #[arg(long)]
+    pub dry_base: Option<f32>,
 
     /// Path to llama-server (default: PATH / Homebrew)
     #[arg(long)]
@@ -215,8 +233,11 @@ impl Quality {
 /// prompts; `--prompt` overrides the resolved string for full control.
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 pub enum Task {
-    /// Grounded markdown conversion (headings, layout). The default.
+    /// Clean structured markdown (headings, lists, tables), no coordinates. The default.
     Markdown,
+    /// Grounded markdown: each line tagged (text/title/...) with a bounding box.
+    /// Use when you want layout coordinates (e.g. to rebuild HTML).
+    Grounding,
     /// Plain-text OCR with no layout/markdown structure.
     Free,
     /// Parse a chart/figure into a structured description.
@@ -228,7 +249,8 @@ impl Task {
     pub fn prompt(self) -> &'static str {
         match self {
             // Keep in sync with OcrOptions::default().prompt (the no-flags default).
-            Task::Markdown => "<|grounding|>Convert the document to markdown.",
+            Task::Markdown => "document parsing.",
+            Task::Grounding => "<|grounding|>Convert the document to markdown.",
             Task::Free => "Free OCR.",
             Task::Figure => "Parse the figure.",
         }

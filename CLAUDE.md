@@ -130,6 +130,15 @@ Thin wrapper. Full usage/benchmarks in README.md.
   per-request body field (in `ocr_via`/`ocr_via_stream`). `--task` is a CLI-side prompt
   preset; `--prompt` overrides it. Upstream Python knobs (`base_size`/`crop_mode`/
   gundam tiling, `no_repeat_ngram_size`) are NOT reachable via the OpenAI endpoint.
+  BUT local llama-server accepts llama.cpp-native sampling fields in the chat-
+  completions body: `--dry-multiplier` (default 0.8 on local, + hardcoded
+  `dry_allowed_length: 4`) is the DRY-sampler analog of upstream's no-repeat-ngram
+  logits processor and is the loop-killer; `--repeat-penalty` 1.1 is only a mild
+  baseline. The model also natively emits `label [x, y, x, y]` layout annotations
+  (coords 0-999) with EVERY prompt; upstream cleans them in Python, we port that as
+  `strip_layout_annotations`/`AnnotationStripper` (src/output.rs), applied in
+  `ocr_pages` to final text AND the PartialText stream unless the prompt contains
+  `<|grounding|>` (the opt-out marker carried by the grounding task preset).
 - Numeric knobs need explicit range guards: clap does not bounds-check the CLI, and
   a direct `invoke()` bypasses the GUI's HTML `min=` form clamp. The single shared
   sink is `OcrOptions::validate()` in `src/options.rs` (rejects dpi==0 /
@@ -140,7 +149,7 @@ Thin wrapper. Full usage/benchmarks in README.md.
   GUI `load_model` also guards it before `Server::start`.) `model::require_file` is the
   analogous single sink for `--model`/`--mmproj`.
 - A per-request body knob must be added to BOTH `ocr_via` and `ocr_via_stream`
-  (stream + non-stream paths). Route it through a shared helper (`apply_repeat_penalty`).
+  (stream + non-stream paths). Route it through a shared helper (`apply_sampling`).
 - rust-analyzer inline diagnostics can lag the source (saw repeated false
   "no such field" on `Progress::Download {done,total}` while cargo was green).
   Trust `cargo build`/`cargo test` over the editor diagnostics; re-check, don't chase.

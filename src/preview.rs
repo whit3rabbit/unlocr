@@ -80,7 +80,7 @@ pub fn render_page(
     // pdftoppm failure (non-zero exit, spawn, malformed PDF) propagates via `?`;
     // rasterize_range returns an empty Vec when the page is past EOF, which the
     // find() below turns into the out-of-range error the GUI uses to bound nav.
-    pdf::rasterize_range(pdftoppm, pdf, &dir, dpi, Some((page, Some(page))))?;
+    pdf::rasterize_range(pdftoppm, pdf, &dir, dpi, Some((page, Some(page))), None)?;
     pdf::collect_pages(&dir)
         .into_iter()
         .find(|p| pdf::trailing_number(p) == Some(want))

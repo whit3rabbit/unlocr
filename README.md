@@ -133,7 +133,7 @@ unlocr report.pdf --out ./out --quality best
 | `--mmproj PATH` | *(cached projector)* | Projector (mmproj) GGUF override. Requires `--model`. |
 | `--max-tokens N` | `4096` | Max tokens generated per page (prevents infinite loop/runaways on dense pages). |
 | `--pages RANGE` | *(all)* | Pages to OCR: a single page (`5`) or inclusive 1-based range (`5-9`). Applies to every input. |
-| `--task PRESET` | `markdown` | Prompt preset: `markdown` (formatted md), `free` (plain text), `figure` (parses charts/figures). |
+| `--task PRESET` | `markdown` | Prompt preset: `markdown` (clean md), `grounding` (md + layout coordinates), `free` (plain text), `figure` (parses charts/figures). |
 | `--prompt TEXT` | *(from task)* | Custom OCR prompt. Overrides `--task`. Use `<|grounding|>` for layout coordinates. |
 | `--dpi N` | `144` | PDF page rendering DPI (higher DPI gives larger/clearer source images). |
 | `--image-max-tokens N` | *(model default)* | Vision-token budget for `llama-server` (local mode only). Higher means finer detail recognition but slower/more VRAM. |

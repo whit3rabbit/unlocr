@@ -1,5 +1,10 @@
 import { loadJobs } from "./jobs.js";
-import { renderJobCard } from "./job_card.js";
+import { renderJobCard, confirmDestructive } from "./job_card.js";
+import { requireTauri } from "./tauri.js";
+
+// i18n hook, same pattern as library.js. Named `tr` -- `t` is the Tauri handle
+// used by the clearDone Tauri invoke below.
+const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
 
 /** EH-0006 bite 3: controller over the Board kanban. Reads the same persisted job
  *  store the Library grid uses (list_jobs) and groups jobs into status columns:
@@ -36,6 +41,7 @@ export function makeBoard() {
   const total = document.getElementById("boardCount");
   const empty = document.getElementById("boardEmpty");
   const refresh = document.getElementById("boardRefresh");
+  const clearDoneBtn = document.getElementById("boardClearDoneBtn");
 
   // Bulk mode: the in-memory pending queue (files imported but not yet run) is
   // rendered into the Queued column so the Workflow board shows the whole batch,
@@ -152,8 +158,33 @@ export function makeBoard() {
     await loadJobs("board", render);
   }
 
+  /** Remove every Done-status job from the board/store (record-only -- the .md
+   *  output files are left on disk). Confirms first even though it is
+   *  record-only: a bulk removal from the board is not something a misclick
+   *  should silently do, even if the underlying files survive. */
+  async function clearDone() {
+    const doneIds = lastJobs
+      .filter((j) => columnKey(j && j.status) === "done")
+      .map((j) => j && j.id)
+      .filter(Boolean);
+    if (doneIds.length === 0) return;
+    if (!(await confirmDestructive(tr("board.confirmClearDone", { n: doneIds.length }))))
+      return;
+    try {
+      const t = requireTauri();
+      await t.core.invoke("delete_jobs", { ids: doneIds, deleteFile: false });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[board] delete_jobs (clear done) failed", err);
+    }
+    load();
+  }
+
   if (refresh) {
     refresh.addEventListener("click", load);
+  }
+  if (clearDoneBtn) {
+    clearDoneBtn.addEventListener("click", clearDone);
   }
 
   return { load, render, renderPending, bindQueue };

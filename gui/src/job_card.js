@@ -70,6 +70,32 @@ export function renderJobCard(job, mdPane, railButtons, actions) {
 
   const head = document.createElement("div");
   head.className = "job-card__head";
+  // Multi-select checkbox: Library-only. Rendered iff `actions` carries BOTH
+  // select hooks (isSelected + toggleSelect). The Board passes a PARTIAL actions
+  // ({ remove } for its pending-job remove affordance), so guarding on the hooks
+  // (not just truthy `actions`) keeps the Board checkbox-free and throw-free.
+  // First child of the head so it sits left of the name; clicks stopPropagation so
+  // toggling never triggers the card's open-in-review affordance on done cards.
+  const selectable =
+    actions &&
+    typeof actions.isSelected === "function" &&
+    typeof actions.toggleSelect === "function";
+  if (selectable) {
+    const id = job && job.id;
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.className = "job-card__check";
+    check.checked = actions.isSelected(id);
+    check.setAttribute(
+      "aria-label",
+      tr("job.selectOne", { name: jobBaseName(job && job.inputPath) })
+    );
+    check.addEventListener("click", (ev) => ev.stopPropagation());
+    check.addEventListener("change", () => {
+      actions.toggleSelect(id, check.checked);
+    });
+    head.appendChild(check);
+  }
   const name = document.createElement("span");
   name.className = "job-card__name";
   name.textContent = jobBaseName(job && job.inputPath);
@@ -129,6 +155,10 @@ export function renderJobCard(job, mdPane, railButtons, actions) {
       openInReview(outputPath, mdPane, railButtons);
     });
     card.addEventListener("keydown", (ev) => {
+      // Ignore Enter/Space that originate on the multi-select checkbox so
+      // keyboard-toggling it does not also open the review pane.
+      if (ev.target && ev.target.closest && ev.target.closest(".job-card__check"))
+        return;
       if (ev.key === "Enter") {
         ev.preventDefault();
         openInReview(outputPath, mdPane, railButtons);
@@ -137,6 +167,8 @@ export function renderJobCard(job, mdPane, railButtons, actions) {
       }
     });
     card.addEventListener("keyup", (ev) => {
+      if (ev.target && ev.target.closest && ev.target.closest(".job-card__check"))
+        return;
       if (ev.key === " ") {
         openInReview(outputPath, mdPane, railButtons);
       }

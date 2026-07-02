@@ -59,32 +59,54 @@ pub(crate) fn delete_job(
     Ok(())
 }
 
-/// Clear the entire Library. With `delete_files == Some(true)`, also delete every
-/// recorded `.md` output from disk; otherwise only the records are dropped. The
-/// files are deleted BEFORE the records are cleared: a file-delete failure returns
-/// Err with every record still in place, so the Library is never emptied while
-/// output files are left orphaned on disk. The frontend confirms the file-deleting
-/// variant.
+/// Remove several jobs from the Library by id (the multi-select batch path). With
+/// `delete_file == Some(true)`, also delete each selected run's `.md` output from
+/// disk (guarded to `.md` only in `store::delete_output_file`); otherwise the
+/// records are dropped but the files are left in place. Jobs with no output path
+/// (queued/failed) have nothing to delete, so a mixed selection never errors on
+/// them. An empty id list is a no-op success.
+///
+/// Files are deleted per-id: a job whose file was requested AND failed to delete
+/// (locked, permission-denied) KEEPS its record so the user can retry once the
+/// lock clears; every other selected record is removed. This never strands a
+/// record pointing at an already-deleted file (a broken review link) AND never
+/// orphans a file that still needs deleting. Any failures are aggregated into the
+/// returned Err so the UI can surface them after the removable records are gone.
 #[tauri::command]
-pub(crate) fn clear_jobs(
-    delete_files: Option<bool>,
+pub(crate) fn delete_jobs(
+    ids: Vec<String>,
+    delete_file: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let outputs = store::peek_job_outputs()?;
-    if delete_files == Some(true) {
-        let errors: Vec<String> = outputs
-            .iter()
-            .filter_map(|p| store::delete_output_file(p).err())
-            .collect();
-        if !errors.is_empty() {
-            return Err(format!(
-                "some files could not be deleted: {}",
-                errors.join("; ")
-            ));
+    if ids.is_empty() {
+        return Ok(());
+    }
+    // ids whose output file was requested but failed to delete: keep their records.
+    let mut keep = std::collections::HashSet::new();
+    let mut file_errors: Vec<String> = Vec::new();
+    if delete_file == Some(true) {
+        for (id, path) in store::peek_job_outputs_for(&ids)? {
+            if let Err(e) = store::delete_output_file(&path) {
+                file_errors.push(format!("{id}: {e}"));
+                keep.insert(id);
+            }
         }
     }
-    store::clear_jobs()?;
-    state.invalidate_job_outputs();
+    let removable: Vec<String> = ids
+        .iter()
+        .filter(|id| !keep.contains(*id))
+        .cloned()
+        .collect();
+    if !removable.is_empty() {
+        store::remove_jobs(&removable)?;
+        state.invalidate_job_outputs();
+    }
+    if !file_errors.is_empty() {
+        return Err(format!(
+            "some output files could not be deleted (their records were kept): {}",
+            file_errors.join("; ")
+        ));
+    }
     Ok(())
 }
 

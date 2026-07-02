@@ -124,7 +124,14 @@ fn remote_endpoint_sends_bearer_and_parses() {
         model: None,
     };
     let out = ep
-        .ocr_image("<|grounding|>x", "data:image/png;base64,AAAA", 64, None)
+        .ocr_image(
+            "<|grounding|>x",
+            "data:image/png;base64,AAAA",
+            64,
+            None,
+            None,
+            None,
+        )
         .expect("remote ocr");
     assert_eq!(out, "# remote ok");
 
@@ -184,7 +191,7 @@ fn remote_endpoint_injects_model_only_when_set() {
             api_key: None,
             model,
         };
-        ep.ocr_image("p", "data:image/png;base64,AAAA", 64, None)
+        ep.ocr_image("p", "data:image/png;base64,AAAA", 64, None, None, None)
             .expect("ocr");
         let body = rx.recv().expect("stub recorded body");
         serde_json::from_slice(&body).expect("body is json")
@@ -272,6 +279,8 @@ fn sse_streaming_fires_on_token() {
         "data:image/png;base64,AAAA",
         64,
         None,
+        None,
+        None,
         &mut |chunk: &str| {
             tokens.push(chunk.to_string());
             true
@@ -352,6 +361,8 @@ fn stream_falls_back_to_plain_json_completion() {
         "data:image/png;base64,AAAA",
         64,
         None,
+        None,
+        None,
         &mut |chunk: &str| {
             tokens.push(chunk.to_string());
             true
@@ -427,6 +438,8 @@ fn sse_streaming_surfaces_provider_error() {
         "data:image/png;base64,AAAA",
         64,
         None,
+        None,
+        None,
         &mut |chunk: &str| {
             tokens.push(chunk.to_string());
             true
@@ -443,6 +456,137 @@ fn sse_streaming_surfaces_provider_error() {
     assert!(
         tokens.is_empty(),
         "no token should be emitted for an error chunk"
+    );
+}
+
+/// `apply_sampling` must leave the body byte-for-byte unchanged on (None, None,
+/// None) (the remote/vLLM baseline), and land each knob under its llama.cpp
+/// field name when set. DRY implies the hardcoded `dry_allowed_length: 4`
+/// companion. `dry_base` must reach the wire only when `dry_multiplier` is also
+/// set (a base with DRY disabled is inert in llama.cpp). Pure.
+#[test]
+fn apply_sampling_sets_fields_only_when_set() {
+    let baseline = json!({ "temperature": 0, "max_tokens": 64 });
+
+    let mut body = baseline.clone();
+    apply_sampling(&mut body, None, None, None);
+    assert_eq!(body, baseline, "None/None/None must not touch the body");
+
+    let mut body = baseline.clone();
+    apply_sampling(&mut body, Some(1.1), Some(0.8), Some(2.0));
+    assert_eq!(body["repeat_penalty"], json!(1.1f32));
+    assert_eq!(body["dry_multiplier"], json!(0.8f32));
+    assert_eq!(body["dry_allowed_length"], json!(4));
+    assert_eq!(body["dry_base"], json!(2.0f32));
+
+    let mut body = baseline.clone();
+    apply_sampling(&mut body, None, Some(0.8), Some(2.0));
+    assert!(body.get("repeat_penalty").is_none());
+    assert_eq!(body["dry_multiplier"], json!(0.8f32));
+    assert_eq!(body["dry_allowed_length"], json!(4));
+    assert_eq!(body["dry_base"], json!(2.0f32));
+
+    let mut body = baseline.clone();
+    apply_sampling(&mut body, Some(1.1), None, None);
+    assert_eq!(body["repeat_penalty"], json!(1.1f32));
+    assert!(body.get("dry_multiplier").is_none());
+    assert!(body.get("dry_allowed_length").is_none());
+
+    // Critical gating case: dry_base supplied but dry_multiplier absent must be
+    // dropped, since dry_base alone is inert in llama.cpp.
+    let mut body = baseline;
+    apply_sampling(&mut body, Some(1.1), None, Some(2.0));
+    assert_eq!(body["repeat_penalty"], json!(1.1f32));
+    assert!(body.get("dry_multiplier").is_none());
+    assert!(body.get("dry_allowed_length").is_none());
+    assert!(
+        body.get("dry_base").is_none(),
+        "dry_base must be dropped when dry_multiplier is None"
+    );
+}
+
+/// The DRY fields must reach the wire only when `dry_multiplier` is set (a
+/// remote endpoint that rejects llama.cpp-only fields must never see them).
+/// Stub HTTP server captures the request body, mirroring
+/// `remote_endpoint_injects_model_only_when_set`.
+#[test]
+fn ocr_image_sends_dry_fields_only_when_set() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::mpsc;
+
+    fn run_once(dry_multiplier: Option<f32>, dry_base: Option<f32>) -> serde_json::Value {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
+        let port = listener.local_addr().unwrap().port();
+        let resp_body = json!({ "choices": [{ "message": { "content": "ok" } }] }).to_string();
+        let http_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body,
+        );
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let Ok(s) = listener.incoming().next().unwrap() else {
+                return;
+            };
+            let mut reader = BufReader::new(s.try_clone().unwrap());
+            let mut writer = s;
+            let mut content_length = 0usize;
+            let mut first = String::new();
+            reader.read_line(&mut first).ok();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let t = line.trim_end_matches(['\r', '\n']);
+                if t.is_empty() {
+                    break;
+                }
+                if let Some(v) = t.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            let _ = reader.read_exact(&mut body);
+            let _ = writer.write_all(http_response.as_bytes());
+            let _ = tx.send(body);
+        });
+
+        let ep = RemoteEndpoint {
+            base_url: format!("http://127.0.0.1:{port}"),
+            api_key: None,
+            model: None,
+        };
+        ep.ocr_image(
+            "p",
+            "data:image/png;base64,AAAA",
+            64,
+            None,
+            dry_multiplier,
+            dry_base,
+        )
+        .expect("ocr");
+        let body = rx.recv().expect("stub recorded body");
+        serde_json::from_slice(&body).expect("body is json")
+    }
+
+    let with = run_once(Some(0.8), Some(2.0));
+    assert_eq!(with["dry_multiplier"], json!(0.8f32));
+    assert_eq!(with["dry_allowed_length"], json!(4));
+    assert_eq!(with["dry_base"], json!(2.0f32));
+
+    let without = run_once(None, None);
+    assert!(
+        without.get("dry_multiplier").is_none() && without.get("dry_allowed_length").is_none(),
+        "DRY fields must be absent when unset"
+    );
+
+    // Critical gating case, exercised end-to-end through the stub HTTP server:
+    // dry_base supplied but dry_multiplier absent must not reach the wire.
+    let base_only = run_once(None, Some(2.0));
+    assert!(
+        base_only.get("dry_base").is_none(),
+        "dry_base must be absent when dry_multiplier is None"
     );
 }
 

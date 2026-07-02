@@ -42,6 +42,8 @@ impl ImageOcr for RemoteEndpoint {
         data_uri: &str,
         max_tokens: u32,
         repeat_penalty: Option<f32>,
+        dry_multiplier: Option<f32>,
+        dry_base: Option<f32>,
     ) -> Res<String> {
         ocr_via(
             self.base_url.trim_end_matches('/'),
@@ -51,6 +53,8 @@ impl ImageOcr for RemoteEndpoint {
             data_uri,
             max_tokens,
             repeat_penalty,
+            dry_multiplier,
+            dry_base,
         )
     }
 
@@ -60,6 +64,8 @@ impl ImageOcr for RemoteEndpoint {
         data_uri: &str,
         max_tokens: u32,
         repeat_penalty: Option<f32>,
+        dry_multiplier: Option<f32>,
+        dry_base: Option<f32>,
         on_token: &mut dyn FnMut(&str) -> bool,
         should_cancel: &dyn Fn() -> bool,
     ) -> Res<String> {
@@ -71,6 +77,8 @@ impl ImageOcr for RemoteEndpoint {
             data_uri,
             max_tokens,
             repeat_penalty,
+            dry_multiplier,
+            dry_base,
             on_token,
             should_cancel,
         )

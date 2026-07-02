@@ -8,11 +8,103 @@ fn ocroptions_default_matches_cli() {
     assert_eq!(o.quant, "Q8_0");
     assert_eq!(o.max_tokens, 4096);
     assert_eq!(o.dpi, 144);
-    assert_eq!(o.prompt, "<|grounding|>Convert the document to markdown.");
+    assert_eq!(o.prompt, "document parsing.");
     assert_eq!(o.port, 0);
     assert!(o.model_dir.is_none());
     assert!(!o.keep_images);
     assert!(o.pages.is_none());
+}
+
+#[test]
+fn ocr_options_validate_dry_multiplier() {
+    let ok = |dm: Option<f32>| {
+        OcrOptions {
+            dry_multiplier: dm,
+            ..OcrOptions::default()
+        }
+        .validate()
+        .is_ok()
+    };
+    // 0.0 is a real value (DRY's own "off"), unlike repeat_penalty where <=0 is
+    // degenerate; None and positive values are fine.
+    assert!(ok(None));
+    assert!(ok(Some(0.0)));
+    assert!(ok(Some(0.8)));
+    assert!(!ok(Some(-0.1)));
+    assert!(!ok(Some(f32::NAN)));
+    assert!(!ok(Some(f32::INFINITY)));
+}
+
+#[test]
+fn ocr_options_validate_dry_base() {
+    let ok = |db: Option<f32>| {
+        OcrOptions {
+            dry_base: db,
+            ..OcrOptions::default()
+        }
+        .validate()
+        .is_ok()
+    };
+    // Unlike dry_multiplier, 0.0 has no "off" meaning for a DRY base: the
+    // exponential growth formula requires a positive base.
+    assert!(ok(None));
+    assert!(ok(Some(1.75)));
+    assert!(!ok(Some(0.0)));
+    assert!(!ok(Some(-1.0)));
+    assert!(!ok(Some(f32::NAN)));
+    assert!(!ok(Some(f32::INFINITY)));
+}
+
+/// Port of upstream DeepSeek-OCR's grounding cleanup: `label [x, y, x, y]`
+/// prefixes go, `title` becomes a heading, annotation-only lines drop, and
+/// ordinary markdown (links, small bracketed lists, >3-digit numbers) is
+/// untouched. Uses the exact shape from the reported bug.
+#[test]
+fn strip_layout_annotations_cleans_grounded_output() {
+    let raw = "title [168, 152, 838, 212]CLAUDE CODE\n\
+               text [172, 218, 834, 248]The Definitive Guide to Agentic Development\n\
+               image [138, 346, 868, 835]\n\
+               footer [387, 875, 612, 893]Written by Claude Code";
+    assert_eq!(
+        strip_layout_annotations(raw),
+        "# CLAUDE CODE\n\
+         The Definitive Guide to Agentic Development\n\
+         Written by Claude Code"
+    );
+
+    // Leaked special tokens (llama-server normally suppresses them) are removed
+    // before the prefix match, so the tagged form cleans the same way.
+    assert_eq!(
+        strip_layout_annotations("<|det|>text [1, 2, 3, 4]<|/det|>Hi"),
+        "Hi"
+    );
+
+    // Non-annotations pass through byte-for-byte.
+    for line in [
+        "see [1, 2] and [3, 4]",       // not 4 ints in one group
+        "[link](https://example.com)", // no label
+        "Total [10, 20, 3000, 4]x",    // 3000 exceeds the 0-999 coordinate space
+        "| a [1] | b |",               // table cell
+        "# CLAUDE CODE",               // already markdown
+        "",                            // blank line preserved
+    ] {
+        assert_eq!(strip_layout_annotations(line), line, "mangled: {line:?}");
+    }
+}
+
+/// The streaming stripper must survive an annotation prefix split across SSE
+/// chunks, emit complete lines as they close, and hand back the residual tail.
+#[test]
+fn annotation_stripper_buffers_fragmented_chunks() {
+    let mut s = AnnotationStripper::new();
+    assert_eq!(s.push("tit"), "");
+    assert_eq!(s.push("le [1, 2, 3, 4]CLA"), "");
+    assert_eq!(s.push("UDE\ntext [5, 6, 7, 8]hi"), "# CLAUDE\n");
+    assert_eq!(s.finish(), "hi");
+    // A trailing annotation-only line strips to nothing.
+    let mut s = AnnotationStripper::new();
+    assert_eq!(s.push("body\nimage [9, 8, 7, 6]"), "body\n");
+    assert_eq!(s.finish(), "");
 }
 
 #[test]
@@ -328,13 +420,18 @@ fn ocr_state_sequence_ordering() {
         (2, 2),
         "second event should be Page{{page:2, total:2}}"
     );
-    // ocr_pages emits Page plus PartialText (streamed OCR text). The stub
-    // replies with a plain JSON completion (no SSE framing); ocr_via_stream's
-    // non-streaming fallback delivers that text via on_token, so we expect one
-    // PartialText per page carrying the stub's content. No other variant.
+    // ocr_pages emits Rasterizing (pdftoppm poll ticks, best-effort and
+    // possibly zero of them for a fixture this small/fast) plus Page and
+    // PartialText (streamed OCR text). The stub replies with a plain JSON
+    // completion (no SSE framing); ocr_via_stream's non-streaming fallback
+    // delivers that text via on_token, so we expect one PartialText per page
+    // carrying the stub's content. No other variant.
     for ev in &events {
         assert!(
-            matches!(ev, Progress::Page { .. } | Progress::PartialText { .. }),
+            matches!(
+                ev,
+                Progress::Rasterizing { .. } | Progress::Page { .. } | Progress::PartialText { .. }
+            ),
             "ocr_pages emitted unexpected event variant: {ev:?}"
         );
     }
@@ -493,15 +590,91 @@ fn ocr_pages_aborts_when_cancelled() {
     );
 }
 
+/// End-to-end through the real rasterize+request loop: layout-annotated model
+/// output must reach the caller stripped, in the final page text AND in the
+/// concatenated PartialText stream, unless the prompt carries `<|grounding|>`
+/// (the user explicitly asked for boxes).
+#[test]
+fn ocr_pages_strips_layout_annotations() {
+    if std::process::Command::new("pdftoppm")
+        .arg("-v")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+    {
+        eprintln!("skipping ocr_pages_strips_layout_annotations: pdftoppm not on PATH");
+        return;
+    }
+
+    let raw = "title [168, 152, 838, 212]CLAUDE CODE\n\
+               image [138, 346, 868, 835]\n\
+               footer [387, 875, 612, 893]Written by Claude Code";
+    let cleaned = "# CLAUDE CODE\nWritten by Claude Code";
+
+    let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
+    let pdf_path = pdf_dir.path().join("fixture.pdf");
+    std::fs::write(&pdf_path, two_page_pdf_bytes()).expect("write fixture pdf");
+
+    let run = |opts: &OcrOptions| -> (OcrOutput, String) {
+        let stub_port = spawn_stub_ocr_server_with(raw);
+        let srv = server::Server::for_test(stub_port).expect("for_test");
+        let mut partials = String::new();
+        let out = ocr_pages(
+            &srv,
+            std::path::Path::new("pdftoppm"),
+            &pdf_path,
+            opts,
+            &mut |p: Progress| {
+                if let Progress::PartialText { page: 1, chunk } = p {
+                    partials.push_str(&chunk);
+                }
+            },
+            &|| false,
+        )
+        .expect("ocr_pages");
+        (out, partials)
+    };
+
+    // Default prompt ("document parsing.") -> stripped everywhere.
+    let (out, partials) = run(&OcrOptions::default());
+    assert_eq!(out.pages[0].1, cleaned, "final page text must be stripped");
+    assert_eq!(
+        partials.trim_end(),
+        cleaned,
+        "live PartialText stream must be stripped too"
+    );
+    assert!(
+        out.combined.contains(cleaned) && !out.combined.contains("[168, 152"),
+        "combined markdown must be stripped: {:?}",
+        out.combined
+    );
+
+    // Grounding prompt -> raw boxes preserved (stream and final text).
+    let grounding = OcrOptions {
+        prompt: "<|grounding|>Convert the document to markdown.".to_string(),
+        ..OcrOptions::default()
+    };
+    let (out, partials) = run(&grounding);
+    assert_eq!(out.pages[0].1, raw, "grounding keeps raw layout output");
+    assert_eq!(partials, raw, "grounding stream keeps raw layout output");
+}
+
 /// Spawn a throwaway HTTP server that returns a valid OpenAI chat-completion for
 /// any POST and return its port. Used by the ocr_pages tests so they exercise the
 /// real rasterize+request loop without a live llama-server. Drains the request
 /// body before replying so ureq never sees a partial read.
 fn spawn_stub_ocr_server() -> u16 {
+    spawn_stub_ocr_server_with("# page text")
+}
+
+/// Like `spawn_stub_ocr_server` but with a caller-chosen completion text, so a
+/// test can return layout-annotated model output.
+fn spawn_stub_ocr_server_with(content: &str) -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub server");
     let port = listener.local_addr().expect("local_addr").port();
     let resp_body = serde_json::json!({
-        "choices": [{ "message": { "content": "# page text" } }]
+        "choices": [{ "message": { "content": content } }]
     })
     .to_string();
     let http_response = format!(

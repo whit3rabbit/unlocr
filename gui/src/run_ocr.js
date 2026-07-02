@@ -37,7 +37,6 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
     ui.reset();
     ui.setRunning(true);
     ui.showProgress(true);
-    ui.setIndeterminate(true);
     ui.setStatus(tr("run.starting"));
   }
   if (mdPane) mdPane.clear();
@@ -98,6 +97,8 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
       prompt: opts.prompt,
       keepImages: opts.keepImages,
       repeatPenalty: opts.repeatPenalty,
+      dryMultiplier: opts.dryMultiplier,
+      dryBase: opts.dryBase,
       firstPage: opts.firstPage,
       lastPage: opts.lastPage,
       // single/pages/both; resolved by the backend's parse_output_mode.
@@ -136,10 +137,9 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
     }
 
     // Only declare success once the result is actually in hand: gate the "done" UI
-    // on the read outcome so a read failure does not flash 100%/"done" then "failed".
+    // on the read outcome so a read failure does not flash "done" then "failed".
     if (ui && !readError) {
       ui.setRunning(false);
-      ui.setFill(100);
       ui.setStatus(tr("run.doneStatus"));
     }
 

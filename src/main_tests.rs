@@ -84,6 +84,11 @@ fn quality_quant_mapping() {
 
 #[test]
 fn task_prompt_mapping() {
+    assert_eq!(Task::Markdown.prompt(), "document parsing.");
+    assert_eq!(
+        Task::Grounding.prompt(),
+        "<|grounding|>Convert the document to markdown."
+    );
     assert_eq!(Task::Free.prompt(), "Free OCR.");
     assert_eq!(Task::Figure.prompt(), "Parse the figure.");
     // CLI parity: the default task's prompt must equal the no-flags default so

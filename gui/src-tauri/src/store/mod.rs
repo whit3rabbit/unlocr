@@ -86,12 +86,6 @@ pub fn remove_job(id: &str) -> Result<Option<String>, String> {
     crate::db::with_db(|c| db::delete(c, id))
 }
 
-/// Clear every job. Returns the non-empty `output_path`s that were recorded so the
-/// caller can optionally delete those files (the "remove all and delete" variant).
-pub fn clear_jobs() -> Result<Vec<String>, String> {
-    crate::db::with_db(db::clear)
-}
-
 /// Read one job's `output_path` without removing the record. Lets `delete_job`
 /// delete the file first, then the record (so a delete failure keeps the record).
 pub fn peek_job_output(id: &str) -> Result<Option<String>, String> {
@@ -102,6 +96,20 @@ pub fn peek_job_output(id: &str) -> Result<Option<String>, String> {
 /// read-allowlist cache and the file-delete-first `clear_jobs` flow.
 pub fn peek_job_outputs() -> Result<Vec<String>, String> {
     crate::db::with_db(db::output_paths)
+}
+
+/// Read the `(id, output_path)` pairs for the given ids (non-empty paths only)
+/// without removing anything. Lets the multi-select `delete_jobs` command delete
+/// files per-id and keep only the failed-file records, mirroring `peek_job_output`
+/// (one) and `peek_job_outputs` (all).
+pub fn peek_job_outputs_for(ids: &[String]) -> Result<Vec<(String, String)>, String> {
+    crate::db::with_db(|c| db::output_paths_for(c, ids))
+}
+
+/// Remove several jobs by id in one statement. The caller has already (optionally)
+/// deleted their output files via `peek_job_outputs_for` + `delete_output_file`.
+pub fn remove_jobs(ids: &[String]) -> Result<(), String> {
+    crate::db::with_db(|c| db::delete_many(c, ids))
 }
 
 #[cfg(test)]
