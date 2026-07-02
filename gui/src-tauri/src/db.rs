@@ -64,7 +64,20 @@ CREATE TABLE IF NOT EXISTS settings (
     default_dpi         INTEGER NOT NULL,
     default_max_tokens  INTEGER NOT NULL,
     default_prompt      TEXT    NOT NULL,
-    idle_unload_minutes INTEGER NOT NULL DEFAULT 15
+    idle_unload_minutes INTEGER NOT NULL DEFAULT 15,
+    engine_preset       TEXT    NOT NULL DEFAULT 'llamacpp',
+    image_max_tokens    INTEGER,
+    chat_template       TEXT    NOT NULL DEFAULT '',
+    repeat_penalty      REAL,
+    dry_multiplier      REAL,
+    dry_base            REAL,
+    keep_images         INTEGER NOT NULL DEFAULT 0 CHECK(keep_images IN (0,1)),
+    pages_mode          TEXT    NOT NULL DEFAULT 'all',
+    page_from           INTEGER,
+    page_to             INTEGER,
+    model_file          TEXT    NOT NULL DEFAULT '',
+    mmproj_file         TEXT    NOT NULL DEFAULT '',
+    output_mode         TEXT    NOT NULL DEFAULT 'single'
 );
 
 CREATE TABLE IF NOT EXISTS notifications (
@@ -102,7 +115,14 @@ pub(crate) fn db_path() -> Result<PathBuf, String> {
 
 /// Apply the schema + connection PRAGMAs to an already-open connection. Shared by
 /// the file connection (`open_and_configure`) and in-memory test connections.
-/// `user_version` pins the schema at 1; bump + migrate here when the schema grows.
+/// `user_version` pins the schema at 2; bump + migrate here when the schema grows.
+///
+/// Two distinct branches, not a `v < 2` catch-all: `SCHEMA_SQL`'s `CREATE TABLE`
+/// already has the full v2 `settings` shape, so a fresh DB (`v == 0`) must NOT
+/// also run the `ALTER TABLE ADD COLUMN` batch below (it would fail with
+/// "duplicate column"). Only a pre-existing v1 DB (`v == 1`) needs the additive
+/// migration; `ALTER TABLE ADD COLUMN` never rewrites existing column data, so
+/// every pre-migration field survives untouched.
 pub(crate) fn init_conn(conn: &Connection) -> Result<(), String> {
     conn.pragma_update(None, "foreign_keys", true)
         .map_err(|e| format!("could not enable foreign_keys: {e}"))?;
@@ -114,8 +134,38 @@ pub(crate) fn init_conn(conn: &Connection) -> Result<(), String> {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap_or(0);
     if v == 0 {
-        conn.pragma_update(None, "user_version", 1u32)
+        conn.pragma_update(None, "user_version", 2u32)
             .map_err(|e| format!("could not set user_version: {e}"))?;
+    } else if v == 1 {
+        // Wrapped in one transaction: SQLite runs each ALTER TABLE in autocommit
+        // mode otherwise, so a mid-batch failure (disk full, killed process) would
+        // leave some columns added but `user_version` still at 1, and the next
+        // launch's retry would hit "duplicate column name" forever. `commit()` (or
+        // the auto-rollback on an early `?` return via `Drop`) makes the 13 column
+        // adds + the version bump all-or-nothing.
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("could not start settings migration transaction: {e}"))?;
+        tx.execute_batch(
+            "ALTER TABLE settings ADD COLUMN engine_preset    TEXT    NOT NULL DEFAULT 'llamacpp';
+             ALTER TABLE settings ADD COLUMN image_max_tokens INTEGER;
+             ALTER TABLE settings ADD COLUMN chat_template    TEXT    NOT NULL DEFAULT '';
+             ALTER TABLE settings ADD COLUMN repeat_penalty   REAL;
+             ALTER TABLE settings ADD COLUMN dry_multiplier   REAL;
+             ALTER TABLE settings ADD COLUMN dry_base         REAL;
+             ALTER TABLE settings ADD COLUMN keep_images      INTEGER NOT NULL DEFAULT 0 CHECK(keep_images IN (0,1));
+             ALTER TABLE settings ADD COLUMN pages_mode       TEXT    NOT NULL DEFAULT 'all';
+             ALTER TABLE settings ADD COLUMN page_from        INTEGER;
+             ALTER TABLE settings ADD COLUMN page_to          INTEGER;
+             ALTER TABLE settings ADD COLUMN model_file       TEXT    NOT NULL DEFAULT '';
+             ALTER TABLE settings ADD COLUMN mmproj_file      TEXT    NOT NULL DEFAULT '';
+             ALTER TABLE settings ADD COLUMN output_mode      TEXT    NOT NULL DEFAULT 'single';",
+        )
+        .map_err(|e| format!("could not migrate settings to v2: {e}"))?;
+        tx.pragma_update(None, "user_version", 2u32)
+            .map_err(|e| format!("could not set user_version to 2: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("could not commit settings migration: {e}"))?;
     }
     Ok(())
 }
@@ -176,16 +226,16 @@ pub(crate) fn mem_db() -> rusqlite::Connection {
 mod tests {
     use super::*;
 
-    /// A fresh in-memory DB reports `user_version = 1` after `init_conn`, the
+    /// A fresh in-memory DB reports `user_version = 2` after `init_conn`, the
     /// schema-version hook that replaces the old per-JSON `version` envelope.
     #[test]
-    fn schema_sets_user_version_to_1() {
+    fn schema_sets_user_version_to_2() {
         let conn = Connection::open_in_memory().unwrap();
         init_conn(&conn).unwrap();
         let v: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, 2);
     }
 
     /// `init_conn` is idempotent: running it twice on the same DB does not error
@@ -205,5 +255,116 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 3);
+    }
+
+    /// Same as `init_conn_is_idempotent`, but starting from an already-v2 DB: the
+    /// `ALTER TABLE ADD COLUMN` branch (gated on `v == 1`) must not re-run on a
+    /// second call, or it would fail with "duplicate column".
+    #[test]
+    fn init_conn_is_idempotent_on_v2() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_conn(&conn).unwrap();
+        init_conn(&conn).unwrap();
+        let v: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(v, 2);
+    }
+
+    /// A pre-migration v1 DB (the old 10-column `settings` shape) upgrades
+    /// cleanly: `init_conn` adds the 13 new columns, bumps `user_version` to 2,
+    /// and does not touch the pre-existing row's original values.
+    #[test]
+    fn migration_upgrades_v1_db_to_v2() {
+        const V1_SCHEMA: &str = r#"
+            CREATE TABLE settings (
+                id                  INTEGER PRIMARY KEY CHECK(id = 1),
+                mode                TEXT    NOT NULL DEFAULT 'local',
+                remote_base_url     TEXT    NOT NULL DEFAULT 'http://127.0.0.1:8080',
+                remote_api_key      TEXT    NOT NULL DEFAULT '',
+                remote_model        TEXT    NOT NULL DEFAULT '',
+                default_quant       TEXT    NOT NULL,
+                llama_bin           TEXT    NOT NULL DEFAULT '',
+                default_dpi         INTEGER NOT NULL,
+                default_max_tokens  INTEGER NOT NULL,
+                default_prompt      TEXT    NOT NULL,
+                idle_unload_minutes INTEGER NOT NULL DEFAULT 15
+            );
+        "#;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V1_SCHEMA).unwrap();
+        conn.pragma_update(None, "user_version", 1u32).unwrap();
+        conn.execute(
+            "INSERT INTO settings (id, mode, remote_base_url, remote_model, default_quant,
+                                    llama_bin, default_dpi, default_max_tokens, default_prompt)
+             VALUES (1, 'remote', 'http://gpu:8000', 'baidu/Unlimited-OCR', 'Q4_K_M',
+                     '/opt/llama-server', 300, 8192, '<|x|>')",
+            [],
+        )
+        .unwrap();
+
+        init_conn(&conn).unwrap();
+
+        let v: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(v, 2);
+
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(settings)").unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        for c in [
+            "engine_preset",
+            "image_max_tokens",
+            "chat_template",
+            "repeat_penalty",
+            "dry_multiplier",
+            "dry_base",
+            "keep_images",
+            "pages_mode",
+            "page_from",
+            "page_to",
+            "model_file",
+            "mmproj_file",
+            "output_mode",
+        ] {
+            assert!(cols.contains(&c.to_string()), "missing column {c}");
+        }
+
+        // Pre-existing values survive; new columns read their defaults.
+        let (mode, url, quant, preset, keep_images, pages_mode): (
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT mode, remote_base_url, default_quant, engine_preset, keep_images, pages_mode
+                 FROM settings WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(mode, "remote");
+        assert_eq!(url, "http://gpu:8000");
+        assert_eq!(quant, "Q4_K_M");
+        assert_eq!(preset, "llamacpp");
+        assert_eq!(keep_images, 0);
+        assert_eq!(pages_mode, "all");
     }
 }

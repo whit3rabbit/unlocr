@@ -196,6 +196,21 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
   time (disk free is re-probed live). Metric labels + the verdict are localized via
   the `sysreq.label.*` / `sysreq.verdict.*` locale keys; the per-metric recommendation
   HINTS still come from the backend as English (localizing them needs a Rust change).
+- Settings persistence has 3 writers sharing one singleton DB row (Settings pane
+  Save, Quick Settings popup, Workspace auto-save `wireAutoSaveEngineOptions`).
+  All 3 MUST go through `patchSettings()` (settings.js), which refetches the row
+  fresh before spreading overrides -- never cache a "baseline" row across saves
+  (a stale closure-cached baseline silently reverted other surfaces' saves).
+  Never call `applySettingsToControls` (full-restore) after a narrow/partial
+  save -- it force-writes every Workspace field from the DB and clobbers live
+  uncommitted edits elsewhere; sync only the fields that save actually owns.
+  Add a new Advanced-panel knob to `SYNCED_FIELDS` in settings.js (single list
+  driving both restore and the auto-save trigger ids), not two hand-synced lists.
+- `db.rs` schema migrations: wrap multi-statement `ALTER TABLE` batches in
+  `conn.unchecked_transaction()` (works on `&Connection`, no `&mut` needed).
+  Bare `execute_batch` runs each statement autocommit -- a mid-batch failure
+  leaves partial columns added but `user_version` un-bumped, so the next
+  launch retries and hits "duplicate column name" forever.
 
 ## Eatahorse run log (2026-06-27/28)
 

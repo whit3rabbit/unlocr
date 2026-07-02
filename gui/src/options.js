@@ -21,6 +21,36 @@ export const TASK_PROMPTS = {
 // canonical English on purpose (they are sent to the model, not shown to the user).
 const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
 
+/** Parse a positive integer from a control, falling back when blank/invalid.
+ *  Shared by readRunOptions() and settings.js's auto-save (so both agree on
+ *  what counts as a valid override). */
+export const numOr = (el, fallback) => {
+  const v = parseInt((el && el.value) || "", 10);
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+};
+
+/** Optional float; blank/invalid -> null so the backend omits it (server default). */
+export const floatOrNull = (el) => {
+  const v = parseFloat((el && el.value) || "");
+  return Number.isFinite(v) && v > 0 ? v : null;
+};
+
+/** Same, but 0 is a real value (DRY: an explicit 0 means "off" and must reach
+ *  the backend, or the local-path 1.0 default would override it). */
+export const floatOrNullMin0 = (el) => {
+  const v = parseFloat((el && el.value) || "");
+  return Number.isFinite(v) && v >= 0 ? v : null;
+};
+
+/** Assign `document.getElementById(id).value = v`, but only when both the
+ *  element exists and `v` isn't null/undefined (preserves a legitimate 0/false
+ *  rather than skipping it). Shared by every settings restore/save-feedback
+ *  site (settings.js, quick_settings.js) so the guard can't drift between them. */
+export const setVal = (id, v) => {
+  const el = document.getElementById(id);
+  if (el != null && v != null) el.value = v;
+};
+
 /** Read the engine/options controls (EH-0005 bites 1 + 2) into the run_ocr invoke
  *  payload. Every control defaults to unlocr::OcrOptions::default() in the markup
  *  (quant=Q8_0, dpi=144, max_tokens=4096, keep_images=false), so a user who touches
@@ -44,21 +74,6 @@ export function readRunOptions() {
   const DEFAULT_MAX_TOKENS = 4096;
   // Empty Prompt box -> the selected Task preset (markdown if the select is missing).
   const taskPrompt = TASK_PROMPTS[taskEl && taskEl.value] || TASK_PROMPTS.markdown;
-  const numOr = (el, fallback) => {
-    const v = parseInt((el && el.value) || "", 10);
-    return Number.isFinite(v) && v > 0 ? v : fallback;
-  };
-  // Optional float; blank/invalid -> null so the backend omits it (server default).
-  const floatOrNull = (el) => {
-    const v = parseFloat((el && el.value) || "");
-    return Number.isFinite(v) && v > 0 ? v : null;
-  };
-  // Same, but 0 is a real value (DRY: an explicit 0 means "off" and must reach
-  // the backend, or the local-path 1.0 default would override it).
-  const floatOrNullMin0 = (el) => {
-    const v = parseFloat((el && el.value) || "");
-    return Number.isFinite(v) && v >= 0 ? v : null;
-  };
   const promptOr = (el, fallback) => {
     const v = (el && el.value) || "";
     // trim only newlines/whitespace at the ends; an interior-only edit is real.

@@ -20,8 +20,15 @@ import {
   markCachedQuants,
   refreshModelStatus,
 } from "./model.js";
-import { wireSettings, wireCacheControls, wireDependencies, wireSystemRequirements } from "./settings.js";
+import {
+  wireSettings,
+  wireCacheControls,
+  wireDependencies,
+  wireSystemRequirements,
+  wireAutoSaveEngineOptions,
+} from "./settings.js";
 import { initNotifications } from "./toasts.js";
+import { wireQuickSettingsPopup } from "./quick_settings.js";
 import { wirePageSelection, renderEffectiveSummary } from "./options.js";
 import { preflightOnLoad } from "./ocr-events.js";
 import { parentDirOf, splitPath } from "./paths.js";
@@ -114,11 +121,16 @@ window.addEventListener("DOMContentLoaded", () => {
   attachLoadListeners();
   wireSettings(() => {
     markCachedQuants();
+  }).then(() => {
+    // Wired only after wireSettings' restore has landed, so those initial
+    // field assignments don't spuriously trigger an immediate re-save.
+    wireAutoSaveEngineOptions();
   });
   markCachedQuants();
   wireCacheControls();
   wireSystemRequirements();
   wireDependencies();
+  wireQuickSettingsPopup();
   refreshModelStatus(ui);
   // The backend idle-unload watcher drops the warm model after N idle minutes and
   // emits model://unloaded; refresh the badge + Run gate so the UI reflects it.

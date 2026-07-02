@@ -36,6 +36,7 @@ export function makeLibrary() {
   const selectedCount = document.getElementById("librarySelectedCount");
   const removeSelectedBtn = document.getElementById("libraryRemoveSelected");
   const removeSelectedDeleteBtn = document.getElementById("libraryRemoveSelectedDelete");
+  const clearFailedBtn = document.getElementById("libraryClearFailed");
   // Set by setReviewHooks() once mdPane + rail buttons are available.
   let _mdPane = null;
   let _railButtons = null;
@@ -177,8 +178,31 @@ export function makeLibrary() {
     await loadJobs("library", render);
   }
 
+  /** Remove every failed job from the library/store (record-only -- matches
+   *  "Remove selected", never deletes files). Mirrors board.js's clearDone(). */
+  async function clearFailed() {
+    const failedIds = lastJobs
+      .filter((j) => (j && j.status) === "failed")
+      .map((j) => j && j.id)
+      .filter(Boolean);
+    if (failedIds.length === 0) return;
+    if (!(await confirmDestructive(tr("library.confirmClearFailed", { n: failedIds.length }))))
+      return;
+    try {
+      const t = requireTauri();
+      await t.core.invoke("delete_jobs", { ids: failedIds, deleteFile: false });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[library] delete_jobs (clear failed) failed", err);
+    }
+    load();
+  }
+
   if (refresh) {
     refresh.addEventListener("click", load);
+  }
+  if (clearFailedBtn) {
+    clearFailedBtn.addEventListener("click", clearFailed);
   }
   // Select-all toggles every visible id in/out of the selection, then re-renders
   // so each card's checkbox reflects the bulk change (the per-card checkbox state

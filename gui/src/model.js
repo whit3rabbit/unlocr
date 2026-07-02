@@ -210,6 +210,10 @@ function wireGgufPicker(btnId, spanId, label) {
     // A custom model GGUF skips the download, so the Load label drops the
     // "Download &" prefix; clearing it restores the cached/uncached label.
     updateLoadLabel();
+    // Let settings.js's auto-save persist this pick/clear without a direct
+    // import (settings.js already imports FROM model.js; the reverse would
+    // be circular). A plain DOM event is the decoupling seam.
+    span.dispatchEvent(new CustomEvent("unlocr:gguf-changed", { bubbles: true }));
   };
   setPath(null);
   btn.addEventListener("click", async () => {

@@ -56,6 +56,12 @@
           <svg width="17" height="17" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9.5 3a4 4 0 0 0-4 4v3l-1.5 2.5h11L13.5 10V7a4 4 0 0 0-4-4z"></path><path d="M8 15.5a1.5 1.5 0 0 0 3 0"></path></svg>
           <span class="titlebar__bell-badge" id="notifyBadge" hidden>0</span>
         </button>
+        <!-- gear: opens the Quick Settings popup (#quickSettingsDialog, wired in
+             quick_settings.js). Small subset of the full Settings view (display
+             size + language + run defaults) for a fast in-place tweak. -->
+        <button class="titlebar__bell" id="settingsGearBtn" type="button" title="Settings" aria-haspopup="dialog">
+          <svg width="17" height="17" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="9.5" cy="9.5" r="2.4"></circle><path d="M9.5 2.8v2M9.5 13.7v2M16.2 9.5h-2M4.8 9.5h-2M14.4 4.6l-1.4 1.4M6 13l-1.4 1.4M14.4 14.4L13 13M6 6 4.6 4.6"></path></svg>
+        </button>
       </header>
 
       <!-- notification panel: anchored under the bell; populated from
@@ -316,11 +322,12 @@
                         <option value="deepseek-ocr" data-i18n="opts.chatDeepseekOcr">deepseek-ocr</option>
                       </select>
                     </label>
-                    <!-- Per-run sampling penalty; blank = server default. >1 (e.g.
-                         1.1) helps break the Q4_K_M infinite-loop failure mode. -->
+                    <!-- Per-run sampling penalty; blank = 1.15 on the local backend
+                         (breaks the Q4_K_M infinite-loop failure mode), server default
+                         on remote (vLLM/SGLang, which doesn't exhibit the loop). -->
                     <label class="opts__field">
                       <span class="opts__label" data-i18n="opts.repeatPenalty">Repeat penalty</span>
-                      <input class="opts__num" id="optRepeatPenalty" type="number" min="1" max="2" step="0.05" placeholder="server default" data-i18n-ph="opts.repeatPenaltyPh" />
+                      <input class="opts__num" id="optRepeatPenalty" type="number" min="1" max="2" step="0.05" placeholder="1.15 (local default)" data-i18n-ph="opts.repeatPenaltyPh" />
                     </label>
                     <!-- DRY sampler strength; blank = 1.0 on the local backend, 0 = off.
                          Sequence-repetition penalty, the loop-killer repeat penalty isn't. -->
@@ -423,6 +430,7 @@
                 <span class="library__count-selected" id="librarySelectedCount" hidden></span>
                 <button class="library__refresh" id="libraryRemoveSelected" type="button" title="Remove the selected entries from the library (leaves the .md files on disk)" data-i18n="job.removeSelected" disabled>Remove selected</button>
                 <button class="library__refresh library__refresh--danger" id="libraryRemoveSelectedDelete" type="button" title="Remove the selected entries and delete their .md output files from disk (the source PDFs are never deleted)" data-i18n="job.removeSelectedDelete" disabled>Remove selected + delete</button>
+                <button class="library__refresh library__refresh--danger" id="libraryClearFailed" type="button" title="Remove every failed job from the library" data-i18n="library.clearFailed">Clear failed</button>
               </div>
               <!-- grid of job cards. main.js rebuilds .job-card children here from
                    list_jobs(); aria-live so a screen reader announces a new run.
@@ -743,6 +751,68 @@
       <div class="pdf-info__body" id="pdfInfoBody"></div>
       <form method="dialog" class="engine-dialog__actions">
         <button class="model-btn" value="close" type="submit" data-i18n="action.done">Done</button>
+      </form>
+    </dialog>
+
+    <!-- Quick Settings popup: opened by the titlebar gear (#settingsGearBtn). A
+         small subset of the full Settings view (display size + language + run
+         defaults) for a fast tweak without leaving the current tab. Display size
+         is frontend-only (localStorage, like the locale picker); the defaults
+         read/write the same settings row as the Settings view via get_settings/
+         save_settings. Wired in quick_settings.js. Reuses the engine-dialog look. -->
+    <dialog class="engine-dialog" id="quickSettingsDialog">
+      <form method="dialog" class="engine-dialog__head">
+        <span class="engine-dialog__title" data-i18n="quickSettings.title">Quick settings</span>
+        <button class="run-popup__close" value="close" type="submit" title="Close" aria-label="Close" data-i18n-aria="action.close">&times;</button>
+      </form>
+      <div class="settings__form">
+        <label class="opts__field">
+          <span class="opts__label" data-i18n="quickSettings.displaySize">Display size</span>
+          <select class="opts__select" id="qsZoom">
+            <option value="small" data-i18n="quickSettings.zoomSmall">Small</option>
+            <option value="medium" data-i18n="quickSettings.zoomMedium">Medium</option>
+            <option value="large" data-i18n="quickSettings.zoomLarge">Large</option>
+            <option value="xlarge" data-i18n="quickSettings.zoomXlarge">Extra large</option>
+          </select>
+        </label>
+        <label class="opts__field">
+          <span class="opts__label" data-i18n="settings.language">Language</span>
+          <select class="opts__select" id="qsLocale">
+            <option value="en">English</option>
+            <option value="zh">简体中文</option>
+            <option value="ko">한국어</option>
+            <option value="ja">日本語</option>
+          </select>
+        </label>
+        <div class="panel__head opts__field--full">
+          <span class="panel__label" data-i18n="quickSettings.defaultsHeading">Defaults</span>
+        </div>
+        <label class="opts__field">
+          <span class="opts__label" data-i18n="settings.defaultQuant">Default quant</span>
+          <select class="opts__select" id="qsQuant">
+            <option value="Q8_0">good (Q8_0)</option>
+            <option value="Q4_K_M">less (Q4_K_M)</option>
+            <option value="BF16">best (BF16)</option>
+          </select>
+        </label>
+        <label class="opts__field">
+          <span class="opts__label" data-i18n="settings.defaultDpi">Default DPI</span>
+          <input class="opts__num" id="qsDpi" type="number" min="72" max="600" step="1" value="144" />
+        </label>
+        <label class="opts__field">
+          <span class="opts__label" data-i18n="settings.defaultMaxTokens">Default max tokens</span>
+          <input class="opts__num" id="qsMaxTokens" type="number" min="256" max="32768" step="1" value="4096" />
+        </label>
+        <label class="opts__field opts__field--full">
+          <span class="opts__label" data-i18n="settings.defaultPrompt">Default prompt override (optional)</span>
+          <textarea class="opts__textarea" id="qsPrompt" rows="2" spellcheck="false"
+            placeholder="Empty = use the per-run Task preset. Set a persistent custom prompt here to seed the run box."></textarea>
+        </label>
+      </div>
+      <form method="dialog" class="engine-dialog__actions">
+        <span class="settings__saved" id="qsSaved" data-i18n="settings.saved" hidden>Saved.</span>
+        <button class="model-btn model-btn--ghost" id="qsSave" type="button" data-i18n="settings.save">Save settings</button>
+        <button class="model-btn" value="close" type="submit" data-i18n="action.close">Close</button>
       </form>
     </dialog>
   </body>

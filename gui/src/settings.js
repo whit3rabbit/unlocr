@@ -4,8 +4,8 @@
 // get_cache_info / clear_model_cache commands.
 
 import { requireTauri } from "./tauri.js";
-import { applyPreset, markCachedQuants } from "./model.js";
-import { renderEffectiveSummary } from "./options.js";
+import { applyPreset, markCachedQuants, ENGINE_PRESETS } from "./model.js";
+import { renderEffectiveSummary, numOr, floatOrNull, floatOrNullMin0, setVal } from "./options.js";
 
 // EH-0013 bite 2: i18n hook. Named `tr` -- `t` is the Tauri handle in every wire*
 // fn. Only the original wireSettings/wireCacheControls/wireDependencies strings are
@@ -13,27 +13,93 @@ import { renderEffectiveSummary } from "./options.js";
 // System Requirements feature and are left untouched.
 const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
 
+/** Restore a custom-GGUF picker span (dataset.path + visible basename + tooltip)
+ *  from a saved path. Mirrors model.js's private `setPath`, but does not dispatch
+ *  the `unlocr:gguf-changed` event -- this is a restore, not a user pick/clear,
+ *  and must not immediately re-trigger the auto-save it is itself seeding. */
+function restoreGgufSpan(spanId, path) {
+  const span = document.getElementById(spanId);
+  if (!span || !path) return;
+  span.dataset.path = path;
+  span.textContent = path.split(/[/\\]/).pop();
+  span.title = path;
+}
+
+/** Fetch the current settings row, merge in `buildOverrides(base)`, and persist
+ *  the result. Always refetches `base` fresh (never a cached/stale snapshot) so
+ *  every settings-writing surface (Settings pane, Quick Settings, Workspace
+ *  auto-save) agrees on the current row and none can silently revert a field
+ *  another surface just saved. Returns `{ok: true, settings}` or `{ok: false,
+ *  error}`; the caller decides how to surface a failure. `errLabel` tags the
+ *  console.error so the three call sites stay distinguishable in devtools. */
+export async function patchSettings(t, buildOverrides, errLabel) {
+  let base = {};
+  try {
+    base = (await t.core.invoke("get_settings")) || {};
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`[settings] ${errLabel} refetch failed`, err);
+  }
+  const newSettings = { ...base, ...buildOverrides(base) };
+  try {
+    await t.core.invoke("save_settings", { newSettings });
+    return { ok: true, settings: newSettings };
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`[settings] ${errLabel} save failed`, err);
+    return { ok: false, error: err };
+  }
+}
+
+// Workspace/Settings controls that mirror a Settings field 1:1 via a plain
+// `.value` assignment (numeric/text fields are parsed back out at save time in
+// wireAutoSaveEngineOptions' save(), not here). Single source of truth for both
+// the restore-on-load loop below and AUTO_SAVE_CHANGE_IDS, so a new control only
+// needs one entry instead of two independently-maintained lists.
+const SYNCED_FIELDS = [
+  ["optQuant", "defaultQuant"],
+  ["optDpi", "defaultDpi"],
+  ["optMaxTokens", "defaultMaxTokens"],
+  ["optImageMaxTokens", "imageMaxTokens"],
+  ["optChatTemplate", "chatTemplate"],
+  ["optRepeatPenalty", "repeatPenalty"],
+  ["optDryMultiplier", "dryMultiplier"],
+  ["optDryBase", "dryBase"],
+  ["optOutputMode", "outputMode"],
+  ["optPagesMode", "pagesMode"],
+  ["optPageFrom", "pageFrom"],
+  ["optPageTo", "pageTo"],
+  ["remoteUrl", "remoteBaseUrl"],
+  ["remoteModel", "remoteModel"],
+];
+
 /** Apply persisted settings to the live workspace controls (engine defaults,
  *  provider mode, remote fields) so a user's saved defaults seed each session. */
 export function applySettingsToControls(s) {
   if (!s) return;
-  const setVal = (id, v) => {
-    const el = document.getElementById(id);
-    if (el != null && v != null) el.value = v;
-  };
-  setVal("optQuant", s.defaultQuant);
-  setVal("optDpi", s.defaultDpi);
-  setVal("optMaxTokens", s.defaultMaxTokens);
+  // Settings-pane-only fields (not in SYNCED_FIELDS / AUTO_SAVE_CHANGE_IDS).
   setVal("optPrompt", s.defaultPrompt);
-  setVal("remoteUrl", s.remoteBaseUrl);
   setVal("remoteKey", s.remoteApiKey);
-  setVal("remoteModel", s.remoteModel);
-  // Select the backend preset matching the saved mode. We can't tell which remote
-  // backend was saved (settings only stores mode + URL), so remote -> Custom, which
-  // shows the fields and preserves the #remoteUrl restored by setVal above.
+  SYNCED_FIELDS.forEach(([id, key]) => setVal(id, s[key]));
+  const keepImagesEl = document.getElementById("optKeepImages");
+  if (keepImagesEl && s.keepImages != null) keepImagesEl.checked = !!s.keepImages;
+  // Pages: mode + bounds, then re-run wirePageSelection's visibility apply (it
+  // is already wired by the time this settings-load promise resolves) so the
+  // from/to inputs show/hide correctly for a restored non-"all" mode.
+  document.getElementById("optPagesMode")?.dispatchEvent(new Event("change"));
+  // Custom GGUF paths: <span> dataset stores, not <input>.value.
+  restoreGgufSpan("modelFilePath", s.modelFile);
+  restoreGgufSpan("mmprojFilePath", s.mmprojFile);
+  // Select the exact saved preset (engine_preset), not a lossy mode-based guess:
+  // mode only distinguishes local/remote, but there are 5 presets (llamacpp/gpu/
+  // vllm/sglang/custom), 3 of which are "remote". A pre-migration row has no
+  // enginePreset value (or a stale/corrupt one); fall back to the old
+  // mode-based guess rather than assign a value with no matching <option>
+  // (which HTML resolves to an unselected dropdown).
   const sel = document.getElementById("enginePreset");
   if (sel) {
-    sel.value = (s.mode || "local") === "remote" ? "custom" : "llamacpp";
+    const validPreset = s.enginePreset && Object.prototype.hasOwnProperty.call(ENGINE_PRESETS, s.enginePreset);
+    sel.value = validPreset ? s.enginePreset : ((s.mode || "local") === "remote" ? "custom" : "llamacpp");
     applyPreset(sel.value);
   }
 }
@@ -90,44 +156,136 @@ export async function wireSettings(onSaved) {
         const v = parseInt((get(id) && get(id).value) || "", 10);
         return Number.isFinite(v) && v >= 0 ? v : fallback;
       };
-      const newSettings = {
-        mode: (get(ids.mode) && get(ids.mode).value) || "local",
-        defaultQuant: (get(ids.defaultQuant) && get(ids.defaultQuant).value) || "Q8_0",
-        remoteBaseUrl: (get(ids.remoteBaseUrl) && get(ids.remoteBaseUrl).value) || "",
-        remoteApiKey: (get(ids.remoteApiKey) && get(ids.remoteApiKey).value) || "",
-        remoteModel: (get(ids.remoteModel) && get(ids.remoteModel).value) || "",
-        llamaBin: (get(ids.llamaBin) && get(ids.llamaBin).value) || "",
-        defaultDpi: num(ids.defaultDpi, 144),
-        defaultMaxTokens: num(ids.defaultMaxTokens, 4096),
-        // Optional persistent override; empty = use the per-run Task preset.
-        defaultPrompt: (get(ids.defaultPrompt) && get(ids.defaultPrompt).value) || "",
-        idleUnloadMinutes: numOrZero(ids.idleUnloadMinutes, 15),
-      };
-      try {
-        await t.core.invoke("save_settings", { newSettings });
-        applySettingsToControls(newSettings);
+      // The Settings pane only edits this fixed field set (`ids` above); the
+      // Advanced engine/run-option fields (persisted separately by
+      // wireAutoSaveEngineOptions) live in the Workspace, not here. patchSettings
+      // spreads a freshly-fetched base underneath this override set, so this
+      // Save cannot blow those fields back to their struct defaults.
+      const result = await patchSettings(
+        t,
+        () => ({
+          mode: (get(ids.mode) && get(ids.mode).value) || "local",
+          defaultQuant: (get(ids.defaultQuant) && get(ids.defaultQuant).value) || "Q8_0",
+          remoteBaseUrl: (get(ids.remoteBaseUrl) && get(ids.remoteBaseUrl).value) || "",
+          remoteApiKey: (get(ids.remoteApiKey) && get(ids.remoteApiKey).value) || "",
+          remoteModel: (get(ids.remoteModel) && get(ids.remoteModel).value) || "",
+          llamaBin: (get(ids.llamaBin) && get(ids.llamaBin).value) || "",
+          defaultDpi: num(ids.defaultDpi, 144),
+          defaultMaxTokens: num(ids.defaultMaxTokens, 4096),
+          // Optional persistent override; empty = use the per-run Task preset.
+          defaultPrompt: (get(ids.defaultPrompt) && get(ids.defaultPrompt).value) || "",
+          idleUnloadMinutes: numOrZero(ids.idleUnloadMinutes, 15),
+        }),
+        "settings save"
+      );
+      if (result.ok) {
+        applySettingsToControls(result.settings);
         renderEffectiveSummary();
-        if (typeof onSaved === "function") onSaved(newSettings);
+        if (typeof onSaved === "function") onSaved(result.settings);
         if (saved) {
           saved.hidden = false;
           setTimeout(() => {
             saved.hidden = true;
           }, 1500);
         }
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error("[settings] save failed", err);
-        if (saved) {
-          saved.textContent = tr("settings.saveError", { error: String(err) });
-          saved.hidden = false;
-          setTimeout(() => {
-            saved.hidden = true;
-            saved.textContent = tr("settings.saved");
-          }, 3000);
-        }
+      } else if (saved) {
+        saved.textContent = tr("settings.saveError", { error: String(result.error) });
+        saved.hidden = false;
+        setTimeout(() => {
+          saved.hidden = true;
+          saved.textContent = tr("settings.saved");
+        }, 3000);
       }
     });
   }
+}
+
+// Workspace fields auto-saved on `change` by wireAutoSaveEngineOptions: every
+// SYNCED_FIELDS id plus the two special-cased controls (checkbox + validated
+// select) that applySettingsToControls restores outside the plain setVal loop.
+// Deliberately excludes #remoteKey (see the function doc) -- everything else the
+// Workspace's engine bar + Advanced panel exposes.
+const AUTO_SAVE_CHANGE_IDS = [...SYNCED_FIELDS.map(([id]) => id), "optKeepImages", "enginePreset"];
+
+/** Auto-save the Workspace's engine/run-option knobs (quant, DPI, max tokens,
+ *  Advanced panel, pages, output mode, engine preset, remote URL/model, custom
+ *  GGUF paths) on every `change`, so closing the app without ever opening the
+ *  Settings pane still keeps the last values used. The remote API key
+ *  (#remoteKey) is deliberately excluded: it already has working, tested save
+ *  semantics through the Settings pane's manual Save button (masked-value +
+ *  OS-keyring logic in settings.rs); auto-saving a live-typing password field
+ *  risks writing an intermediate/masked value into the keyring by mistake.
+ *
+ *  Each `save()` call re-fetches the current row via `patchSettings` rather than
+ *  trusting a cached baseline: an earlier version cached the row once at
+ *  wire-time and only ever refreshed it from its OWN saves, so a save from the
+ *  Settings pane or Quick Settings went unnoticed and a later Workspace edit
+ *  would silently revert it. Fields this function does not own (remoteApiKey,
+ *  llamaBin, defaultPrompt, idleUnloadMinutes -- all Settings-pane-only) ride
+ *  through unchanged via that fresh base.
+ *
+ *  Call once, after wireSettings() has finished restoring the controls, so
+ *  those initial value assignments don't spuriously fire these listeners as if
+ *  the user had just edited every field. Fail-soft outside the webview. */
+export function wireAutoSaveEngineOptions() {
+  let t;
+  try {
+    t = requireTauri();
+  } catch (err) {
+    return;
+  }
+
+  const get = (id) => document.getElementById(id);
+  const pickedGguf = (spanId) => {
+    const el = get(spanId);
+    const p = el && el.dataset ? el.dataset.path : "";
+    return p && p.trim() ? p : "";
+  };
+
+  async function save() {
+    await patchSettings(
+      t,
+      (base) => {
+        const presetEl = get("enginePreset");
+        const preset = (presetEl && presetEl.value) || "llamacpp";
+        const mode = (ENGINE_PRESETS[preset] || ENGINE_PRESETS.llamacpp).mode;
+        return {
+          mode,
+          enginePreset: preset,
+          defaultQuant: (get("optQuant") && get("optQuant").value) || base.defaultQuant,
+          defaultDpi: numOr(get("optDpi"), base.defaultDpi),
+          defaultMaxTokens: numOr(get("optMaxTokens"), base.defaultMaxTokens),
+          remoteBaseUrl: (get("remoteUrl") && get("remoteUrl").value) || base.remoteBaseUrl,
+          remoteModel: (get("remoteModel") && get("remoteModel").value) || "",
+          imageMaxTokens: numOr(get("optImageMaxTokens"), null),
+          chatTemplate: (get("optChatTemplate") && get("optChatTemplate").value) || "",
+          repeatPenalty: floatOrNull(get("optRepeatPenalty")),
+          dryMultiplier: floatOrNullMin0(get("optDryMultiplier")),
+          dryBase: floatOrNull(get("optDryBase")),
+          keepImages: !!(get("optKeepImages") && get("optKeepImages").checked),
+          outputMode: (get("optOutputMode") && get("optOutputMode").value) || "single",
+          pagesMode: (get("optPagesMode") && get("optPagesMode").value) || "all",
+          pageFrom: numOr(get("optPageFrom"), null),
+          pageTo: numOr(get("optPageTo"), null),
+          modelFile: pickedGguf("modelFilePath"),
+          mmprojFile: pickedGguf("mmprojFilePath"),
+        };
+      },
+      "auto-save"
+    );
+  }
+
+  AUTO_SAVE_CHANGE_IDS.forEach((id) => {
+    const el = get(id);
+    if (el) el.addEventListener("change", save);
+  });
+  // Custom-GGUF pickers aren't native <input>s (dialog.open() + span dataset
+  // write); model.js's setPath dispatches this DOM CustomEvent on pick/clear
+  // instead, so the trigger fires once per user action, same as a real change.
+  ["modelFilePath", "mmprojFilePath"].forEach((id) => {
+    const el = get(id);
+    if (el) el.addEventListener("unlocr:gguf-changed", save);
+  });
 }
 
 /** Wire the Settings panel's Model cache section: load the cache path + GGUF

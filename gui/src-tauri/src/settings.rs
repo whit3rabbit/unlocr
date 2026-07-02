@@ -57,6 +57,52 @@ pub struct Settings {
     /// mid-run. Default 15.
     #[serde(default = "default_idle_unload_minutes")]
     pub idle_unload_minutes: u32,
+    /// Which of `model.js`'s `ENGINE_PRESETS` (llamacpp/gpu/vllm/sglang/custom)
+    /// was last selected. Purely a frontend restoration hint: `mode` (above)
+    /// already tells `load_model` local vs remote, but cannot round-trip which
+    /// of the 3 remote presets was picked. Never read by any Rust load path.
+    #[serde(default = "default_engine_preset")]
+    pub engine_preset: String,
+    /// Startup-only DeepSeek-OCR vision-token budget (`--image-max-tokens`).
+    /// `None` = model default (the field left blank).
+    #[serde(default)]
+    pub image_max_tokens: Option<u32>,
+    /// llama-server `--chat-template` override. Empty = model default.
+    #[serde(default)]
+    pub chat_template: String,
+    /// Per-run sampling repeat penalty. `None` = local-default/server-default
+    /// (see `cmd_run/ocr.rs`'s injected 1.15 on the local backend).
+    #[serde(default)]
+    pub repeat_penalty: Option<f64>,
+    /// DRY sampler strength. `None` = local default (1.0); 0 is a real,
+    /// explicit "off" value distinct from unset.
+    #[serde(default)]
+    pub dry_multiplier: Option<f64>,
+    /// DRY sampler growth-rate base. `None` = server default (1.75).
+    #[serde(default)]
+    pub dry_base: Option<f64>,
+    /// Keep rasterized page PNGs after a run (workspace "Keep page images").
+    #[serde(default)]
+    pub keep_images: bool,
+    /// Pages selector mode: "all" | "single" | "range".
+    #[serde(default = "default_pages_mode")]
+    pub pages_mode: String,
+    /// Pages selector lower bound (single/range modes). `None` = unset.
+    #[serde(default)]
+    pub page_from: Option<u32>,
+    /// Pages selector upper bound (range mode only). `None` = unset.
+    #[serde(default)]
+    pub page_to: Option<u32>,
+    /// Custom local GGUF model path override (skips the managed download).
+    /// Empty = no override.
+    #[serde(default)]
+    pub model_file: String,
+    /// Custom local mmproj GGUF path override. Empty = no override.
+    #[serde(default)]
+    pub mmproj_file: String,
+    /// Output mode: "single" | "pages" | "both".
+    #[serde(default = "default_output_mode")]
+    pub output_mode: String,
 }
 
 fn default_mode() -> String {
@@ -86,6 +132,15 @@ fn default_prompt() -> String {
 fn default_idle_unload_minutes() -> u32 {
     15
 }
+fn default_engine_preset() -> String {
+    "llamacpp".to_string()
+}
+fn default_pages_mode() -> String {
+    "all".to_string()
+}
+fn default_output_mode() -> String {
+    "single".to_string()
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -100,6 +155,19 @@ impl Default for Settings {
             default_max_tokens: default_max_tokens(),
             default_prompt: default_prompt(),
             idle_unload_minutes: default_idle_unload_minutes(),
+            engine_preset: default_engine_preset(),
+            image_max_tokens: None,
+            chat_template: String::new(),
+            repeat_penalty: None,
+            dry_multiplier: None,
+            dry_base: None,
+            keep_images: false,
+            pages_mode: default_pages_mode(),
+            page_from: None,
+            page_to: None,
+            model_file: String::new(),
+            mmproj_file: String::new(),
+            output_mode: default_output_mode(),
         }
     }
 }
@@ -116,7 +184,10 @@ fn fetch(conn: &Connection) -> Result<Settings, String> {
     match conn.query_row(
         "SELECT mode, remote_base_url, remote_api_key, remote_model,
                 default_quant, llama_bin, default_dpi, default_max_tokens,
-                default_prompt, idle_unload_minutes
+                default_prompt, idle_unload_minutes,
+                engine_preset, image_max_tokens, chat_template, repeat_penalty,
+                dry_multiplier, dry_base, keep_images, pages_mode, page_from,
+                page_to, model_file, mmproj_file, output_mode
          FROM settings WHERE id = 1",
         [],
         |row| {
@@ -131,6 +202,19 @@ fn fetch(conn: &Connection) -> Result<Settings, String> {
                 default_max_tokens: row.get(7)?,
                 default_prompt: row.get(8)?,
                 idle_unload_minutes: row.get(9)?,
+                engine_preset: row.get(10)?,
+                image_max_tokens: row.get(11)?,
+                chat_template: row.get(12)?,
+                repeat_penalty: row.get(13)?,
+                dry_multiplier: row.get(14)?,
+                dry_base: row.get(15)?,
+                keep_images: row.get(16)?,
+                pages_mode: row.get(17)?,
+                page_from: row.get(18)?,
+                page_to: row.get(19)?,
+                model_file: row.get(20)?,
+                mmproj_file: row.get(21)?,
+                output_mode: row.get(22)?,
             })
         },
     ) {
@@ -146,8 +230,12 @@ fn persist(conn: &Connection, s: &Settings) -> Result<(), String> {
         "INSERT OR REPLACE INTO settings
            (id, mode, remote_base_url, remote_api_key, remote_model,
             default_quant, llama_bin, default_dpi, default_max_tokens,
-            default_prompt, idle_unload_minutes)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            default_prompt, idle_unload_minutes,
+            engine_preset, image_max_tokens, chat_template, repeat_penalty,
+            dry_multiplier, dry_base, keep_images, pages_mode, page_from,
+            page_to, model_file, mmproj_file, output_mode)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                 ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         rusqlite::params![
             s.mode,
             s.remote_base_url,
@@ -159,6 +247,19 @@ fn persist(conn: &Connection, s: &Settings) -> Result<(), String> {
             s.default_max_tokens,
             s.default_prompt,
             s.idle_unload_minutes,
+            s.engine_preset,
+            s.image_max_tokens,
+            s.chat_template,
+            s.repeat_penalty,
+            s.dry_multiplier,
+            s.dry_base,
+            s.keep_images,
+            s.pages_mode,
+            s.page_from,
+            s.page_to,
+            s.model_file,
+            s.mmproj_file,
+            s.output_mode,
         ],
     )
     .map_err(|e| format!("could not save settings: {e}"))?;
@@ -251,6 +352,12 @@ mod tests {
         assert_eq!(s.default_dpi, OcrOptions::default().dpi);
         assert_eq!(s.idle_unload_minutes, 15);
         assert!(s.remote_api_key.is_empty());
+        assert_eq!(s.engine_preset, "llamacpp");
+        assert_eq!(s.image_max_tokens, None);
+        assert_eq!(s.repeat_penalty, None);
+        assert!(!s.keep_images);
+        assert_eq!(s.pages_mode, "all");
+        assert_eq!(s.output_mode, "single");
     }
 
     /// Write non-defaults, read them back: every field round-trips through the row.
@@ -268,6 +375,19 @@ mod tests {
             default_max_tokens: 8192,
             default_prompt: "<|x|>".into(),
             idle_unload_minutes: 5,
+            engine_preset: "vllm".into(),
+            image_max_tokens: Some(1024),
+            chat_template: "deepseek-ocr".into(),
+            repeat_penalty: Some(1.15),
+            dry_multiplier: Some(1.0),
+            dry_base: Some(1.75),
+            keep_images: true,
+            pages_mode: "range".into(),
+            page_from: Some(5),
+            page_to: Some(9),
+            model_file: "/models/custom.gguf".into(),
+            mmproj_file: "/models/mmproj.gguf".into(),
+            output_mode: "both".into(),
         };
         persist(&conn, &s).unwrap();
         let got = fetch(&conn).unwrap();
@@ -281,6 +401,43 @@ mod tests {
         assert_eq!(got.default_max_tokens, 8192);
         assert_eq!(got.default_prompt, "<|x|>");
         assert_eq!(got.idle_unload_minutes, 5);
+        assert_eq!(got.engine_preset, "vllm");
+        assert_eq!(got.image_max_tokens, Some(1024));
+        assert_eq!(got.chat_template, "deepseek-ocr");
+        assert_eq!(got.repeat_penalty, Some(1.15));
+        assert_eq!(got.dry_multiplier, Some(1.0));
+        assert_eq!(got.dry_base, Some(1.75));
+        assert!(got.keep_images);
+        assert_eq!(got.pages_mode, "range");
+        assert_eq!(got.page_from, Some(5));
+        assert_eq!(got.page_to, Some(9));
+        assert_eq!(got.model_file, "/models/custom.gguf");
+        assert_eq!(got.mmproj_file, "/models/mmproj.gguf");
+        assert_eq!(got.output_mode, "both");
+    }
+
+    /// Nullable numeric fields round-trip both a `Some(x)` and a `None` case (the
+    /// established "blank means unset" semantic from options.js).
+    #[test]
+    fn nullable_numeric_fields_roundtrip_some_and_none() {
+        let conn = mem_db();
+        let s = Settings {
+            image_max_tokens: Some(2048),
+            repeat_penalty: Some(1.2),
+            dry_multiplier: Some(0.0), // explicit "off", distinct from unset
+            dry_base: None,
+            page_from: Some(3),
+            page_to: None,
+            ..Settings::default()
+        };
+        persist(&conn, &s).unwrap();
+        let got = fetch(&conn).unwrap();
+        assert_eq!(got.image_max_tokens, Some(2048));
+        assert_eq!(got.repeat_penalty, Some(1.2));
+        assert_eq!(got.dry_multiplier, Some(0.0));
+        assert_eq!(got.dry_base, None);
+        assert_eq!(got.page_from, Some(3));
+        assert_eq!(got.page_to, None);
     }
 
     /// The settings table is a singleton: a second save replaces, never adds a row.
@@ -309,6 +466,12 @@ mod tests {
         assert!(json.contains("\"remoteBaseUrl\""));
         assert!(json.contains("\"defaultMaxTokens\""));
         assert!(json.contains("\"idleUnloadMinutes\""));
+        assert!(json.contains("\"enginePreset\""));
+        assert!(json.contains("\"imageMaxTokens\""));
+        assert!(json.contains("\"repeatPenalty\""));
+        assert!(json.contains("\"dryMultiplier\""));
+        assert!(json.contains("\"pagesMode\""));
+        assert!(json.contains("\"outputMode\""));
         assert!(!json.contains("\"remote_base_url\""));
     }
 }
