@@ -1,3 +1,4 @@
+use crate::inputs::{is_image, is_pdf, sniff_image_mime};
 use crate::model;
 use crate::options::{OcrOptions, OcrOutput, Progress};
 use crate::output::{push_page, strip_layout_annotations, AnnotationStripper};
@@ -6,7 +7,7 @@ use crate::preflight;
 use crate::server;
 use crate::Res;
 use base64::Engine;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Drive one PDF end to end and return the assembled markdown, emitting progress
 /// through `on_progress`. This is the canonical, clap-free OCR entry point used
@@ -102,36 +103,108 @@ where
     let tmp = tempfile::tempdir()?;
 
     // With a page range, the first rasterized page is the range's start, not page 1
-    // (also needed below for the OCR loop's page numbering).
+    // (also needed below for the OCR loop's page numbering). Meaningless for a
+    // single-image input (always page 1), but harmless to compute either way.
     let base = opts.pages.map(|(f, _)| f as usize).unwrap_or(1);
 
-    // Total for the Rasterizing progress event: an explicit `--pages a-b` range
-    // already tells us the count; otherwise fall back to a best-effort `pdfinfo`
-    // probe (None if pdfinfo isn't resolvable, in which case the event carries no
-    // denominator).
-    let raster_total = match opts.pages {
-        Some((_, Some(last))) => Some(last as usize - base + 1),
-        Some((first, None)) => pdf::total_pages(pdftoppm, input)
-            // `first` can exceed the real page count (e.g. `--pages 50-` on a
-            // shorter PDF); rasterize_range then renders nothing and the empty-
-            // pages check below errors out. saturating_sub avoids an underflow
-            // panic (debug) / wraparound (release) computing this progress total.
-            .map(|n| (n as usize).saturating_sub(first as usize) + 1),
-        None => pdf::total_pages(pdftoppm, input).map(|n| n as usize),
+    // Two input shapes share the rest of this function: a PDF gets rasterized to
+    // one PNG per page (as before); a single recognized image is read+sniffed once
+    // and treated as a synthetic one-page "PDF" so every line below (progress,
+    // streaming, annotation stripping, push_page/pages_text, keep_images) runs
+    // unforked. `page_mime` is computed once here so the per-page loop's data_uri
+    // no longer hardcodes "image/png" for a real image input.
+    let (pages, page_mime): (Vec<PathBuf>, &'static str) = if is_pdf(input) {
+        // Total for the Rasterizing progress event: an explicit `--pages a-b` range
+        // already tells us the count; otherwise fall back to a best-effort `pdfinfo`
+        // probe (None if pdfinfo isn't resolvable, in which case the event carries no
+        // denominator).
+        let raster_total = match opts.pages {
+            Some((_, Some(last))) => Some(last as usize - base + 1),
+            Some((first, None)) => pdf::total_pages(pdftoppm, input)
+                // `first` can exceed the real page count (e.g. `--pages 50-` on a
+                // shorter PDF); rasterize_range then renders nothing and the empty-
+                // pages check below errors out. saturating_sub avoids an underflow
+                // panic (debug) / wraparound (release) computing this progress total.
+                .map(|n| (n as usize).saturating_sub(first as usize) + 1),
+            None => pdf::total_pages(pdftoppm, input).map(|n| n as usize),
+        };
+        let pages = pdf::rasterize_range(
+            pdftoppm,
+            input,
+            tmp.path(),
+            opts.dpi,
+            opts.pages,
+            Some(&mut |count: usize| {
+                on_progress(Progress::Rasterizing {
+                    page: base + count - 1,
+                    total: raster_total,
+                });
+            }),
+        )?;
+        (pages, "image/png") // pdftoppm always emits PNG
+    } else if is_image(input) {
+        // No pdftoppm, no dpi/pages meaning (documented no-ops, see options.rs).
+        // Read once, sniff once, and reject BEFORE this reaches the model with a
+        // wrong MIME claim: don't trust the extension, verify content.
+        let bytes = std::fs::read(input)?;
+        let claimed_ext = input
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let sniffed = sniff_image_mime(&bytes).ok_or_else(|| {
+            format!(
+                "{}: not a recognized image (no PNG/JPEG/TIFF/WEBP/BMP magic bytes found); \
+                 refusing to OCR a file whose content does not match an image format",
+                input.display()
+            )
+        })?;
+        let ext_matches = match claimed_ext.as_str() {
+            "png" => sniffed == "image/png",
+            "jpg" | "jpeg" => sniffed == "image/jpeg",
+            "tif" | "tiff" => sniffed == "image/tiff",
+            "webp" => sniffed == "image/webp",
+            "bmp" => sniffed == "image/bmp",
+            _ => false,
+        };
+        if !ext_matches {
+            return Err(format!(
+                "{}: file extension \".{claimed_ext}\" does not match its content (sniffed as \
+                 {sniffed}); refusing to guess",
+                input.display()
+            )
+            .into());
+        }
+        // One Rasterizing tick for UI consistency with the PDF path.
+        on_progress(Progress::Rasterizing {
+            page: base,
+            total: Some(1),
+        });
+        // keep_images preserves `tmp` via tmp.keep() below; unlike the PDF path
+        // (which renders pages into `tmp` via pdftoppm), a single-image input
+        // never otherwise writes into `tmp`, so tmp.keep() would preserve an
+        // empty directory. Copy the already-read bytes in when keep_images is
+        // set so the kept directory actually contains the image.
+        let page_path = if opts.keep_images {
+            let dest = tmp.path().join(
+                input
+                    .file_name()
+                    .ok_or_else(|| format!("{}: no file name", input.display()))?,
+            );
+            std::fs::write(&dest, &bytes)?;
+            dest
+        } else {
+            input.to_path_buf()
+        };
+        (vec![page_path], sniffed)
+    } else {
+        return Err(format!(
+            "{}: not a PDF or a recognized image ({})",
+            input.display(),
+            crate::inputs::IMAGE_EXTENSIONS.join("/")
+        )
+        .into());
     };
-    let pages = pdf::rasterize_range(
-        pdftoppm,
-        input,
-        tmp.path(),
-        opts.dpi,
-        opts.pages,
-        Some(&mut |count: usize| {
-            on_progress(Progress::Rasterizing {
-                page: base + count - 1,
-                total: raster_total,
-            });
-        }),
-    )?;
     // rasterize_range returns an empty Vec (not an Err) when pdftoppm runs clean
     // but emits nothing. For an OCR run that means nothing was rendered (empty
     // PDF or a page range past EOF): error out rather than write a silent empty
@@ -169,7 +242,7 @@ where
 
         let bytes = std::fs::read(page)?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let data_uri = format!("data:image/png;base64,{b64}");
+        let data_uri = format!("data:{page_mime};base64,{b64}");
         // Use streaming so the GUI receives PartialText events as tokens arrive.
         // The CLI's on_progress sink ignores PartialText (zero cost), while the
         // Tauri bridge forwards each chunk to the frontend for live appending.

@@ -47,12 +47,12 @@ use cmd_model::{
 };
 use cmd_run::{
     brew_available, brew_install, download_tool, export_markdown, host_os, list_tools, pdf_info,
-    read_text_file, render_page, render_pages, run_ocr, write_text_file,
+    read_text_file, render_page, render_pages, run_ocr, scan_input_paths, write_text_file,
 };
 use cmd_store::{
-    add_notification, clear_all_notifications, clear_notification, delete_job,
-    delete_jobs, get_settings, jobs_store_path, list_jobs, list_notifications,
-    mark_notifications_read, save_settings,
+    add_notification, clear_all_notifications, clear_notification, delete_job, delete_jobs,
+    get_settings, jobs_store_path, list_jobs, list_notifications, mark_notifications_read,
+    save_settings,
 };
 use state::AppState;
 
@@ -207,6 +207,7 @@ pub fn run() {
             render_pages,
             render_page,
             pdf_info,
+            scan_input_paths,
             read_text_file,
             write_text_file,
             export_markdown,

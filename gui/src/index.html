@@ -60,7 +60,7 @@
              quick_settings.js). Small subset of the full Settings view (display
              size + language + run defaults) for a fast in-place tweak. -->
         <button class="titlebar__bell" id="settingsGearBtn" type="button" title="Settings" aria-haspopup="dialog">
-          <svg width="17" height="17" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="9.5" cy="9.5" r="2.4"></circle><path d="M9.5 2.8v2M9.5 13.7v2M16.2 9.5h-2M4.8 9.5h-2M14.4 4.6l-1.4 1.4M6 13l-1.4 1.4M14.4 14.4L13 13M6 6 4.6 4.6"></path></svg>
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"></path><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"></path></svg>
         </button>
       </header>
 
@@ -94,7 +94,7 @@
           </button>
           <div class="rail__spacer"></div>
           <button class="rail__btn" data-route="settings" title="Settings" aria-label="Settings" data-i18n-aria="nav.settings">
-            <svg width="19" height="19" viewBox="0 0 19 19" fill="none" stroke="currentColor" stroke-width="1.6"><line x1="3" y1="5.5" x2="16" y2="5.5"></line><circle cx="7" cy="5.5" r="2" fill="var(--panel)"></circle><line x1="3" y1="13" x2="16" y2="13"></line><circle cx="12" cy="13" r="2" fill="var(--panel)"></circle></svg>
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"></path><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"></path></svg>
           </button>
         </nav>
 
@@ -115,6 +115,13 @@
                 <button class="import-btn" id="importBtn" type="button">
                   <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="7" y1="2.5" x2="7" y2="11.5"></line><line x1="2.5" y1="7" x2="11.5" y2="7"></line></svg>
                   <span data-i18n="workspace.importBtn">Import PDF / image</span>
+                </button>
+                <!-- Opens #inputFolderDialog: pick multiple folders and/or files,
+                     toggle recursion, scan (scan_input_paths) and queue on OK.
+                     Wired in input_folder.js. -->
+                <button class="import-btn" id="importFolderBtn" type="button">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M1.5 3.5h4l1 1.5h6v6.5h-11.5z"></path></svg>
+                  <span data-i18n="workspace.importFolderBtn">Input folder…</span>
                 </button>
                 <!-- Manual path entry. The Import button also opens a native
                      file picker (tauri-plugin-dialog) that seeds this field;
@@ -144,8 +151,10 @@
                   <label class="opts__field opts__field--full">
                     <span class="opts__label" data-i18n="opts.outputFolder">Output folder</span>
                     <span class="opts__pages">
-                      <input class="opts__text" id="outFolder" type="text" placeholder="beside input (default)" data-i18n-ph="opts.outFolderPh" spellcheck="false" />
-                      <button class="import-btn" id="outFolderBtn" type="button" data-i18n="opts.chooseFolder">Choose folder…</button>
+                      <input class="opts__text" id="outFolder" type="text" placeholder="Same as input" data-i18n-ph="opts.outFolderPh" spellcheck="false" />
+                      <button class="import-btn import-btn--icon" id="outFolderBtn" type="button" title="Choose folder…" aria-label="Choose folder…" data-i18n-aria="opts.chooseFolder">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"></path></svg>
+                      </button>
                     </span>
                   </label>
                   <label class="opts__field opts__field--full">
@@ -776,6 +785,15 @@
           </select>
         </label>
         <label class="opts__field">
+          <span class="opts__label" data-i18n="quickSettings.windowSize">Window size</span>
+          <select class="opts__select" id="qsWindowSize">
+            <option value="compact" data-i18n="quickSettings.windowCompact">Compact</option>
+            <option value="default" data-i18n="quickSettings.windowDefault">Default</option>
+            <option value="large" data-i18n="quickSettings.windowLarge">Large</option>
+            <option value="xlarge" data-i18n="quickSettings.windowXlarge">Extra large</option>
+          </select>
+        </label>
+        <label class="opts__field">
           <span class="opts__label" data-i18n="settings.language">Language</span>
           <select class="opts__select" id="qsLocale">
             <option value="en">English</option>
@@ -813,6 +831,39 @@
         <span class="settings__saved" id="qsSaved" data-i18n="settings.saved" hidden>Saved.</span>
         <button class="model-btn model-btn--ghost" id="qsSave" type="button" data-i18n="settings.save">Save settings</button>
         <button class="model-btn" value="close" type="submit" data-i18n="action.close">Close</button>
+      </form>
+    </dialog>
+
+    <!-- Input folder: stage multiple folders and/or individual files, toggle
+         recursion, then scan (scan_input_paths, server-side, depth-capped) and
+         append the resolved list to the queue on OK. Wired in input_folder.js.
+         Reuses the engine-dialog look; the staged list reuses the file rail's
+         .file-row/.file-row__remove classes (file_rail.js). -->
+    <dialog class="engine-dialog" id="inputFolderDialog">
+      <form method="dialog" class="engine-dialog__head">
+        <span class="engine-dialog__title" data-i18n="inputFolder.dialogTitle">Input folder</span>
+        <button class="run-popup__close" value="close" type="submit" title="Close" aria-label="Close" data-i18n-aria="action.close">&times;</button>
+      </form>
+      <div class="settings__form">
+        <div class="opts__field--full" style="display:flex; gap:8px;">
+          <button class="model-btn model-btn--ghost" id="ifAddFolderBtn" type="button" data-i18n="inputFolder.addFolder">Add folder…</button>
+          <button class="model-btn model-btn--ghost" id="ifAddFilesBtn" type="button" data-i18n="inputFolder.addFiles">Add files…</button>
+        </div>
+        <label class="opts__field opts__field--full" style="flex-direction:row; align-items:center; gap:8px;">
+          <input type="checkbox" id="ifRecursive" />
+          <span data-i18n="inputFolder.recursive">Include subfolders</span>
+        </label>
+        <div class="panel__head opts__field--full">
+          <span class="panel__label" data-i18n="inputFolder.stagedHeading">Selected</span>
+        </div>
+        <div class="file-list opts__field--full" id="ifStagedList" aria-live="polite">
+          <p class="placeholder" id="ifStagedEmpty" data-i18n="inputFolder.stagedEmpty">Nothing selected yet.</p>
+        </div>
+      </div>
+      <form method="dialog" class="engine-dialog__actions">
+        <span class="settings__saved" id="ifScanning" data-i18n="inputFolder.scanning" hidden>Scanning…</span>
+        <button class="model-btn model-btn--ghost" value="cancel" type="submit" data-i18n="action.cancel">Cancel</button>
+        <button class="model-btn" id="ifOkBtn" type="button" data-i18n="action.ok">OK</button>
       </form>
     </dialog>
   </body>

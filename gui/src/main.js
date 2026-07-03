@@ -29,9 +29,11 @@ import {
 } from "./settings.js";
 import { initNotifications } from "./toasts.js";
 import { wireQuickSettingsPopup } from "./quick_settings.js";
+import { wireInputFolderDialog } from "./input_folder.js";
 import { wirePageSelection, renderEffectiveSummary } from "./options.js";
 import { preflightOnLoad } from "./ocr-events.js";
 import { parentDirOf, splitPath } from "./paths.js";
+import { FILE_DIALOG_FILTERS } from "./formats.js";
 
 // Derive the default output filename for a single PDF: <stem>.md (mirrors the
 // backend's blank-filename default). Strips the last extension off the basename.
@@ -98,6 +100,7 @@ window.addEventListener("DOMContentLoaded", () => {
   // load; the listeners live for the app lifetime and are scoped to the Library
   // view inside the handler. Fail-soft outside the webview (plain browser).
   wireLibraryDrop(ui, mdPane, unlistensRef);
+  wireInputFolderDialog(queue);
 
   // Backend-owned job lifecycle: run_ocr writes a `running` row when a file starts
   // and flips it to done/failed when it ends, emitting `jobs://changed` each time.
@@ -119,14 +122,16 @@ window.addEventListener("DOMContentLoaded", () => {
   wireEngineDialog();
   wireModelBar(ui);
   attachLoadListeners();
-  wireSettings(() => {
-    markCachedQuants();
-  }).then(() => {
+  // markCachedQuants() doesn't depend on the settings load (list_local_models
+  // is independent of the settings row), so it runs once here rather than
+  // also inside wireSettings' onSaved -- that ran unconditionally right after
+  // this call anyway, making the onSaved copy a redundant second IPC round trip.
+  markCachedQuants();
+  wireSettings().then(() => {
     // Wired only after wireSettings' restore has landed, so those initial
     // field assignments don't spuriously trigger an immediate re-save.
     wireAutoSaveEngineOptions();
   });
-  markCachedQuants();
   wireCacheControls();
   wireSystemRequirements();
   wireDependencies();
@@ -291,7 +296,7 @@ window.addEventListener("DOMContentLoaded", () => {
           const selected = await dialog.open({
             multiple: true,
             directory: false,
-            filters: [{ name: "PDF", extensions: ["pdf"] }],
+            filters: FILE_DIALOG_FILTERS,
           });
           // selected is null (cancelled), string (single), or string[] (multiple).
           if (!selected) return;

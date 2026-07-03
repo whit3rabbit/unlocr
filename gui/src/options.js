@@ -126,28 +126,37 @@ export function readPageSelection() {
   return { firstPage: null, lastPage: null };
 }
 
-/** Show/hide the page-number inputs based on the Pages mode and keep the second
- *  input (the range "to") visible only for Range. Called once at startup and on
- *  every mode change so the form matches the selected mode. */
-export function wirePageSelection() {
+/** Show/hide the page-number inputs to match #optPagesMode's current value, and
+ *  keep the second input (the range "to") visible only for Range. Exported (not
+ *  just an inline wirePageSelection closure) so a caller that needs to re-run
+ *  this after restoring settings (settings.js's applySettingsToControls) can
+ *  call it directly instead of dispatching a synthetic `change` event on
+ *  #optPagesMode -- that event is also observed by wireAutoSaveEngineOptions,
+ *  and a synthetic dispatch would spuriously re-trigger an auto-save. */
+export function applyPageSelectionVisibility() {
   const modeEl = document.getElementById("optPagesMode");
   const wrap = document.getElementById("optPagesInputs");
   const toEl = document.getElementById("optPageTo");
   const label = document.getElementById("optPagesInputsLabel");
   const fromEl = document.getElementById("optPageFrom");
   if (!modeEl || !wrap) return;
-  const apply = () => {
-    const mode = modeEl.value;
-    wrap.hidden = mode === "all";
-    if (toEl) toEl.hidden = mode !== "range";
-    if (label) label.textContent = mode === "range" ? tr("opts.pages") : tr("opts.pageSingular");
-    if (fromEl) fromEl.placeholder = mode === "range" ? tr("opts.from") : tr("opts.pagePh");
-    renderEffectiveSummary();
-  };
+  const mode = modeEl.value;
+  wrap.hidden = mode === "all";
+  if (toEl) toEl.hidden = mode !== "range";
+  if (label) label.textContent = mode === "range" ? tr("opts.pages") : tr("opts.pageSingular");
+  if (fromEl) fromEl.placeholder = mode === "range" ? tr("opts.from") : tr("opts.pagePh");
+  renderEffectiveSummary();
+}
+
+/** Wire the Pages mode select so a user's mode change re-runs the visibility
+ *  toggle above. Called once at startup. */
+export function wirePageSelection() {
+  const modeEl = document.getElementById("optPagesMode");
+  if (!modeEl) return;
   // Visibility toggle on mode change; the summary is refreshed by the shared
   // #runOpts input/change listeners wired in DOMContentLoaded.
-  modeEl.addEventListener("change", apply);
-  apply();
+  modeEl.addEventListener("change", applyPageSelectionVisibility);
+  applyPageSelectionVisibility();
 }
 
 /** Render the "effective values" summary (EH-0005 bite 2) next to Run so the user

@@ -1,6 +1,5 @@
-import { loadJobs } from "./jobs.js";
-import { renderJobCard, confirmDestructive } from "./job_card.js";
-import { requireTauri } from "./tauri.js";
+import { loadJobs, clearJobsByStatus } from "./jobs.js";
+import { renderJobCard } from "./job_card.js";
 
 // i18n hook, same pattern as library.js. Named `tr` -- `t` is the Tauri handle
 // used by the clearDone Tauri invoke below.
@@ -163,21 +162,13 @@ export function makeBoard() {
    *  record-only: a bulk removal from the board is not something a misclick
    *  should silently do, even if the underlying files survive. */
   async function clearDone() {
-    const doneIds = lastJobs
-      .filter((j) => columnKey(j && j.status) === "done")
-      .map((j) => j && j.id)
-      .filter(Boolean);
-    if (doneIds.length === 0) return;
-    if (!(await confirmDestructive(tr("board.confirmClearDone", { n: doneIds.length }))))
-      return;
-    try {
-      const t = requireTauri();
-      await t.core.invoke("delete_jobs", { ids: doneIds, deleteFile: false });
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error("[board] delete_jobs (clear done) failed", err);
-    }
-    load();
+    await clearJobsByStatus(
+      lastJobs,
+      (status) => columnKey(status) === "done",
+      (n) => tr("board.confirmClearDone", { n }),
+      "board",
+      load
+    );
   }
 
   if (refresh) {

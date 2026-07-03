@@ -10,7 +10,10 @@ pub struct OcrOptions {
     pub quant: String,
     /// Max tokens generated per page (caps runaway generation on dense pages).
     pub max_tokens: u32,
-    /// Rasterization DPI passed to pdftoppm.
+    /// Rasterization DPI passed to pdftoppm. Ignored (documented no-op, not an
+    /// error) when the input is a single recognized image file rather than a
+    /// PDF -- pdftoppm never runs for that input, so there's no rasterization
+    /// to control.
     pub dpi: u32,
     /// OCR prompt sent with every page.
     pub prompt: String,
@@ -51,6 +54,9 @@ pub struct OcrOptions {
     /// renders `-f first` with no `-l` to the last page natively. Maps to pdftoppm
     /// `-f`/`-l`, so a subset rasterizes only those pages (not the whole PDF then
     /// filtered). Caller validates `first >= 1` and `last >= first` when `last` is set.
+    /// For a single image input this is also ignored (documented no-op): an
+    /// image is implicitly page 1, and a batch mixing PDFs and image files
+    /// under one `--pages` flag must not error out on the image entries.
     pub pages: Option<(u32, Option<u32>)>,
 }
 

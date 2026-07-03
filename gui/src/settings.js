@@ -5,7 +5,14 @@
 
 import { requireTauri } from "./tauri.js";
 import { applyPreset, markCachedQuants, ENGINE_PRESETS } from "./model.js";
-import { renderEffectiveSummary, numOr, floatOrNull, floatOrNullMin0, setVal } from "./options.js";
+import {
+  renderEffectiveSummary,
+  applyPageSelectionVisibility,
+  numOr,
+  floatOrNull,
+  floatOrNullMin0,
+  setVal,
+} from "./options.js";
 
 // EH-0013 bite 2: i18n hook. Named `tr` -- `t` is the Tauri handle in every wire*
 // fn. Only the original wireSettings/wireCacheControls/wireDependencies strings are
@@ -25,6 +32,15 @@ function restoreGgufSpan(spanId, path) {
   span.title = path;
 }
 
+// Serializes every patchSettings call (across all 3 writers -- Settings pane,
+// Quick Settings, Workspace auto-save) onto one chain, so a refetch-then-write
+// from one call can never interleave with another's: the refetch-before-write
+// pattern above only prevents a lost update between SEQUENTIAL saves, and two
+// callers racing (e.g. an in-flight auto-save overlapping a Quick Settings
+// Save click) could otherwise both read the same base and one clobber the
+// other's delta on write.
+let saveChain = Promise.resolve();
+
 /** Fetch the current settings row, merge in `buildOverrides(base)`, and persist
  *  the result. Always refetches `base` fresh (never a cached/stale snapshot) so
  *  every settings-writing surface (Settings pane, Quick Settings, Workspace
@@ -32,23 +48,33 @@ function restoreGgufSpan(spanId, path) {
  *  another surface just saved. Returns `{ok: true, settings}` or `{ok: false,
  *  error}`; the caller decides how to surface a failure. `errLabel` tags the
  *  console.error so the three call sites stay distinguishable in devtools. */
-export async function patchSettings(t, buildOverrides, errLabel) {
-  let base = {};
-  try {
-    base = (await t.core.invoke("get_settings")) || {};
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error(`[settings] ${errLabel} refetch failed`, err);
-  }
-  const newSettings = { ...base, ...buildOverrides(base) };
-  try {
-    await t.core.invoke("save_settings", { newSettings });
-    return { ok: true, settings: newSettings };
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error(`[settings] ${errLabel} save failed`, err);
-    return { ok: false, error: err };
-  }
+export function patchSettings(t, buildOverrides, errLabel) {
+  const run = async () => {
+    let base = {};
+    try {
+      base = (await t.core.invoke("get_settings")) || {};
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[settings] ${errLabel} refetch failed`, err);
+    }
+    const newSettings = { ...base, ...buildOverrides(base) };
+    try {
+      await t.core.invoke("save_settings", { newSettings });
+      return { ok: true, settings: newSettings };
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[settings] ${errLabel} save failed`, err);
+      return { ok: false, error: err };
+    }
+  };
+  // Chain onto the shared queue regardless of whether the previous link
+  // succeeded, so one failed save doesn't wedge every later save.
+  const result = saveChain.then(run, run);
+  saveChain = result.then(
+    () => {},
+    () => {}
+  );
+  return result;
 }
 
 // Workspace/Settings controls that mirror a Settings field 1:1 via a plain
@@ -73,6 +99,23 @@ const SYNCED_FIELDS = [
   ["remoteModel", "remoteModel"],
 ];
 
+// The Quick Settings popup's 4 owned run-default fields: settings key, the
+// popup's own dialog-local input id, and the two other surfaces that mirror
+// the same value (Workspace `opt*` control, Settings-pane `set*` control).
+// `numeric` picks numOr() vs a plain `.value` read; `blankFallback` (only set
+// for defaultPrompt) overrides the default "fall back to the previous saved
+// value" behavior for a field where blank is itself a meaningful value (an
+// empty prompt box means "use the selected Task preset", not "keep the old
+// override" -- see options.js's readRunOptions/promptOr). One list drives
+// quick_settings.js's load, save-payload build, and post-save mirror sync,
+// instead of three independently hand-written field blocks that could drift.
+export const QUICK_SETTINGS_FIELDS = [
+  { key: "defaultQuant", qsId: "qsQuant", optId: "optQuant", setId: "setQuant", numeric: false },
+  { key: "defaultDpi", qsId: "qsDpi", optId: "optDpi", setId: "setDpi", numeric: true },
+  { key: "defaultMaxTokens", qsId: "qsMaxTokens", optId: "optMaxTokens", setId: "setMaxTokens", numeric: true },
+  { key: "defaultPrompt", qsId: "qsPrompt", optId: "optPrompt", setId: "setPrompt", numeric: false, blankFallback: "" },
+];
+
 /** Apply persisted settings to the live workspace controls (engine defaults,
  *  provider mode, remote fields) so a user's saved defaults seed each session. */
 export function applySettingsToControls(s) {
@@ -83,10 +126,11 @@ export function applySettingsToControls(s) {
   SYNCED_FIELDS.forEach(([id, key]) => setVal(id, s[key]));
   const keepImagesEl = document.getElementById("optKeepImages");
   if (keepImagesEl && s.keepImages != null) keepImagesEl.checked = !!s.keepImages;
-  // Pages: mode + bounds, then re-run wirePageSelection's visibility apply (it
-  // is already wired by the time this settings-load promise resolves) so the
+  // Pages: mode + bounds, then re-run the visibility toggle directly (not via
+  // a dispatched `change` event -- that would also fire wireAutoSaveEngineOptions'
+  // listener on #optPagesMode and spuriously re-trigger an auto-save) so the
   // from/to inputs show/hide correctly for a restored non-"all" mode.
-  document.getElementById("optPagesMode")?.dispatchEvent(new Event("change"));
+  applyPageSelectionVisibility();
   // Custom GGUF paths: <span> dataset stores, not <input>.value.
   restoreGgufSpan("modelFilePath", s.modelFile);
   restoreGgufSpan("mmprojFilePath", s.mmprojFile);
@@ -147,11 +191,7 @@ export async function wireSettings(onSaved) {
   const saved = document.getElementById("settingsSaved");
   if (saveBtn) {
     saveBtn.addEventListener("click", async () => {
-      const num = (id, fallback) => {
-        const v = parseInt((get(id) && get(id).value) || "", 10);
-        return Number.isFinite(v) && v > 0 ? v : fallback;
-      };
-      // Like num() but allows 0 (idle-unload uses 0 to mean "never").
+      // Like numOr() but allows 0 (idle-unload uses 0 to mean "never").
       const numOrZero = (id, fallback) => {
         const v = parseInt((get(id) && get(id).value) || "", 10);
         return Number.isFinite(v) && v >= 0 ? v : fallback;
@@ -170,8 +210,8 @@ export async function wireSettings(onSaved) {
           remoteApiKey: (get(ids.remoteApiKey) && get(ids.remoteApiKey).value) || "",
           remoteModel: (get(ids.remoteModel) && get(ids.remoteModel).value) || "",
           llamaBin: (get(ids.llamaBin) && get(ids.llamaBin).value) || "",
-          defaultDpi: num(ids.defaultDpi, 144),
-          defaultMaxTokens: num(ids.defaultMaxTokens, 4096),
+          defaultDpi: numOr(get(ids.defaultDpi), 144),
+          defaultMaxTokens: numOr(get(ids.defaultMaxTokens), 4096),
           // Optional persistent override; empty = use the per-run Task preset.
           defaultPrompt: (get(ids.defaultPrompt) && get(ids.defaultPrompt).value) || "",
           idleUnloadMinutes: numOrZero(ids.idleUnloadMinutes, 15),
@@ -256,7 +296,7 @@ export function wireAutoSaveEngineOptions() {
           defaultDpi: numOr(get("optDpi"), base.defaultDpi),
           defaultMaxTokens: numOr(get("optMaxTokens"), base.defaultMaxTokens),
           remoteBaseUrl: (get("remoteUrl") && get("remoteUrl").value) || base.remoteBaseUrl,
-          remoteModel: (get("remoteModel") && get("remoteModel").value) || "",
+          remoteModel: (get("remoteModel") && get("remoteModel").value) || base.remoteModel,
           imageMaxTokens: numOr(get("optImageMaxTokens"), null),
           chatTemplate: (get("optChatTemplate") && get("optChatTemplate").value) || "",
           repeatPenalty: floatOrNull(get("optRepeatPenalty")),

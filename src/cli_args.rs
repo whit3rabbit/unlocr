@@ -21,16 +21,16 @@ pub struct Args {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
-    /// Input PDF file(s), folder(s), or glob pattern(s) (quote globs so the
-    /// binary expands them; useful on Windows where PowerShell does not)
+    /// Input PDF/image file(s), folder(s), or glob pattern(s) (quote globs so
+    /// the binary expands them; useful on Windows where PowerShell does not)
     pub inputs: Vec<PathBuf>,
 
     /// Recurse into subdirectories when an input is a folder
     #[arg(long)]
     pub recursive: bool,
 
-    /// Read additional PDF paths from a text file (one per line; blank lines
-    /// and lines starting with # are skipped)
+    /// Read additional PDF/image paths from a text file (one per line; blank
+    /// lines and lines starting with # are skipped)
     #[arg(long)]
     pub from_list: Option<PathBuf>,
 

@@ -3,6 +3,8 @@
 // top of this. Keeping clap out of here is load-bearing: the GUI needs to drive
 // OCR with plain typed params and a progress sink, no Args/argv in sight.
 
+/// Input expansion: file/dir/glob resolution, PDF and image detection.
+pub mod inputs;
 /// Model management and caching utilities.
 pub mod model;
 /// PDF rendering and processing utilities.

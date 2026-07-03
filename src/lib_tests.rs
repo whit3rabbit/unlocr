@@ -660,6 +660,144 @@ fn ocr_pages_strips_layout_annotations() {
     assert_eq!(partials, raw, "grounding stream keeps raw layout output");
 }
 
+/// A single recognized image file skips pdftoppm entirely: OCR'd as one
+/// synthetic page. Uses a bogus pdftoppm path to prove the PDF branch is
+/// genuinely not invoked, not merely coincidentally fast.
+#[test]
+fn ocr_pages_ocrs_a_single_image_directly() {
+    let stub_port = spawn_stub_ocr_server();
+    let srv = server::Server::for_test(stub_port).expect("for_test");
+
+    let img_dir = tempfile::tempdir().expect("tmp img dir");
+    let img_path = img_dir.path().join("scan.png");
+    // Only the magic bytes matter for sniff_image_mime; the rest is padding.
+    std::fs::write(
+        &img_path,
+        [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0],
+    )
+    .unwrap();
+
+    let mut events: Vec<Progress> = Vec::new();
+    let out = ocr_pages(
+        &srv,
+        Path::new("/nonexistent/pdftoppm"),
+        &img_path,
+        &OcrOptions::default(),
+        &mut |p: Progress| events.push(p),
+        &|| false,
+    )
+    .expect("ocr_pages on a raw image");
+
+    assert_eq!(out.pages.len(), 1);
+    assert_eq!(out.pages[0].0, 1);
+    let page_events: Vec<(usize, usize)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Progress::Page { page, total } => Some((*page, *total)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(page_events, vec![(1, 1)]);
+}
+
+/// keep_images on a single-image (non-PDF) input must actually preserve the
+/// image: the PDF path writes rasterized pages into the same tempdir kept via
+/// tmp.keep(), but a raw image input previously read the original file
+/// in-place and never copied it in, so keep_images silently kept an empty dir.
+#[test]
+fn ocr_pages_keep_images_preserves_single_image_input() {
+    let stub_port = spawn_stub_ocr_server();
+    let srv = server::Server::for_test(stub_port).expect("for_test");
+
+    let img_dir = tempfile::tempdir().expect("tmp img dir");
+    let img_path = img_dir.path().join("scan.png");
+    let png_bytes = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
+    std::fs::write(&img_path, png_bytes).unwrap();
+
+    let opts = OcrOptions {
+        keep_images: true,
+        ..OcrOptions::default()
+    };
+    let out = ocr_pages(
+        &srv,
+        Path::new("/nonexistent/pdftoppm"),
+        &img_path,
+        &opts,
+        &mut |_: Progress| {},
+        &|| false,
+    )
+    .expect("ocr_pages with keep_images on a raw image");
+
+    let kept_dir = out.kept_images.expect("keep_images set -> Some(dir)");
+    let entries: Vec<_> = std::fs::read_dir(&kept_dir)
+        .expect("read kept dir")
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "kept dir must contain the image, not be empty: {kept_dir:?}"
+    );
+    let kept_file = entries.into_iter().next().unwrap().unwrap().path();
+    assert_eq!(
+        std::fs::read(&kept_file).unwrap(),
+        png_bytes,
+        "kept file must be a byte-identical copy of the source image"
+    );
+}
+
+/// A file whose content doesn't match its claimed extension (real JPEG bytes
+/// named `.png`) must be rejected before it reaches the model, not silently
+/// sent under the wrong MIME claim.
+#[test]
+fn ocr_pages_rejects_content_extension_mismatch() {
+    let stub_port = spawn_stub_ocr_server();
+    let srv = server::Server::for_test(stub_port).expect("for_test");
+
+    let img_dir = tempfile::tempdir().expect("tmp img dir");
+    let fake_path = img_dir.path().join("fake.png");
+    std::fs::write(&fake_path, [0xFFu8, 0xD8, 0xFF, 0xE0, 0, 0]).unwrap();
+
+    let err = ocr_pages(
+        &srv,
+        Path::new("/nonexistent/pdftoppm"),
+        &fake_path,
+        &OcrOptions::default(),
+        &mut |_: Progress| {},
+        &|| false,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("does not match its content"),
+        "unexpected error: {err}"
+    );
+}
+
+/// Bytes that don't match any known image magic number must be rejected
+/// outright, not guessed at from the extension alone.
+#[test]
+fn ocr_pages_rejects_unsniffable_bytes() {
+    let stub_port = spawn_stub_ocr_server();
+    let srv = server::Server::for_test(stub_port).expect("for_test");
+
+    let img_dir = tempfile::tempdir().expect("tmp img dir");
+    let evil_path = img_dir.path().join("evil.png");
+    std::fs::write(&evil_path, b"not actually an image").unwrap();
+
+    let err = ocr_pages(
+        &srv,
+        Path::new("/nonexistent/pdftoppm"),
+        &evil_path,
+        &OcrOptions::default(),
+        &mut |_: Progress| {},
+        &|| false,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("not a recognized image"),
+        "unexpected error: {err}"
+    );
+}
+
 /// Spawn a throwaway HTTP server that returns a valid OpenAI chat-completion for
 /// any POST and return its port. Used by the ocr_pages tests so they exercise the
 /// real rasterize+request loop without a live llama-server. Drains the request

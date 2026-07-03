@@ -1,7 +1,7 @@
 import { requireTauri } from "./tauri.js";
 import { jobBaseName } from "./paths.js";
 import { renderJobCard, confirmDestructive } from "./job_card.js";
-import { loadJobs } from "./jobs.js";
+import { loadJobs, clearJobsByStatus } from "./jobs.js";
 
 // EH-0013 bite 2: i18n hook. Named `tr` -- `t` is the Tauri handle in the actions.
 const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
@@ -179,23 +179,16 @@ export function makeLibrary() {
   }
 
   /** Remove every failed job from the library/store (record-only -- matches
-   *  "Remove selected", never deletes files). Mirrors board.js's clearDone(). */
+   *  "Remove selected", never deletes files). Shares its confirm/delete/reload
+   *  shape with board.js's clearDone() via jobs.js's clearJobsByStatus. */
   async function clearFailed() {
-    const failedIds = lastJobs
-      .filter((j) => (j && j.status) === "failed")
-      .map((j) => j && j.id)
-      .filter(Boolean);
-    if (failedIds.length === 0) return;
-    if (!(await confirmDestructive(tr("library.confirmClearFailed", { n: failedIds.length }))))
-      return;
-    try {
-      const t = requireTauri();
-      await t.core.invoke("delete_jobs", { ids: failedIds, deleteFile: false });
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error("[library] delete_jobs (clear failed) failed", err);
-    }
-    load();
+    await clearJobsByStatus(
+      lastJobs,
+      (status) => status === "failed",
+      (n) => tr("library.confirmClearFailed", { n }),
+      "library",
+      load
+    );
   }
 
   if (refresh) {

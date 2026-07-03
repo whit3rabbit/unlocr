@@ -5,7 +5,7 @@
 // every advanced field.
 
 import { requireTauri } from "./tauri.js";
-import { patchSettings } from "./settings.js";
+import { patchSettings, QUICK_SETTINGS_FIELDS } from "./settings.js";
 import { renderEffectiveSummary, numOr, setVal } from "./options.js";
 
 const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
@@ -43,23 +43,68 @@ function applyZoomSize(size) {
 // main.js), so the preference survives a restart without waiting for the popup.
 applyZoomSize(readZoomSize());
 
+// Window size is a separate frontend-only preference from zoom: zoom scales the
+// content within the OS window (CSS `zoom`), this resizes the OS window itself via
+// the Tauri window API (`core:window:allow-set-size`, granted in capabilities/default.json).
+const WINDOW_KEY = "unlocr.windowSize";
+const WINDOW_SIZES = {
+  compact: [1200, 800],
+  default: [1440, 900],
+  large: [1680, 1050],
+  xlarge: [1920, 1200],
+};
+
+/** Read the persisted window-size preset, defaulting to "default". */
+function readWindowSize() {
+  try {
+    const v = localStorage.getItem(WINDOW_KEY);
+    return v && WINDOW_SIZES[v] ? v : "default";
+  } catch (err) {
+    return "default";
+  }
+}
+
+/** Resize the OS window to a preset and persist the choice. Fail-soft: the Tauri
+ *  window API is only present inside the webview (withGlobalTauri), never in a
+ *  plain browser preview, and the resize itself is best-effort. */
+async function applyWindowSize(size) {
+  try {
+    localStorage.setItem(WINDOW_KEY, size);
+  } catch (err) {
+    /* ignore: storage unavailable */
+  }
+  const dims = WINDOW_SIZES[size] || WINDOW_SIZES.default;
+  try {
+    const tauriWindow = window.__TAURI__ && window.__TAURI__.window;
+    if (!tauriWindow) return;
+    await tauriWindow.getCurrentWindow().setSize(new tauriWindow.LogicalSize(dims[0], dims[1]));
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("[quick-settings] window resize failed", err);
+  }
+}
+
+// Apply the saved window size immediately on load, same as the zoom preference.
+applyWindowSize(readWindowSize());
+
 /** Wire the gear button + popup: open/populate, live zoom + language switching,
  *  and Save for the 4 run defaults. Fail-soft outside the webview. */
 export function wireQuickSettingsPopup() {
   const gearBtn = document.getElementById("settingsGearBtn");
   const dlg = document.getElementById("quickSettingsDialog");
   const zoomSel = document.getElementById("qsZoom");
+  const windowSizeSel = document.getElementById("qsWindowSize");
   const localeSel = document.getElementById("qsLocale");
-  const quantSel = document.getElementById("qsQuant");
-  const dpiInput = document.getElementById("qsDpi");
-  const maxTokensInput = document.getElementById("qsMaxTokens");
-  const promptInput = document.getElementById("qsPrompt");
   const saveBtn = document.getElementById("qsSave");
   const savedEl = document.getElementById("qsSaved");
   if (!gearBtn || !dlg) return;
 
   if (zoomSel) {
     zoomSel.addEventListener("change", () => applyZoomSize(zoomSel.value));
+  }
+
+  if (windowSizeSel) {
+    windowSizeSel.addEventListener("change", () => applyWindowSize(windowSizeSel.value));
   }
 
   if (localeSel && window.unlocrI18n) {
@@ -77,15 +122,13 @@ export function wireQuickSettingsPopup() {
 
   gearBtn.addEventListener("click", async () => {
     if (zoomSel) zoomSel.value = readZoomSize();
+    if (windowSizeSel) windowSizeSel.value = readWindowSize();
     if (localeSel && window.unlocrI18n) localeSel.value = window.unlocrI18n.getLocale();
     try {
       const t = requireTauri();
       const s = await t.core.invoke("get_settings");
       if (s) {
-        if (quantSel) quantSel.value = s.defaultQuant;
-        if (dpiInput) dpiInput.value = s.defaultDpi;
-        if (maxTokensInput) maxTokensInput.value = s.defaultMaxTokens;
-        if (promptInput) promptInput.value = s.defaultPrompt || "";
+        QUICK_SETTINGS_FIELDS.forEach((f) => setVal(f.qsId, s[f.key] ?? f.blankFallback));
       }
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -108,12 +151,16 @@ export function wireQuickSettingsPopup() {
       // helper wireSettings' own Save button uses.
       const result = await patchSettings(
         t,
-        (base) => ({
-          defaultQuant: (quantSel && quantSel.value) || base.defaultQuant,
-          defaultDpi: numOr(dpiInput, base.defaultDpi),
-          defaultMaxTokens: numOr(maxTokensInput, base.defaultMaxTokens),
-          defaultPrompt: (promptInput && promptInput.value) || "",
-        }),
+        (base) => {
+          const overrides = {};
+          QUICK_SETTINGS_FIELDS.forEach((f) => {
+            const el = document.getElementById(f.qsId);
+            overrides[f.key] = f.numeric
+              ? numOr(el, base[f.key])
+              : (el && el.value) || (Object.prototype.hasOwnProperty.call(f, "blankFallback") ? f.blankFallback : base[f.key]);
+          });
+          return overrides;
+        },
         "quick-settings save"
       );
       if (result.ok) {
@@ -124,14 +171,10 @@ export function wireQuickSettingsPopup() {
         // be open/stale). Deliberately does NOT call applySettingsToControls:
         // that restores every Workspace field from the saved row, which would
         // clobber any OTHER field mid-edit and unrelated to this save.
-        setVal("optQuant", newSettings.defaultQuant);
-        setVal("optDpi", newSettings.defaultDpi);
-        setVal("optMaxTokens", newSettings.defaultMaxTokens);
-        setVal("optPrompt", newSettings.defaultPrompt);
-        setVal("setQuant", newSettings.defaultQuant);
-        setVal("setDpi", newSettings.defaultDpi);
-        setVal("setMaxTokens", newSettings.defaultMaxTokens);
-        setVal("setPrompt", newSettings.defaultPrompt);
+        QUICK_SETTINGS_FIELDS.forEach((f) => {
+          setVal(f.optId, newSettings[f.key]);
+          setVal(f.setId, newSettings[f.key]);
+        });
         if (savedEl) {
           savedEl.hidden = false;
           setTimeout(() => {

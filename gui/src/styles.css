@@ -311,7 +311,7 @@ button {
 
 /* file rail */
 .file-rail {
-  width: 258px;
+  width: 300px;
   flex: none;
   display: flex;
   flex-direction: column;
@@ -763,10 +763,31 @@ button {
   cursor: pointer;
 }
 
-/* Range page inputs (from / to) sit side by side under one label. */
+/* Range page inputs (from / to) sit side by side under one label. Also used for
+   the output-folder row (text input + Choose folder button): the button must
+   not shrink/wrap, so the input (not the button) absorbs the flex squeeze. */
 .opts__pages {
   display: flex;
   gap: 6px;
+}
+
+.opts__pages .opts__text {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
+.opts__pages .import-btn {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* Icon-only variant (e.g. the output-folder picker): square, no label, so the
+   text input next to it keeps most of the row's width. */
+.import-btn--icon {
+  width: 38px;
+  padding: 0;
+  gap: 0;
 }
 
 .opts__label {

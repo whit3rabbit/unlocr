@@ -5,6 +5,7 @@
 import { requireTauri } from "./tauri.js";
 import { runOcrOnPath } from "./run_ocr.js";
 import { jobBaseName } from "./paths.js";
+import { isAcceptedInputPath } from "./formats.js";
 
 // EH-0013 bite 2: i18n hook. Named `tr` -- `t` is the Tauri handle in wireLibraryDrop.
 const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
@@ -141,22 +142,22 @@ export function wireLibraryDrop(ui, mdPane, unlistensRef) {
     }
   }
 
-  /** Enqueue one or more dropped PDFs sequentially. Non-PDF entries are reported
-   *  and skipped. Re-arms the importer when the queue drains. */
+  /** Enqueue one or more dropped PDFs/images sequentially. Unrecognized entries
+   *  are reported and skipped. Re-arms the importer when the queue drains. */
   async function enqueueDrops(paths) {
     const pdfs = (paths || []).filter((p) => typeof p === "string" && p.trim());
     if (pdfs.length === 0) {
       if (ui) ui.setStatus(tr("run.dropNoFiles"));
       return;
     }
-    const accepted = pdfs.filter((p) => p.toLowerCase().endsWith(".pdf"));
-    const rejected = pdfs.filter((p) => !p.toLowerCase().endsWith(".pdf"));
+    const accepted = pdfs.filter(isAcceptedInputPath);
+    const rejected = pdfs.filter((p) => !isAcceptedInputPath(p));
     if (rejected.length) {
       // eslint-disable-next-line no-console
-      console.warn("[drop] skipped non-PDF drops:", rejected);
+      console.warn("[drop] skipped unrecognized drops:", rejected);
     }
     if (accepted.length === 0) {
-      if (ui) ui.setStatus(tr("run.dropNotPdf"));
+      if (ui) ui.setStatus(tr("run.dropUnsupported"));
       return;
     }
     if (runInFlight) {

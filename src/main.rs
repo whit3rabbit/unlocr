@@ -9,16 +9,15 @@
 // main is the same type the lib's ocr_pages expects) instead of two diverging
 // copies compiled into bin and lib separately.
 mod cli_args;
-mod inputs;
 mod ocr;
 
 pub use cli_args::*;
-pub use inputs::*;
 
 use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use unlocr::inputs::expand_inputs;
 use unlocr::{model, preflight, server, OcrOptions};
 
 /// Result type alias with a dynamic error type.
