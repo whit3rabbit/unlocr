@@ -1,0 +1,11 @@
+# cargo-audit config (https://github.com/rustsec/rustsec/tree/main/cargo-audit).
+[advisories]
+ignore = [
+  # quick-xml 0.39.4, pulled in transitively via tauri -> tauri-utils -> plist
+  # (macOS Info.plist bundle metadata; parses our own build-time config, not
+  # network/attacker-controlled input). plist 1.9.0 (latest) still pins
+  # quick-xml ^0.39.2; no fixed plist release exists yet. Re-check on plist/
+  # tauri upgrade and drop these once a fix lands upstream.
+  "RUSTSEC-2026-0194", # quadratic runtime on duplicate-attribute check
+  "RUSTSEC-2026-0195", # unbounded namespace-decl allocation (memory exhaustion)
+]

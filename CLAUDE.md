@@ -63,6 +63,17 @@ Thin wrapper. Full usage/benchmarks in README.md.
   declare as a package dep. deb postinst / rpm %post warn if missing.
 
 ## Gotchas
+- CI `cargo audit` (`.github/workflows/audit.yml`) has no severity/warning filter, so
+  ANY new advisory on the dep tree fails it (unmaintained/unsound warnings alone do not,
+  only actual vulnerabilities). `.cargo/audit.toml` holds `[advisories].ignore` entries
+  for unfixable transitive vulns (currently quick-xml via `tauri -> tauri-utils -> plist`,
+  Info.plist bundle metadata, no fixed `plist` release exists). Only add an ignore after
+  confirming: no upstream fix (`cargo update -p <crate> --dry-run`), and the vuln path
+  isn't attacker-reachable at runtime. Re-check ignores on every `tauri`/dep bump; this is
+  a release gate (docs/RELEASE.md) so don't let ignores silently accumulate.
+- `cargo tree` defaults to the root package like bare `cargo build`/`cargo test` (see
+  below): `cargo tree -i <crate>` misses gui-only deps (e.g. `quick-xml` via tauri).
+  Use `cargo tree --workspace -i <crate>` to find true reverse-dependents.
 - `src/tools/mod.rs`: on-demand tool downloader. `PINS` is per OS+arch (cfg-selected):
   Windows = pandoc/poppler/llama-server CPU (.zip); macOS = pandoc only (per-arch .zip;
   poppler has no standalone mac binary, llama ships .tar.gz so both stay on brew); Linux
