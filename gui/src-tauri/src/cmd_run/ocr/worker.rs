@@ -7,7 +7,9 @@ use unlocr::{OcrOptions, OutputMode, Progress};
 use crate::state::{AppState, Backend, LoadedModel};
 use crate::store::{self, JobOptions};
 
-use super::types::{ImagesKept, OcrDone, PageProgress, PartialText, RasterizeProgress, StatusMsg};
+use super::types::{
+    ImagesKept, OcrDone, PageProgress, PartialText, RasterizeProgress, StatusMsg, Truncated,
+};
 
 /// Best-effort notify the webview that the job store changed so the Library + Board reload live.
 pub(crate) fn emit_jobs_changed(app: &AppHandle) {
@@ -77,6 +79,10 @@ pub(crate) fn process_single_input(
                     },
                 );
             }
+        }
+        Progress::Truncated { page } => {
+            let is_local = matches!(lm.backend, Backend::Local(_));
+            let _ = app_for_progress.emit("ocr://page-truncated", Truncated { page, is_local });
         }
         _ => {}
     };

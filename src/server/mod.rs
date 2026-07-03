@@ -34,6 +34,23 @@ pub fn free_port() -> Res<u16> {
     Ok(listener.local_addr()?.port())
 }
 
+/// Result of OCR'ing one page: the assembled text plus whether the server
+/// stopped because it hit `max_tokens` rather than a natural stop
+/// (`finish_reason == "length"`). A page that loops until the cap and a page
+/// that finished cleanly are otherwise indistinguishable to the caller, so
+/// `truncated` lets `ocr_pages` (src/job.rs) flag likely repetition loops
+/// instead of silently writing the garbage out as if it were real text.
+///
+/// `pub`, not `pub(crate)`: it's the return type of the `pub trait ImageOcr`
+/// methods, and `ImageOcr` is reachable through the crate's public API
+/// (`pub fn ocr_pages<S: ImageOcr>`), so the trait's own visibility requires
+/// this to be at least as public (`private_interfaces` lint under `-D warnings`).
+#[derive(Clone, Debug)]
+pub struct OcrResult {
+    pub text: String,
+    pub truncated: bool,
+}
+
 /// Anything that can OCR one image given a prompt. Lets the page loop in
 /// `lib::ocr_pages` drive either a local `Server` or a `RemoteEndpoint` without
 /// caring which. The body it sends is provider-agnostic (OpenAI chat-completions).
@@ -47,7 +64,7 @@ pub trait ImageOcr {
         repeat_penalty: Option<f32>,
         dry_multiplier: Option<f32>,
         dry_base: Option<f32>,
-    ) -> Res<String>;
+    ) -> Res<OcrResult>;
 
     /// Stream completions: like `ocr_image` but calls `on_token` with each partial
     /// text chunk as it arrives (SSE delta), and returns the full assembled text.
@@ -64,7 +81,7 @@ pub trait ImageOcr {
         dry_base: Option<f32>,
         on_token: &mut dyn FnMut(&str) -> bool,
         should_cancel: &dyn Fn() -> bool,
-    ) -> Res<String> {
+    ) -> Res<OcrResult> {
         let _ = on_token; // default: ignore the sink
         let _ = should_cancel;
         self.ocr_image(
@@ -128,7 +145,7 @@ pub(crate) fn ocr_via(
     repeat_penalty: Option<f32>,
     dry_multiplier: Option<f32>,
     dry_base: Option<f32>,
-) -> Res<String> {
+) -> Res<OcrResult> {
     let url = format!("{base_url}/v1/chat/completions");
     let mut body = serde_json::json!({
         "temperature": 0,
@@ -163,8 +180,36 @@ pub(crate) fn ocr_via(
             return Err(format!("HTTP error {}: {}", status, err_text).into());
         }
         let resp_json: serde_json::Value = resp.json().await?;
-        parse_completion(&resp_json)
+        let text = parse_completion(&resp_json)?;
+        let truncated = finish_reason(&resp_json).as_deref() == Some("length");
+        Ok(OcrResult { text, truncated })
     })
+}
+
+/// Handle one parsed SSE chunk: surface a per-chunk provider error (a 2xx
+/// stream can still carry one, e.g. `{"error":{"message":"Context length
+/// exceeded"}}`), forward delta content to `on_token`, and fold
+/// `finish_reason` into `truncated`. Shared by `ocr_via_stream`'s main per-line
+/// loop and its leftover-buffer tail so the two spots can't drift apart.
+fn handle_stream_chunk(
+    chunk_val: &serde_json::Value,
+    full: &mut String,
+    truncated: &mut bool,
+    on_token: &mut dyn FnMut(&str) -> bool,
+) -> Res<()> {
+    if let Some(msg) = provider_error(chunk_val) {
+        return Err(format!("provider error: {msg}").into());
+    }
+    if let Some(token) = chunk_val["choices"][0]["delta"]["content"].as_str() {
+        if !on_token(token) {
+            return Err("stopped".into());
+        }
+        full.push_str(token);
+    }
+    if finish_reason(chunk_val).as_deref() == Some("length") {
+        *truncated = true;
+    }
+    Ok(())
 }
 
 /// POST with `stream: true` and consume the SSE response, calling `on_token`
@@ -182,7 +227,7 @@ pub(crate) fn ocr_via_stream(
     dry_base: Option<f32>,
     on_token: &mut dyn FnMut(&str) -> bool,
     should_cancel: &dyn Fn() -> bool,
-) -> Res<String> {
+) -> Res<OcrResult> {
     let url = format!("{base_url}/v1/chat/completions");
     let mut body = serde_json::json!({
         "temperature": 0,
@@ -205,6 +250,7 @@ pub(crate) fn ocr_via_stream(
     let mut full = String::new();
     let mut saw_sse = false;
     let mut raw = String::new();
+    let mut truncated = false;
 
     block_on(async {
         let client = reqwest::Client::new();
@@ -294,18 +340,7 @@ pub(crate) fn ocr_via_stream(
                 let Ok(chunk_val) = serde_json::from_str::<serde_json::Value>(json_str) else {
                     continue;
                 };
-                // A 2xx stream can still carry a per-chunk provider error, e.g.
-                // {"error":{"message":"Context length exceeded"}}. Surface it
-                // instead of silently finishing with whatever partial text we have.
-                if let Some(msg) = provider_error(&chunk_val) {
-                    return Err(format!("provider error: {msg}").into());
-                }
-                if let Some(token) = chunk_val["choices"][0]["delta"]["content"].as_str() {
-                    if !on_token(token) {
-                        return Err(Box::<dyn std::error::Error>::from("stopped"));
-                    }
-                    full.push_str(token);
-                }
+                handle_stream_chunk(&chunk_val, &mut full, &mut truncated, on_token)?;
             }
         }
 
@@ -315,15 +350,7 @@ pub(crate) fn ocr_via_stream(
             if let Some(json_str) = line.strip_prefix("data: ") {
                 if json_str.trim() != "[DONE]" {
                     if let Ok(chunk_val) = serde_json::from_str::<serde_json::Value>(json_str) {
-                        if let Some(msg) = provider_error(&chunk_val) {
-                            return Err(format!("provider error: {msg}").into());
-                        }
-                        if let Some(token) = chunk_val["choices"][0]["delta"]["content"].as_str() {
-                            if !on_token(token) {
-                                return Err(Box::<dyn std::error::Error>::from("stopped"));
-                            }
-                            full.push_str(token);
-                        }
+                        handle_stream_chunk(&chunk_val, &mut full, &mut truncated, on_token)?;
                     }
                 }
             } else {
@@ -337,16 +364,27 @@ pub(crate) fn ocr_via_stream(
     if !saw_sse && full.is_empty() {
         if let Ok(resp) = serde_json::from_str::<serde_json::Value>(&raw) {
             let text = parse_completion(&resp)?;
+            // Named distinctly from the outer `truncated` accumulator (unused on
+            // this fallback path, which returns before that binding is ever read):
+            // this is computed from a completely different response (the raw
+            // buffer, not any SSE chunk), so it must not be conflated with it.
+            let fallback_truncated = finish_reason(&resp).as_deref() == Some("length");
             // Honor cancel on the non-SSE fallback too: a server that ignores
             // stream:true and returns one JSON body must not deliver a page the
             // caller already asked to stop.
             if !on_token(&text) {
                 return Err("stopped".into());
             }
-            return Ok(text);
+            return Ok(OcrResult {
+                text,
+                truncated: fallback_truncated,
+            });
         }
     }
-    Ok(full)
+    Ok(OcrResult {
+        text: full,
+        truncated,
+    })
 }
 
 /// Pull the assistant message text out of an OpenAI-style chat completion.
@@ -363,6 +401,16 @@ pub(crate) fn parse_completion(resp: &serde_json::Value) -> Res<String> {
 fn provider_error(val: &serde_json::Value) -> Option<String> {
     val.get("error")?
         .get("message")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+/// Pull `choices[0].finish_reason` out of a chat-completion response or SSE
+/// chunk. `"length"` means generation stopped because it hit `max_tokens`
+/// rather than a natural stop -- the signal `OcrResult::truncated` is built
+/// from.
+fn finish_reason(val: &serde_json::Value) -> Option<String> {
+    val["choices"][0]["finish_reason"]
         .as_str()
         .map(|s| s.to_string())
 }

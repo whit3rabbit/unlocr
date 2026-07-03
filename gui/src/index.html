@@ -331,12 +331,12 @@
                         <option value="deepseek-ocr" data-i18n="opts.chatDeepseekOcr">deepseek-ocr</option>
                       </select>
                     </label>
-                    <!-- Per-run sampling penalty; blank = 1.15 on the local backend
+                    <!-- Per-run sampling penalty; blank = 1.3 on the local backend
                          (breaks the Q4_K_M infinite-loop failure mode), server default
                          on remote (vLLM/SGLang, which doesn't exhibit the loop). -->
                     <label class="opts__field">
                       <span class="opts__label" data-i18n="opts.repeatPenalty">Repeat penalty</span>
-                      <input class="opts__num" id="optRepeatPenalty" type="number" min="1" max="2" step="0.05" placeholder="1.15 (local default)" data-i18n-ph="opts.repeatPenaltyPh" />
+                      <input class="opts__num" id="optRepeatPenalty" type="number" min="1" max="2" step="0.05" placeholder="1.3 (local default)" data-i18n-ph="opts.repeatPenaltyPh" />
                     </label>
                     <!-- DRY sampler strength; blank = 1.0 on the local backend, 0 = off.
                          Sequence-repetition penalty, the loop-killer repeat penalty isn't. -->

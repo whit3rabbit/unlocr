@@ -138,7 +138,7 @@ unlocr report.pdf --out ./out --quality best
 | `--dpi N` | `144` | PDF page rendering DPI (higher DPI gives larger/clearer source images). |
 | `--image-max-tokens N` | *(model default)* | Vision-token budget for `llama-server` (local mode only). Higher means finer detail recognition but slower/more VRAM. |
 | `--chat-template NAME` | *(model default)* | Forwarded to `llama-server --chat-template` (e.g., `deepseek-ocr`); local mode only. |
-| `--repeat-penalty F` | *(server default)*| Sampling repeat penalty (e.g., `1.1`); helps break generation loops in smaller quants. |
+| `--repeat-penalty F` | `1.3` (local GGUF) / *(server default)* (`--endpoint`/`--gpu`) | Sampling repeat penalty; helps break generation loops in smaller quants. |
 | `--llama-bin PATH` | *Auto-detected* | Path to the `llama-server` binary. |
 | `--model-dir PATH` | *OS Cache* | Custom cache directory for GGUF model downloads. |
 | `--port N` | `0` (Auto) | Port for the spawned `llama-server`. |
@@ -213,6 +213,7 @@ For high-performance GPU serving of the unquantized model:
 *   **Abnormal exit (macOS)**: If the app is force-killed (`SIGKILL`/segfault) or panics (`panic=abort`), cleanup is skipped. Linux (`PR_SET_PDEATHSIG`) and Windows (Job Objects) kill `llama-server` with the parent; macOS has no equivalent, so a warm server can be orphaned. Recover with `pkill llama-server`.
 *   **Port Race**: Free-port allocation may occasionally conflict; pin using `--port N`.
 *   **Authentication**: The local `llama-server` binds to `127.0.0.1` without auth. On multi-user machines, other local users could access the server port during execution. Single-user environments are recommended.
+*   **Repetition loops on blank/ruled/low-content pages**: The underlying Unlimited-OCR/DeepSeek-OCR model can degenerate into repetitive or hallucinated output (e.g. rambling about "the Ground Truth image" instead of transcribing) on blank regions, ruled/underscore lines, or other low-content input. This is an open, currently unresolved upstream model issue ([deepseek-ai/DeepSeek-OCR#151](https://github.com/deepseek-ai/DeepSeek-OCR/issues/151)), not a bug in unlocr's prompt: upstream's vLLM/SGLang serving suppresses it with a custom n-gram-repetition logits processor that has no llama.cpp/GGUF equivalent. If you hit this, try raising `--repeat-penalty` further (e.g. `1.5`), raising `--dry-multiplier`, or using a higher-precision quant (`--quality best`/`good` over `less`) for documents with a lot of blank/ruled content. A page whose generation hits `--max-tokens` without a natural stop is flagged with a warning (likely a repetition loop) rather than silently written out as if it were real text.
 
 ### License
 The `unlocr` codebase is released under the [MIT License](LICENSE). Note that model weights downloaded automatically from Hugging Face are governed by their respective licenses (see HF model card).

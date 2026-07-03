@@ -96,9 +96,9 @@ pub struct Args {
     #[arg(long)]
     pub chat_template: Option<String>,
 
-    /// Sampling repetition penalty (e.g. 1.15) sent with every page. Helps escape
+    /// Sampling repetition penalty (e.g. 1.3) sent with every page. Helps escape
     /// the infinite-loop output some quants (notably Q4_K_M) hit on dense pages.
-    /// Defaults to 1.15 on the local GGUF path; pass a value to override.
+    /// Defaults to 1.3 on the local GGUF path; pass a value to override.
     /// Inert/omitted for remote (`--endpoint`/`--gpu`) mode, which does not
     /// exhibit the quant loop.
     #[arg(long)]

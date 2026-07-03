@@ -32,8 +32,8 @@ pub struct OcrOptions {
     /// None = let llama-server use the template baked into the model. Local-only.
     pub chat_template: Option<String>,
     /// Sampling repetition penalty sent in the request body. None omits it (server
-    /// default). >1.0 (e.g. 1.1) discourages the infinite-loop output some quants
-    /// (notably Q4_K_M) fall into on dense pages.
+    /// default). >1.0 (e.g. 1.3, the local-GGUF default) discourages the
+    /// infinite-loop output some quants (notably Q4_K_M) fall into on dense pages.
     pub repeat_penalty: Option<f32>,
     /// DRY sampler strength (llama.cpp `dry_multiplier`), sent per request. None
     /// omits every DRY field (remote body unchanged); the front ends default it
@@ -216,4 +216,11 @@ pub enum Progress {
     /// One streaming token chunk emitted during OCR of a page. `page` is 1-based.
     /// The GUI appends `chunk` to the live transcript; the CLI may ignore it.
     PartialText { page: usize, chunk: String },
+    /// A page's generation hit `max_tokens` without a natural stop
+    /// (`finish_reason == "length"`), the strongest available signal that the
+    /// model fell into a repetition/hallucination loop rather than finishing
+    /// cleanly (see the README "Repetition loops" limitation). The page's text
+    /// is still written; this only flags it as likely-garbage so a caller can
+    /// warn instead of silently trusting it. `page` is 1-based.
+    Truncated { page: usize },
 }

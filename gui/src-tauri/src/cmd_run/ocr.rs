@@ -92,11 +92,11 @@ pub(crate) async fn run_ocr(
             is_local = matches!(&lm.backend, Backend::Local(_));
 
             // Local GGUF quants fall into infinite-loop output on dense pages; a
-            // repeat penalty escapes it. Default to 1.15 when the user left the
+            // repeat penalty escapes it. Default to 1.3 when the user left the
             // field blank (None). An explicit value wins; remote (full-precision
             // vLLM) is left alone, it does not exhibit the quant loop.
             if is_local && opts.repeat_penalty.is_none() {
-                opts.repeat_penalty = Some(1.15);
+                opts.repeat_penalty = Some(1.3);
             }
             // Same gating for the DRY sampler (any local GGUF quant): it stands in
             // for the loop-preventing ngram processor that does not ship in the

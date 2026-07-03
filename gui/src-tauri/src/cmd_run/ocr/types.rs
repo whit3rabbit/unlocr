@@ -27,6 +27,18 @@ pub(crate) struct PartialText {
     pub(crate) chunk: String,
 }
 
+/// Payload for the `ocr://page-truncated` event: the page's generation hit
+/// `max_tokens` without a natural stop (see `unlocr::Progress::Truncated`).
+/// `is_local` lets the frontend show the GGUF-quant repetition-loop framing +
+/// remedies only for the local backend; a remote/full-precision endpoint
+/// hitting the same signal is more likely just a legitimately dense page.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Truncated {
+    pub(crate) page: usize,
+    pub(crate) is_local: bool,
+}
+
 /// Payload for the terminal `ocr://done` event.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -264,7 +264,7 @@ where
         // which DOES call on_token once with an unterminated line and must
         // still flush through `stripper.finish()` below.
         let mut streamed_any = false;
-        let raw_text = srv.ocr_image_stream(
+        let result = srv.ocr_image_stream(
             &opts.prompt,
             &data_uri,
             opts.max_tokens,
@@ -290,6 +290,9 @@ where
             },
             should_cancel,
         )?;
+        if result.truncated {
+            on_progress(Progress::Truncated { page: page_num });
+        }
         let text = if strip {
             if streamed_any {
                 let tail = stripper.finish();
@@ -305,10 +308,10 @@ where
                 // on_token was never called (default ImageOcr::ocr_image_stream
                 // fallback): nothing went through the stripper, so strip the raw
                 // text directly.
-                strip_layout_annotations(&raw_text)
+                strip_layout_annotations(&result.text)
             }
         } else {
-            raw_text
+            result.text
         };
         // push_page writes page idx+1, so pass the real page number minus one.
         push_page(&mut md, page_num - 1, text.trim());

@@ -78,6 +78,27 @@ pub fn run_pdf<S: ImageOcr>(backend: &S, pdftoppm: &Path, input: &Path, args: &A
             print!("\r  page {page}/{total}");
             let _ = std::io::stdout().flush();
         }
+        Progress::Truncated { page } => {
+            // The GGUF-quant repetition-loop framing + remedies only apply to the
+            // local backend; --endpoint/--gpu (remote, full-precision) does not
+            // exhibit the quant loop (see main.rs's repeat_penalty comment), and
+            // --dry-multiplier/--quality are meaningless/inert there, so a remote
+            // run gets a neutral "hit the token limit" notice instead.
+            if args.endpoint.is_none() {
+                eprintln!(
+                    "\nwarning: page {page} hit max_tokens without a natural stop (likely a \
+                     repetition loop, a known Unlimited-OCR/DeepSeek-OCR failure mode on blank/\
+                     ruled/low-content input); consider raising --repeat-penalty/--dry-multiplier \
+                     or a higher-precision --quality"
+                );
+            } else {
+                eprintln!(
+                    "\nwarning: page {page} hit max_tokens without a natural stop; the page's \
+                     output may be incomplete. If this page is legitimately dense, consider \
+                     raising --max-tokens"
+                );
+            }
+        }
         _ => {}
     };
 

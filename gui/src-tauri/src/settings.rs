@@ -71,7 +71,7 @@ pub struct Settings {
     #[serde(default)]
     pub chat_template: String,
     /// Per-run sampling repeat penalty. `None` = local-default/server-default
-    /// (see `cmd_run/ocr.rs`'s injected 1.15 on the local backend).
+    /// (see `cmd_run/ocr.rs`'s injected 1.3 on the local backend).
     #[serde(default)]
     pub repeat_penalty: Option<f64>,
     /// DRY sampler strength. `None` = local default (1.0); 0 is a real,

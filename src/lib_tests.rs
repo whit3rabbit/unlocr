@@ -430,7 +430,10 @@ fn ocr_state_sequence_ordering() {
         assert!(
             matches!(
                 ev,
-                Progress::Rasterizing { .. } | Progress::Page { .. } | Progress::PartialText { .. }
+                Progress::Rasterizing { .. }
+                    | Progress::Page { .. }
+                    | Progress::PartialText { .. }
+                    | Progress::Truncated { .. }
             ),
             "ocr_pages emitted unexpected event variant: {ev:?}"
         );
@@ -543,6 +546,63 @@ fn ocr_pages_honors_page_range() {
         out.pages[0].0, 2,
         "per-page entry must carry the real page number"
     );
+}
+
+/// `ocr_pages` must surface `Progress::Truncated` end to end when the model's
+/// response carries `finish_reason: "length"` (hit max_tokens without a natural
+/// stop) -- not just at the lower `OcrResult`/`finish_reason()` unit-test level
+/// (`src/server/tests.rs`), which never runs `ocr_pages`/`job.rs`'s wiring.
+#[test]
+fn ocr_pages_emits_truncated_on_finish_reason_length() {
+    if std::process::Command::new("pdftoppm")
+        .arg("-v")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+    {
+        eprintln!(
+            "skipping ocr_pages_emits_truncated_on_finish_reason_length: pdftoppm not on PATH"
+        );
+        return;
+    }
+
+    let stub_port = spawn_stub_ocr_server_truncated("# page text");
+    let srv = server::Server::for_test(stub_port).expect("for_test");
+
+    let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
+    let pdf_path = pdf_dir.path().join("fixture.pdf");
+    std::fs::write(&pdf_path, two_page_pdf_bytes()).expect("write fixture pdf");
+
+    let opts = OcrOptions {
+        pages: Some((1, Some(1))),
+        ..OcrOptions::default()
+    };
+    let mut events: Vec<Progress> = Vec::new();
+    let out = ocr_pages(
+        &srv,
+        std::path::Path::new("pdftoppm"),
+        &pdf_path,
+        &opts,
+        &mut |p: Progress| events.push(p),
+        &|| false,
+    )
+    .expect("ocr_pages with a truncated stub response");
+
+    let truncated_pages: Vec<usize> = events
+        .iter()
+        .filter_map(|e| match e {
+            Progress::Truncated { page } => Some(*page),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        truncated_pages,
+        vec![1],
+        "finish_reason:\"length\" must surface as Progress::Truncated{{page:1}}: {events:?}"
+    );
+    // The page's (garbage-suspect) text is still written, not dropped.
+    assert_eq!(out.pages[0].1, "# page text");
 }
 
 /// A `should_cancel` that is true on entry aborts before OCRing any page: no Page
@@ -813,6 +873,51 @@ fn spawn_stub_ocr_server_with(content: &str) -> u16 {
     let port = listener.local_addr().expect("local_addr").port();
     let resp_body = serde_json::json!({
         "choices": [{ "message": { "content": content } }]
+    })
+    .to_string();
+    let http_response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        resp_body.len(),
+        resp_body,
+    );
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        for stream in listener.incoming() {
+            let Ok(s) = stream else { break };
+            let mut reader = BufReader::new(s.try_clone().expect("clone socket"));
+            let mut writer = s;
+            let mut content_length: usize = 0;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                if trimmed.is_empty() {
+                    break;
+                }
+                if trimmed.to_ascii_lowercase().starts_with("content-length:") {
+                    if let Some(v) = trimmed.split_once(':').map(|x| x.1) {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            let _ = std::io::Read::read_exact(&mut reader, &mut body);
+            let _ = Write::write_all(&mut writer, http_response.as_bytes());
+        }
+    });
+    port
+}
+
+/// Like `spawn_stub_ocr_server_with`, but the response carries
+/// `finish_reason: "length"` so `ocr_pages` sees a truncated page end to end
+/// (used by `ocr_pages_emits_truncated_on_finish_reason_length`).
+fn spawn_stub_ocr_server_truncated(content: &str) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub server");
+    let port = listener.local_addr().expect("local_addr").port();
+    let resp_body = serde_json::json!({
+        "choices": [{ "message": { "content": content }, "finish_reason": "length" }]
     })
     .to_string();
     let http_response = format!(

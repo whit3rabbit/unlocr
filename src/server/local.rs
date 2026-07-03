@@ -1,4 +1,4 @@
-use super::{ocr_via, ocr_via_stream, ImageOcr, HEALTH_TIMEOUT};
+use super::{ocr_via, ocr_via_stream, ImageOcr, OcrResult, HEALTH_TIMEOUT};
 use crate::Res;
 use std::ffi::OsString;
 use std::io::Read;
@@ -258,7 +258,7 @@ impl Server {
         repeat_penalty: Option<f32>,
         dry_multiplier: Option<f32>,
         dry_base: Option<f32>,
-    ) -> Res<String> {
+    ) -> Res<OcrResult> {
         ocr_via(
             &format!("http://127.0.0.1:{}", self.port),
             None,
@@ -317,7 +317,7 @@ impl ImageOcr for Server {
         repeat_penalty: Option<f32>,
         dry_multiplier: Option<f32>,
         dry_base: Option<f32>,
-    ) -> Res<String> {
+    ) -> Res<OcrResult> {
         Server::ocr_image(
             self,
             prompt,
@@ -339,7 +339,7 @@ impl ImageOcr for Server {
         dry_base: Option<f32>,
         on_token: &mut dyn FnMut(&str) -> bool,
         should_cancel: &dyn Fn() -> bool,
-    ) -> Res<String> {
+    ) -> Res<OcrResult> {
         ocr_via_stream(
             &format!("http://127.0.0.1:{}", self.port),
             None,

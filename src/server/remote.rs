@@ -1,4 +1,4 @@
-use super::{ocr_via, ocr_via_stream, ImageOcr};
+use super::{ocr_via, ocr_via_stream, ImageOcr, OcrResult};
 use crate::Res;
 use std::time::Duration;
 
@@ -44,7 +44,7 @@ impl ImageOcr for RemoteEndpoint {
         repeat_penalty: Option<f32>,
         dry_multiplier: Option<f32>,
         dry_base: Option<f32>,
-    ) -> Res<String> {
+    ) -> Res<OcrResult> {
         ocr_via(
             self.base_url.trim_end_matches('/'),
             self.api_key.as_deref(),
@@ -68,7 +68,7 @@ impl ImageOcr for RemoteEndpoint {
         dry_base: Option<f32>,
         on_token: &mut dyn FnMut(&str) -> bool,
         should_cancel: &dyn Fn() -> bool,
-    ) -> Res<String> {
+    ) -> Res<OcrResult> {
         ocr_via_stream(
             self.base_url.trim_end_matches('/'),
             self.api_key.as_deref(),

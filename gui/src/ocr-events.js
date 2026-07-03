@@ -113,6 +113,19 @@ export async function subscribeOcrEvents(ui) {
     },
   ]);
 
+  // Page hit max_tokens without a natural stop. Flag it rather than let the
+  // streamed/assembled text be trusted silently as real transcription. isLocal
+  // gates the GGUF-quant repetition-loop framing (see README "Repetition
+  // loops"): a remote/full-precision backend hitting the same signal is more
+  // likely just a legitimately dense page, not a known quant failure mode.
+  handlers.push([
+    "ocr://page-truncated",
+    (e) => {
+      const { page, isLocal } = e.payload || {};
+      if (page != null) ui.warnPageTruncated(page, !!isLocal);
+    },
+  ]);
+
   // Terminal event: assembled markdown for the input.
   // Clear the streaming pres for this input (they were provisional; the
   // assembled markdown from ocr://done is the canonical result) and render
@@ -140,14 +153,7 @@ export async function subscribeOcrEvents(ui) {
       ui.setStatus("page images kept in: " + dir);
       // Also append to the transcript so the path is not lost when the status
       // line is overwritten by a subsequent run's states.
-      const body = document.getElementById("transcriptBody");
-      if (body) {
-        const note = document.createElement("p");
-        note.className = "placeholder";
-        note.style.cssText = "margin:0.5rem 0;font-size:0.8rem;";
-        note.textContent = "Page images kept in: " + dir;
-        body.appendChild(note);
-      }
+      ui.appendNote("Page images kept in: " + dir, "placeholder");
     },
   ]);
 

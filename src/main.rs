@@ -99,10 +99,10 @@ fn run() -> Res<()> {
     }
 
     // Local GGUF path only (remote returned above): default the repeat penalty to
-    // 1.15 so the stock quants do not fall into infinite-loop output on dense
+    // 1.3 so the stock quants do not fall into infinite-loop output on dense
     // pages. An explicit --repeat-penalty wins; remote/--gpu (full-precision
     // vLLM) is left untouched since it does not exhibit the quant loop.
-    args.repeat_penalty = args.repeat_penalty.or(Some(1.15));
+    args.repeat_penalty = args.repeat_penalty.or(Some(1.3));
     // Same gating for the DRY sampler: every local GGUF (any quant) gets 1.0 by
     // default because the loop-preventing ngram processor the upstream Python
     // wrapper relies on does not ship in the GGUF; DRY is llama.cpp's analog.

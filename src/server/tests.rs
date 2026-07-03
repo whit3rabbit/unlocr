@@ -133,7 +133,7 @@ fn remote_endpoint_sends_bearer_and_parses() {
             None,
         )
         .expect("remote ocr");
-    assert_eq!(out, "# remote ok");
+    assert_eq!(out.text, "# remote ok");
 
     let (request_line, auth) = rx.recv().expect("stub recorded request");
     assert_eq!(request_line, "POST /v1/chat/completions HTTP/1.1");
@@ -299,8 +299,13 @@ fn sse_streaming_fires_on_token() {
     );
     // Assembled text must be the concatenation of both chunks.
     assert_eq!(
-        assembled, "Hello world",
-        "assembled text mismatch: {assembled:?}"
+        assembled.text, "Hello world",
+        "assembled text mismatch: {:?}",
+        assembled.text
+    );
+    assert!(
+        !assembled.truncated,
+        "no finish_reason in the stub chunks; must not be flagged truncated"
     );
 }
 
@@ -371,7 +376,7 @@ fn stream_falls_back_to_plain_json_completion() {
     );
 
     let assembled = result.expect("ocr_via_stream fallback failed");
-    assert_eq!(assembled, "plain json ok", "fallback text mismatch");
+    assert_eq!(assembled.text, "plain json ok", "fallback text mismatch");
     // The fallback delivers the whole body as one on_token call.
     assert_eq!(tokens, vec!["plain json ok".to_string()]);
 }
@@ -603,4 +608,169 @@ fn provider_error_extracts_message() {
         None
     );
     assert_eq!(provider_error(&json!({})), None);
+}
+
+/// `finish_reason` extracts `choices[0].finish_reason` and returns None when
+/// absent (e.g. a mid-stream delta chunk that hasn't finished yet). Pure, no
+/// network. `OcrResult::truncated` is built from this returning `"length"`.
+#[test]
+fn finish_reason_extracts_value() {
+    assert_eq!(
+        finish_reason(&json!({"choices": [{"finish_reason": "length"}]})),
+        Some("length".to_string())
+    );
+    assert_eq!(
+        finish_reason(&json!({"choices": [{"finish_reason": "stop"}]})),
+        Some("stop".to_string())
+    );
+    assert_eq!(
+        finish_reason(&json!({"choices": [{"delta": {"content": "x"}}]})),
+        None
+    );
+    assert_eq!(finish_reason(&json!({})), None);
+}
+
+/// A non-streaming completion whose `finish_reason` is `"length"` must be
+/// flagged `truncated: true` (the model hit `max_tokens` without a natural
+/// stop, the strongest available signal of a repetition loop); `"stop"` must
+/// be `false`. Stub HTTP server, mirrors `remote_endpoint_sends_bearer_and_parses`.
+#[test]
+fn ocr_image_flags_truncated_from_finish_reason() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::mpsc;
+
+    fn run_once(finish_reason: &str) -> OcrResult {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
+        let port = listener.local_addr().unwrap().port();
+        let resp_body = json!({
+            "choices": [{ "message": { "content": "ok" }, "finish_reason": finish_reason }]
+        })
+        .to_string();
+        let http_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body,
+        );
+        let (tx, rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let Ok(s) = listener.incoming().next().unwrap() else {
+                return;
+            };
+            let mut reader = BufReader::new(s.try_clone().unwrap());
+            let mut writer = s;
+            let mut content_length = 0usize;
+            let mut first = String::new();
+            reader.read_line(&mut first).ok();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let t = line.trim_end_matches(['\r', '\n']);
+                if t.is_empty() {
+                    break;
+                }
+                if let Some(v) = t.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            let _ = reader.read_exact(&mut body);
+            let _ = writer.write_all(http_response.as_bytes());
+            let _ = tx.send(());
+        });
+
+        let ep = RemoteEndpoint {
+            base_url: format!("http://127.0.0.1:{port}"),
+            api_key: None,
+            model: None,
+        };
+        let out = ep
+            .ocr_image("p", "data:image/png;base64,AAAA", 64, None, None, None)
+            .expect("ocr");
+        rx.recv().expect("stub served the request");
+        out
+    }
+
+    assert!(
+        run_once("length").truncated,
+        "finish_reason length -> truncated"
+    );
+    assert!(
+        !run_once("stop").truncated,
+        "finish_reason stop -> not truncated"
+    );
+}
+
+/// Same signal over the streaming path: `finish_reason: "length"` on the
+/// terminal SSE chunk must set `OcrResult::truncated`. Mirrors
+/// `sse_streaming_fires_on_token`'s stub server.
+#[test]
+fn sse_streaming_flags_truncated_from_finish_reason() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    let sse_body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"loop\"}}]}\r\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\r\n",
+        "data: [DONE]\r\n",
+    );
+    let http_response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{}",
+        sse_body.len(),
+        sse_body,
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
+    let port = listener.local_addr().unwrap().port();
+
+    let http_resp_clone = http_response.clone();
+    std::thread::spawn(move || {
+        if let Ok(stream) = listener.accept() {
+            let (sock, _) = stream;
+            let mut reader = BufReader::new(sock.try_clone().expect("clone"));
+            let mut writer = sock;
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let t = line.trim_end_matches(['\r', '\n']);
+                if t.is_empty() {
+                    break;
+                }
+                if t.to_ascii_lowercase().starts_with("content-length:") {
+                    if let Some(v) = t.split_once(':').map(|x| x.1) {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            let _ = Read::read_exact(&mut reader, &mut body);
+            let _ = writer.write_all(http_resp_clone.as_bytes());
+        }
+    });
+
+    let base_url = format!("http://127.0.0.1:{port}");
+    let result = ocr_via_stream(
+        &base_url,
+        None,
+        None,
+        "test prompt",
+        "data:image/png;base64,AAAA",
+        64,
+        None,
+        None,
+        None,
+        &mut |_chunk: &str| true,
+        &|| false,
+    );
+
+    let out = result.expect("ocr_via_stream failed");
+    assert_eq!(out.text, "loop");
+    assert!(
+        out.truncated,
+        "finish_reason length on the terminal chunk must set truncated"
+    );
 }

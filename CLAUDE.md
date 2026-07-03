@@ -131,10 +131,12 @@ Thin wrapper. Full usage/benchmarks in README.md.
   preset; `--prompt` overrides it. Upstream Python knobs (`base_size`/`crop_mode`/
   gundam tiling, `no_repeat_ngram_size`) are NOT reachable via the OpenAI endpoint.
   BUT local llama-server accepts llama.cpp-native sampling fields in the chat-
-  completions body: `--dry-multiplier` (default 0.8 on local, + hardcoded
+  completions body: `--dry-multiplier` (default 1.0 on local, + hardcoded
   `dry_allowed_length: 4`) is the DRY-sampler analog of upstream's no-repeat-ngram
-  logits processor and is the loop-killer; `--repeat-penalty` 1.1 is only a mild
-  baseline. The model also natively emits `label [x, y, x, y]` layout annotations
+  logits processor and is the loop-killer; `--repeat-penalty` defaults to 1.3 on
+  local GGUF (bumped from 1.15; still "not always enough" per upstream repetition-
+  loop reports, see the README "Repetition loops" limitation bullet). The model
+  also natively emits `label [x, y, x, y]` layout annotations
   (coords 0-999) with EVERY prompt; upstream cleans them in Python, we port that as
   `strip_layout_annotations`/`AnnotationStripper` (src/output.rs), applied in
   `ocr_pages` to final text AND the PartialText stream unless the prompt contains

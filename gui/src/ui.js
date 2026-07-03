@@ -37,6 +37,10 @@ export function makeUi() {
   // subscribeOcrEvents) so the partial-text handler routes through ui.appendPartial
   // and shares state with reset()/clearPartial().
   let streamPre = null;
+  // Bumped once per reset() (i.e. once per file in a batch). Folded into the
+  // page-truncated toast id so two different files truncating on the same page
+  // number don't collide on the same toast DOM node (toasts.js keys purely by id).
+  let runNonce = 0;
   // EH-0004: the element focused before the run popup opened (the Run button), so
   // closePopup can return focus to it. Null while the popup is closed.
   let lastFocused = null;
@@ -197,6 +201,38 @@ export function makeUi() {
       pendingChunk += chunk;
       if (!rafHandle) rafHandle = requestAnimationFrame(flushPartial);
     },
+    /** A page's generation hit max_tokens without a natural stop, not a real
+     *  transcription. Surface it as a toast (visible even if the popup is
+     *  minimized) and a note in the transcript so the flagged page isn't
+     *  silently trusted as real text. The GGUF-quant repetition-loop framing +
+     *  remedies (--repeat-penalty/--dry-multiplier/quality tier) only apply to
+     *  the local backend (see README "Repetition loops"); a remote/full-
+     *  precision backend hitting the same signal is more likely just a
+     *  legitimately dense page, so `isLocal` gates the extra hint sentence
+     *  rather than presenting it as a diagnosis for every backend. */
+    warnPageTruncated(page, isLocal) {
+      const id = "truncated:" + runNonce + ":" + page;
+      showToast(id, {
+        kind: "error",
+        title: tr("toast.pageTruncated", { page }),
+      });
+      removeToast(id, 6000);
+      const text = isLocal
+        ? tr("transcript.pageTruncated", { page }) + " " + tr("transcript.pageTruncatedLocalHint")
+        : tr("transcript.pageTruncated", { page });
+      this.appendNote(text, "placeholder");
+    },
+    /** Append a small note <p> to the transcript body. Shared by
+     *  warnPageTruncated and ocr-events.js's images-kept handler so the note
+     *  markup lives in one place instead of two copy-pasted DOM blocks. */
+    appendNote(text, className) {
+      if (!body) return;
+      const note = document.createElement("p");
+      note.className = className;
+      note.style.cssText = "margin:0.5rem 0;font-size:0.8rem;";
+      note.textContent = text;
+      body.appendChild(note);
+    },
     /** Drop the provisional per-page <pre>s (ocr://done renders the assembled
      *  markdown instead) and reset the stream cursor. Popup log is left intact so
      *  the user can still scroll the streamed output after completion. */
@@ -219,6 +255,7 @@ export function makeUi() {
       if (body) body.innerHTML = "";
       if (body && placeholder) body.appendChild(placeholder);
       streamPre = null;
+      runNonce += 1;
       if (popupLog) popupLog.textContent = "";
       this.showProgress(false);
       this.setStatus(tr("status.idle"));
