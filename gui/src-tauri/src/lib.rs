@@ -42,8 +42,9 @@ mod state;
 pub use store::{Job, JobOptions};
 
 use cmd_model::{
-    clear_model_cache, get_cache_info, list_local_models, load_model, model_status, preflight,
-    stop_ocr, system_requirements, unload_model,
+    clear_model_cache, get_cache_info, list_available_quants, list_cached_files, list_local_models,
+    load_model, model_status, preflight, remove_cached_file, stop_ocr, system_requirements,
+    unload_model,
 };
 use cmd_run::{
     brew_available, brew_install, download_tool, export_markdown, host_os, list_tools, pdf_info,
@@ -228,6 +229,9 @@ pub fn run() {
             save_settings,
             get_cache_info,
             clear_model_cache,
+            list_available_quants,
+            list_cached_files,
+            remove_cached_file,
             list_notifications,
             add_notification,
             clear_notification,

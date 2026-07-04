@@ -96,6 +96,7 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
       dpi: opts.dpi,
       prompt: opts.prompt,
       keepImages: opts.keepImages,
+      temperature: opts.temperature,
       repeatPenalty: opts.repeatPenalty,
       dryMultiplier: opts.dryMultiplier,
       dryBase: opts.dryBase,

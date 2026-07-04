@@ -61,6 +61,7 @@ pub trait ImageOcr {
         prompt: &str,
         data_uri: &str,
         max_tokens: u32,
+        temperature: Option<f32>,
         repeat_penalty: Option<f32>,
         dry_multiplier: Option<f32>,
         dry_base: Option<f32>,
@@ -76,6 +77,7 @@ pub trait ImageOcr {
         prompt: &str,
         data_uri: &str,
         max_tokens: u32,
+        temperature: Option<f32>,
         repeat_penalty: Option<f32>,
         dry_multiplier: Option<f32>,
         dry_base: Option<f32>,
@@ -88,6 +90,7 @@ pub trait ImageOcr {
             prompt,
             data_uri,
             max_tokens,
+            temperature,
             repeat_penalty,
             dry_multiplier,
             dry_base,
@@ -142,13 +145,14 @@ pub(crate) fn ocr_via(
     prompt: &str,
     data_uri: &str,
     max_tokens: u32,
+    temperature: f32,
     repeat_penalty: Option<f32>,
     dry_multiplier: Option<f32>,
     dry_base: Option<f32>,
 ) -> Res<OcrResult> {
     let url = format!("{base_url}/v1/chat/completions");
     let mut body = serde_json::json!({
-        "temperature": 0,
+        "temperature": temperature,
         "max_tokens": max_tokens,
         "messages": [{
             "role": "user",
@@ -222,6 +226,7 @@ pub(crate) fn ocr_via_stream(
     prompt: &str,
     data_uri: &str,
     max_tokens: u32,
+    temperature: f32,
     repeat_penalty: Option<f32>,
     dry_multiplier: Option<f32>,
     dry_base: Option<f32>,
@@ -230,7 +235,7 @@ pub(crate) fn ocr_via_stream(
 ) -> Res<OcrResult> {
     let url = format!("{base_url}/v1/chat/completions");
     let mut body = serde_json::json!({
-        "temperature": 0,
+        "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": true,
         "messages": [{

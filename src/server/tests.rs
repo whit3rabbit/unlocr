@@ -131,6 +131,7 @@ fn remote_endpoint_sends_bearer_and_parses() {
             None,
             None,
             None,
+            None,
         )
         .expect("remote ocr");
     assert_eq!(out.text, "# remote ok");
@@ -191,8 +192,16 @@ fn remote_endpoint_injects_model_only_when_set() {
             api_key: None,
             model,
         };
-        ep.ocr_image("p", "data:image/png;base64,AAAA", 64, None, None, None)
-            .expect("ocr");
+        ep.ocr_image(
+            "p",
+            "data:image/png;base64,AAAA",
+            64,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("ocr");
         let body = rx.recv().expect("stub recorded body");
         serde_json::from_slice(&body).expect("body is json")
     }
@@ -278,6 +287,7 @@ fn sse_streaming_fires_on_token() {
         "test prompt",
         "data:image/png;base64,AAAA",
         64,
+        0.0,
         None,
         None,
         None,
@@ -365,6 +375,7 @@ fn stream_falls_back_to_plain_json_completion() {
         "test prompt",
         "data:image/png;base64,AAAA",
         64,
+        0.0,
         None,
         None,
         None,
@@ -442,6 +453,7 @@ fn sse_streaming_surfaces_provider_error() {
         "test prompt",
         "data:image/png;base64,AAAA",
         64,
+        0.0,
         None,
         None,
         None,
@@ -567,6 +579,7 @@ fn ocr_image_sends_dry_fields_only_when_set() {
             "data:image/png;base64,AAAA",
             64,
             None,
+            None,
             dry_multiplier,
             dry_base,
         )
@@ -593,6 +606,83 @@ fn ocr_image_sends_dry_fields_only_when_set() {
         base_only.get("dry_base").is_none(),
         "dry_base must be absent when dry_multiplier is None"
     );
+}
+
+/// `temperature` must always be present on the wire (unlike the Option-gated
+/// DRY/repeat-penalty knobs): `None` resolves to 0 (the historical hardcoded
+/// default), and an explicit value is sent verbatim. Stub HTTP server captures
+/// the request body, mirroring `ocr_image_sends_dry_fields_only_when_set`.
+#[test]
+fn ocr_image_resolves_temperature_default_and_override() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::mpsc;
+
+    fn run_once(temperature: Option<f32>) -> serde_json::Value {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
+        let port = listener.local_addr().unwrap().port();
+        let resp_body = json!({ "choices": [{ "message": { "content": "ok" } }] }).to_string();
+        let http_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            resp_body.len(),
+            resp_body,
+        );
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let Ok(s) = listener.incoming().next().unwrap() else {
+                return;
+            };
+            let mut reader = BufReader::new(s.try_clone().unwrap());
+            let mut writer = s;
+            let mut content_length = 0usize;
+            let mut first = String::new();
+            reader.read_line(&mut first).ok();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let t = line.trim_end_matches(['\r', '\n']);
+                if t.is_empty() {
+                    break;
+                }
+                if let Some(v) = t.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            let _ = reader.read_exact(&mut body);
+            let _ = writer.write_all(http_response.as_bytes());
+            let _ = tx.send(body);
+        });
+
+        let ep = RemoteEndpoint {
+            base_url: format!("http://127.0.0.1:{port}"),
+            api_key: None,
+            model: None,
+        };
+        ep.ocr_image(
+            "p",
+            "data:image/png;base64,AAAA",
+            64,
+            temperature,
+            None,
+            None,
+            None,
+        )
+        .expect("ocr");
+        let body = rx.recv().expect("stub recorded body");
+        serde_json::from_slice(&body).expect("body is json")
+    }
+
+    let default = run_once(None);
+    assert_eq!(
+        default["temperature"],
+        json!(0.0f32),
+        "None must resolve to 0, the historical hardcoded default"
+    );
+
+    let explicit = run_once(Some(0.7));
+    assert_eq!(explicit["temperature"], json!(0.7f32));
 }
 
 /// `provider_error` extracts the message from the OpenAI/vLLM/SGLang error
@@ -686,7 +776,15 @@ fn ocr_image_flags_truncated_from_finish_reason() {
             model: None,
         };
         let out = ep
-            .ocr_image("p", "data:image/png;base64,AAAA", 64, None, None, None)
+            .ocr_image(
+                "p",
+                "data:image/png;base64,AAAA",
+                64,
+                None,
+                None,
+                None,
+                None,
+            )
             .expect("ocr");
         rx.recv().expect("stub served the request");
         out
@@ -760,6 +858,7 @@ fn sse_streaming_flags_truncated_from_finish_reason() {
         "test prompt",
         "data:image/png;base64,AAAA",
         64,
+        0.0,
         None,
         None,
         None,

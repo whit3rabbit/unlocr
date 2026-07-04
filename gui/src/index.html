@@ -271,12 +271,10 @@
                   <div class="opts__grid">
                     <label class="opts__field">
                       <span class="opts__label" data-i18n="opts.quant">Quant</span>
-                      <!-- Tiers map to CLI quant names: good=Q8_0 (default), less=Q4_K_M, best=BF16 -->
-                      <select class="opts__select" id="optQuant">
-                        <option value="Q8_0" selected>good (Q8_0)</option>
-                        <option value="Q4_K_M">less (Q4_K_M)</option>
-                        <option value="BF16">best (BF16)</option>
-                      </select>
+                      <!-- Options populated at boot from list_available_quants (model.js
+                           populateQuantSelects): all 13 published quants, cached state
+                           marked, not just the 3 CLI Quality tiers. -->
+                      <select class="opts__select" id="optQuant"></select>
                       <!-- Q4_K_M is known to loop on dense pages; steer users to a
                            bigger quant or the repeat-penalty knob below. -->
                       <span class="opts__hint" id="quantHint" hidden>
@@ -330,6 +328,13 @@
                         <option value="" selected data-i18n="opts.chatModelDefault">model default</option>
                         <option value="deepseek-ocr" data-i18n="opts.chatDeepseekOcr">deepseek-ocr</option>
                       </select>
+                    </label>
+                    <!-- Sampling temperature; blank = 0 (deterministic OCR, the
+                         historical default). Unlike DRY/repeat-penalty, applies to
+                         both local and remote backends. -->
+                    <label class="opts__field">
+                      <span class="opts__label" data-i18n="opts.temperature">Temperature</span>
+                      <input class="opts__num" id="optTemperature" type="number" min="0" max="2" step="0.05" placeholder="0 (deterministic, default)" data-i18n-ph="opts.temperaturePh" />
                     </label>
                     <!-- Per-run sampling penalty; blank = 1.3 on the local backend
                          (breaks the Q4_K_M infinite-loop failure mode), server default
@@ -579,12 +584,10 @@
                 </label>
                 <label class="opts__field">
                   <span class="opts__label" data-i18n="settings.defaultQuant">Default quant</span>
-                  <!-- Tiers map to CLI quant names: good=Q8_0 (default), less=Q4_K_M, best=BF16 -->
-                  <select class="opts__select" id="setQuant">
-                    <option value="Q8_0">good (Q8_0)</option>
-                    <option value="Q4_K_M">less (Q4_K_M)</option>
-                    <option value="BF16">best (BF16)</option>
-                  </select>
+                  <!-- Options populated at boot from list_available_quants (model.js
+                       populateQuantSelects): all 13 published quants, cached state
+                       marked, not just the 3 CLI Quality tiers. -->
+                  <select class="opts__select" id="setQuant"></select>
                 </label>
                 <!-- Connection knobs tucked behind a native disclosure so they do
                      not clutter the form. The remote base URL prefills to
@@ -644,6 +647,26 @@
                 </div>
                 <button class="model-btn model-btn--ghost" id="clearCacheBtn" type="button" data-i18n="settings.clearCache">Clear cached models</button>
                 <span class="settings__cache-status" id="clearCacheStatus" hidden></span>
+              </div>
+              <!-- Per-file model cache management: filename/size/sha256/mtime + delete.
+                   Populated by settings.js wireModelFilesTable() via list_cached_files. -->
+              <div class="settings__model-files">
+                <div class="panel__head">
+                  <span class="panel__label" data-i18n="label.cachedModelFiles">Cached model files</span>
+                </div>
+                <table class="settings__files-table" id="modelFilesTable">
+                  <thead>
+                    <tr>
+                      <th data-i18n="settings.fileName">File</th>
+                      <th data-i18n="settings.fileSize">Size</th>
+                      <th data-i18n="settings.fileSha256">SHA-256</th>
+                      <th data-i18n="settings.fileModified">Modified</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="modelFilesTbody"></tbody>
+                </table>
+                <p class="placeholder" id="modelFilesEmpty" data-i18n="settings.noCachedFiles">No cached files.</p>
               </div>
               <!-- System Requirements: CPU, RAM, GPU, disk. Detected on Settings open + Recheck.
                    Populated by main.js wireSystemRequirements() via system_requirements command. -->
@@ -807,11 +830,10 @@
         </div>
         <label class="opts__field">
           <span class="opts__label" data-i18n="settings.defaultQuant">Default quant</span>
-          <select class="opts__select" id="qsQuant">
-            <option value="Q8_0">good (Q8_0)</option>
-            <option value="Q4_K_M">less (Q4_K_M)</option>
-            <option value="BF16">best (BF16)</option>
-          </select>
+          <!-- Options populated at boot from list_available_quants (model.js
+               populateQuantSelects): all 13 published quants, cached state
+               marked, not just the 3 CLI Quality tiers. -->
+          <select class="opts__select" id="qsQuant"></select>
         </label>
         <label class="opts__field">
           <span class="opts__label" data-i18n="settings.defaultDpi">Default DPI</span>

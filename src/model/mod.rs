@@ -15,7 +15,10 @@ pub(crate) const MMPROJ: &str = "mmproj-Unlimited-OCR-F16.gguf";
 /// Pinned model revision (a commit sha, NOT the mutable `main` ref).
 pub(crate) const REV: &str = "028d04678db356095d0015b70f0803f2179180f4";
 
-/// sha256 of each shipped GGUF at REV.
+/// sha256 of each shipped GGUF at REV. Verified live against HF's file-metadata
+/// API (`/api/models/{REPO}/revision/{REV}?blobs=true`, each entry's `lfs.sha256`)
+/// at the exact pinned REV commit -- not fabricated. The 3 originally-pinned
+/// quants (BF16/Q8_0/Q4_K_M) were re-checked at the same call and are unchanged.
 pub(crate) const DIGESTS: &[(&str, &str)] = &[
     (
         "Unlimited-OCR-BF16.gguf",
@@ -26,14 +29,143 @@ pub(crate) const DIGESTS: &[(&str, &str)] = &[
         "234c36f679a3768f5564e9e02c2c1deacbd5677b9c8558a57133f1813f6dd3b8",
     ),
     (
+        "Unlimited-OCR-Q6_K.gguf",
+        "a9994800e005190197a4cc5c0b54a88db5c6aba6f6dca48a27992ea2e1c0b3b3",
+    ),
+    (
+        "Unlimited-OCR-Q5_K_M.gguf",
+        "3f3fc21627c8998cc5b9f682d913ad392f84f72d7037ab465f50a1c8c46d02c2",
+    ),
+    (
+        "Unlimited-OCR-Q5_K_S.gguf",
+        "f4390be9a476917d4a9e05b1abde21dd16abb869fe9fd8a13fd279a26113ca61",
+    ),
+    (
         "Unlimited-OCR-Q4_K_M.gguf",
         "c8461bded976eac709a33f6b26e1414efcd2124a203f2ee93ee984a4c9e9265b",
+    ),
+    (
+        "Unlimited-OCR-Q4_K_S.gguf",
+        "0d16b0ed59d1dfb0ed3c304fc3cd00a18a0b8f6ce53756717be25e75e13691a7",
+    ),
+    (
+        "Unlimited-OCR-Q3_K_M.gguf",
+        "d90e4b8e6b9c9c6b1769d09958588df74a7e1393a0ee39b9fb54b9eca3e219fe",
+    ),
+    (
+        "Unlimited-OCR-IQ4_XS.gguf",
+        "758dcd1d17642961432a5978a672d52a8e59b52f7cbd65e7fbb34acd6b43e781",
+    ),
+    (
+        "Unlimited-OCR-IQ4_NL.gguf",
+        "c910c1a3b0469e323bd6402e764e815fbbdc98ce33ed79cd955efc5faae14ad2",
+    ),
+    (
+        "Unlimited-OCR-IQ3_M.gguf",
+        "869a3dff3dec40f9ae7f8d151089bf75e1c9615cfb7c022389891957344a89a0",
+    ),
+    (
+        "Unlimited-OCR-IQ3_XXS.gguf",
+        "4fd509dd1806355a0cec8a0e63d71edc888577f832d3aa7cd68eb9a70ceca0fd",
+    ),
+    (
+        "Unlimited-OCR-IQ2_M.gguf",
+        "fecb9e983f0fadbc11c6cce00611c05179dd7b6003abfad3956404778595d59e",
     ),
     (
         "mmproj-Unlimited-OCR-F16.gguf",
         "4f28c295e1fcf67a97488e356f2b4372da4702b77fdfad0fa138b5821325743c",
     ),
 ];
+
+/// One entry in the published quant lineup for `REPO`. `size_bytes` is the exact
+/// HF file size (GUI display / download-size estimate); `tier` is `Some` only
+/// for the 3 quants the CLI's `Quality` enum (`cli_args.rs`) aliases to
+/// best/good/less, `None` for the rest (no friendly alias, selected by exact tag).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct QuantInfo {
+    pub name: &'static str,
+    pub size_bytes: u64,
+    pub tier: Option<&'static str>,
+}
+
+/// All 13 published language-model quants for `REPO`, in the README's documented
+/// order (sizes/names verified against the same HF API call as `DIGESTS`).
+pub const KNOWN_QUANTS: &[QuantInfo] = &[
+    QuantInfo {
+        name: "BF16",
+        size_bytes: 5_876_578_080,
+        tier: Some("best"),
+    },
+    QuantInfo {
+        name: "Q8_0",
+        size_bytes: 3_126_139_904,
+        tier: Some("good"),
+    },
+    QuantInfo {
+        name: "Q6_K",
+        size_bytes: 2_613_275_904,
+        tier: None,
+    },
+    QuantInfo {
+        name: "Q5_K_M",
+        size_bytes: 2_219_208_704,
+        tier: None,
+    },
+    QuantInfo {
+        name: "Q5_K_S",
+        size_bytes: 2_098_952_704,
+        tier: None,
+    },
+    QuantInfo {
+        name: "Q4_K_M",
+        size_bytes: 1_950_326_784,
+        tier: Some("less"),
+    },
+    QuantInfo {
+        name: "Q4_K_S",
+        size_bytes: 1_805_289_984,
+        tier: None,
+    },
+    QuantInfo {
+        name: "Q3_K_M",
+        size_bytes: 1_553_635_584,
+        tier: None,
+    },
+    QuantInfo {
+        name: "IQ4_XS",
+        size_bytes: 1_640_897_024,
+        tier: None,
+    },
+    QuantInfo {
+        name: "IQ4_NL",
+        size_bytes: 1_701_901_824,
+        tier: None,
+    },
+    QuantInfo {
+        name: "IQ3_M",
+        size_bytes: 1_448_949_504,
+        tier: None,
+    },
+    QuantInfo {
+        name: "IQ3_XXS",
+        size_bytes: 1_335_367_424,
+        tier: None,
+    },
+    QuantInfo {
+        name: "IQ2_M",
+        size_bytes: 1_232_148_224,
+        tier: None,
+    },
+];
+
+/// The full published quant lineup (name/size/tier), for a GUI quant picker.
+/// Advisory/display metadata only, not an allowlist: `validate_quant` remains
+/// the sole enforcement point, so a custom/future quant tag still works even
+/// though it has no entry here.
+pub fn known_quants() -> &'static [QuantInfo] {
+    KNOWN_QUANTS
+}
 
 /// Paths to the resolved model and multimodal projector files.
 #[derive(Debug)]
@@ -89,7 +221,7 @@ pub(crate) fn hex_from_digest(digest: impl AsRef<[u8]>) -> String {
 /// sha256 of a file as lowercase hex, streamed so a multi-GB GGUF never loads into
 /// memory. Hashing the finished `.part` (rather than incrementally during the
 /// stream) keeps the resume path correct: the bytes already on disk are included.
-pub(crate) fn file_sha256(path: &Path) -> Res<String> {
+pub fn file_sha256(path: &Path) -> Res<String> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
     let mut f = fs::File::open(path)?;

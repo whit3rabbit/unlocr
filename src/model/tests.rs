@@ -127,6 +127,49 @@ fn stream_to_part_resumes_appends_from_offset() {
 }
 
 #[test]
+fn known_quants_has_13_unique_entries_all_pinned() {
+    assert_eq!(
+        KNOWN_QUANTS.len(),
+        13,
+        "README documents 13 language-model quants"
+    );
+
+    let names: std::collections::HashSet<&str> = KNOWN_QUANTS.iter().map(|q| q.name).collect();
+    assert_eq!(
+        names.len(),
+        13,
+        "KNOWN_QUANTS must not contain duplicate quant tags"
+    );
+
+    // Every KNOWN_QUANTS entry must have a matching DIGESTS entry (the two
+    // tables are hand-maintained separately; this catches a typo'd/forgotten
+    // entry in one but not the other).
+    for q in KNOWN_QUANTS {
+        let filename = model_filename(q.name);
+        assert!(
+            DIGESTS.iter().any(|(n, _)| *n == filename),
+            "KNOWN_QUANTS entry {:?} has no matching DIGESTS entry ({filename})",
+            q.name
+        );
+    }
+
+    // Exactly the 3 CLI Quality-tier aliases carry a tier; the rest are None.
+    let tiered: Vec<&str> = KNOWN_QUANTS
+        .iter()
+        .filter_map(|q| q.tier.map(|_| q.name))
+        .collect();
+    assert_eq!(tiered.len(), 3);
+    assert!(tiered.contains(&"BF16"));
+    assert!(tiered.contains(&"Q8_0"));
+    assert!(tiered.contains(&"Q4_K_M"));
+}
+
+#[test]
+fn known_quants_accessor_returns_the_const_table() {
+    assert_eq!(known_quants().len(), KNOWN_QUANTS.len());
+}
+
+#[test]
 fn filename_format() {
     // quant tag maps directly into the stock filename format.
     assert_eq!(model_filename("Q8_0"), "Unlimited-OCR-Q8_0.gguf");

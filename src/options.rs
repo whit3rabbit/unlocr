@@ -49,6 +49,12 @@ pub struct OcrOptions {
     /// no local default is injected for this one, since it's newer/less
     /// battle-tested.
     pub dry_base: Option<f32>,
+    /// Sampling temperature sent in the request body. None resolves to 0.0 (the
+    /// historical hardcoded value, deterministic OCR, matching the upstream
+    /// README's `--temp 0` recommendation). Unlike the llama.cpp-only DRY/
+    /// repeat-penalty knobs, this is a standard OpenAI field so it applies to
+    /// both local and remote modes.
+    pub temperature: Option<f32>,
     /// Page span to OCR, 1-based inclusive `(first, last)`. None = all pages. An
     /// open upper bound (`last == None`) means "first..end of document": pdftoppm
     /// renders `-f first` with no `-l` to the last page natively. Maps to pdftoppm
@@ -77,6 +83,7 @@ impl Default for OcrOptions {
             repeat_penalty: None,
             dry_multiplier: None,
             dry_base: None,
+            temperature: None,
             pages: None,
         }
     }
@@ -122,6 +129,13 @@ impl OcrOptions {
         if let Some(db) = self.dry_base {
             if !db.is_finite() || db <= 0.0 {
                 return Err("dry_base must be a finite value greater than 0".into());
+            }
+        }
+        // 0.0 is the meaningful default (deterministic OCR), not an "off" value,
+        // so only rule out non-finite and negative.
+        if let Some(t) = self.temperature {
+            if !t.is_finite() || t < 0.0 {
+                return Err("temperature must be a finite value of 0 or greater".into());
             }
         }
         if let Some((first, last)) = self.pages {

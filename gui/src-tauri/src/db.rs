@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS settings (
     page_to             INTEGER,
     model_file          TEXT    NOT NULL DEFAULT '',
     mmproj_file         TEXT    NOT NULL DEFAULT '',
-    output_mode         TEXT    NOT NULL DEFAULT 'single'
+    output_mode         TEXT    NOT NULL DEFAULT 'single',
+    temperature         REAL
 );
 
 CREATE TABLE IF NOT EXISTS notifications (
@@ -115,14 +116,15 @@ pub(crate) fn db_path() -> Result<PathBuf, String> {
 
 /// Apply the schema + connection PRAGMAs to an already-open connection. Shared by
 /// the file connection (`open_and_configure`) and in-memory test connections.
-/// `user_version` pins the schema at 2; bump + migrate here when the schema grows.
+/// `user_version` pins the schema at 3; bump + migrate here when the schema grows.
 ///
-/// Two distinct branches, not a `v < 2` catch-all: `SCHEMA_SQL`'s `CREATE TABLE`
-/// already has the full v2 `settings` shape, so a fresh DB (`v == 0`) must NOT
-/// also run the `ALTER TABLE ADD COLUMN` batch below (it would fail with
-/// "duplicate column"). Only a pre-existing v1 DB (`v == 1`) needs the additive
-/// migration; `ALTER TABLE ADD COLUMN` never rewrites existing column data, so
-/// every pre-migration field survives untouched.
+/// Three distinct branches, not a `v < 3` catch-all: `SCHEMA_SQL`'s `CREATE TABLE`
+/// already has the full v3 `settings` shape, so a fresh DB (`v == 0`) must NOT
+/// also run either `ALTER TABLE ADD COLUMN` batch below (it would fail with
+/// "duplicate column"). A pre-existing v1 DB needs both migrations (v1->v2 then
+/// v2->v3 columns); a v2 DB needs only the v2->v3 column. `ALTER TABLE ADD
+/// COLUMN` never rewrites existing column data, so every pre-migration field
+/// survives untouched.
 pub(crate) fn init_conn(conn: &Connection) -> Result<(), String> {
     conn.pragma_update(None, "foreign_keys", true)
         .map_err(|e| format!("could not enable foreign_keys: {e}"))?;
@@ -134,36 +136,40 @@ pub(crate) fn init_conn(conn: &Connection) -> Result<(), String> {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap_or(0);
     if v == 0 {
-        conn.pragma_update(None, "user_version", 2u32)
+        conn.pragma_update(None, "user_version", 3u32)
             .map_err(|e| format!("could not set user_version: {e}"))?;
-    } else if v == 1 {
+    } else if v == 1 || v == 2 {
         // Wrapped in one transaction: SQLite runs each ALTER TABLE in autocommit
         // mode otherwise, so a mid-batch failure (disk full, killed process) would
-        // leave some columns added but `user_version` still at 1, and the next
+        // leave some columns added but `user_version` un-bumped, and the next
         // launch's retry would hit "duplicate column name" forever. `commit()` (or
-        // the auto-rollback on an early `?` return via `Drop`) makes the 13 column
+        // the auto-rollback on an early `?` return via `Drop`) makes the column
         // adds + the version bump all-or-nothing.
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| format!("could not start settings migration transaction: {e}"))?;
-        tx.execute_batch(
-            "ALTER TABLE settings ADD COLUMN engine_preset    TEXT    NOT NULL DEFAULT 'llamacpp';
-             ALTER TABLE settings ADD COLUMN image_max_tokens INTEGER;
-             ALTER TABLE settings ADD COLUMN chat_template    TEXT    NOT NULL DEFAULT '';
-             ALTER TABLE settings ADD COLUMN repeat_penalty   REAL;
-             ALTER TABLE settings ADD COLUMN dry_multiplier   REAL;
-             ALTER TABLE settings ADD COLUMN dry_base         REAL;
-             ALTER TABLE settings ADD COLUMN keep_images      INTEGER NOT NULL DEFAULT 0 CHECK(keep_images IN (0,1));
-             ALTER TABLE settings ADD COLUMN pages_mode       TEXT    NOT NULL DEFAULT 'all';
-             ALTER TABLE settings ADD COLUMN page_from        INTEGER;
-             ALTER TABLE settings ADD COLUMN page_to          INTEGER;
-             ALTER TABLE settings ADD COLUMN model_file       TEXT    NOT NULL DEFAULT '';
-             ALTER TABLE settings ADD COLUMN mmproj_file      TEXT    NOT NULL DEFAULT '';
-             ALTER TABLE settings ADD COLUMN output_mode      TEXT    NOT NULL DEFAULT 'single';",
-        )
-        .map_err(|e| format!("could not migrate settings to v2: {e}"))?;
-        tx.pragma_update(None, "user_version", 2u32)
-            .map_err(|e| format!("could not set user_version to 2: {e}"))?;
+        if v == 1 {
+            tx.execute_batch(
+                "ALTER TABLE settings ADD COLUMN engine_preset    TEXT    NOT NULL DEFAULT 'llamacpp';
+                 ALTER TABLE settings ADD COLUMN image_max_tokens INTEGER;
+                 ALTER TABLE settings ADD COLUMN chat_template    TEXT    NOT NULL DEFAULT '';
+                 ALTER TABLE settings ADD COLUMN repeat_penalty   REAL;
+                 ALTER TABLE settings ADD COLUMN dry_multiplier   REAL;
+                 ALTER TABLE settings ADD COLUMN dry_base         REAL;
+                 ALTER TABLE settings ADD COLUMN keep_images      INTEGER NOT NULL DEFAULT 0 CHECK(keep_images IN (0,1));
+                 ALTER TABLE settings ADD COLUMN pages_mode       TEXT    NOT NULL DEFAULT 'all';
+                 ALTER TABLE settings ADD COLUMN page_from        INTEGER;
+                 ALTER TABLE settings ADD COLUMN page_to          INTEGER;
+                 ALTER TABLE settings ADD COLUMN model_file       TEXT    NOT NULL DEFAULT '';
+                 ALTER TABLE settings ADD COLUMN mmproj_file      TEXT    NOT NULL DEFAULT '';
+                 ALTER TABLE settings ADD COLUMN output_mode      TEXT    NOT NULL DEFAULT 'single';",
+            )
+            .map_err(|e| format!("could not migrate settings to v2: {e}"))?;
+        }
+        tx.execute_batch("ALTER TABLE settings ADD COLUMN temperature REAL;")
+            .map_err(|e| format!("could not migrate settings to v3: {e}"))?;
+        tx.pragma_update(None, "user_version", 3u32)
+            .map_err(|e| format!("could not set user_version to 3: {e}"))?;
         tx.commit()
             .map_err(|e| format!("could not commit settings migration: {e}"))?;
     }
@@ -226,16 +232,16 @@ pub(crate) fn mem_db() -> rusqlite::Connection {
 mod tests {
     use super::*;
 
-    /// A fresh in-memory DB reports `user_version = 2` after `init_conn`, the
+    /// A fresh in-memory DB reports `user_version = 3` after `init_conn`, the
     /// schema-version hook that replaces the old per-JSON `version` envelope.
     #[test]
-    fn schema_sets_user_version_to_2() {
+    fn schema_sets_user_version_to_3() {
         let conn = Connection::open_in_memory().unwrap();
         init_conn(&conn).unwrap();
         let v: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
     }
 
     /// `init_conn` is idempotent: running it twice on the same DB does not error
@@ -257,25 +263,95 @@ mod tests {
         assert_eq!(n, 3);
     }
 
-    /// Same as `init_conn_is_idempotent`, but starting from an already-v2 DB: the
-    /// `ALTER TABLE ADD COLUMN` branch (gated on `v == 1`) must not re-run on a
-    /// second call, or it would fail with "duplicate column".
+    /// Same as `init_conn_is_idempotent`, but starting from an already-v3 DB: the
+    /// `ALTER TABLE ADD COLUMN` branches (gated on `v == 1 || v == 2`) must not
+    /// re-run on a second call, or it would fail with "duplicate column".
     #[test]
-    fn init_conn_is_idempotent_on_v2() {
+    fn init_conn_is_idempotent_on_v3() {
         let conn = Connection::open_in_memory().unwrap();
         init_conn(&conn).unwrap();
         init_conn(&conn).unwrap();
         let v: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
+    }
+
+    /// A pre-migration v2 DB (the 23-column `settings` shape, before
+    /// `temperature`) upgrades cleanly: `init_conn` adds just the one new
+    /// column and bumps `user_version` to 3, without re-running the v1->v2 batch.
+    #[test]
+    fn migration_upgrades_v2_db_to_v3() {
+        const V2_SCHEMA: &str = r#"
+            CREATE TABLE settings (
+                id                  INTEGER PRIMARY KEY CHECK(id = 1),
+                mode                TEXT    NOT NULL DEFAULT 'local',
+                remote_base_url     TEXT    NOT NULL DEFAULT 'http://127.0.0.1:8080',
+                remote_api_key      TEXT    NOT NULL DEFAULT '',
+                remote_model        TEXT    NOT NULL DEFAULT '',
+                default_quant       TEXT    NOT NULL,
+                llama_bin           TEXT    NOT NULL DEFAULT '',
+                default_dpi         INTEGER NOT NULL,
+                default_max_tokens  INTEGER NOT NULL,
+                default_prompt      TEXT    NOT NULL,
+                idle_unload_minutes INTEGER NOT NULL DEFAULT 15,
+                engine_preset       TEXT    NOT NULL DEFAULT 'llamacpp',
+                image_max_tokens    INTEGER,
+                chat_template       TEXT    NOT NULL DEFAULT '',
+                repeat_penalty      REAL,
+                dry_multiplier      REAL,
+                dry_base            REAL,
+                keep_images         INTEGER NOT NULL DEFAULT 0 CHECK(keep_images IN (0,1)),
+                pages_mode          TEXT    NOT NULL DEFAULT 'all',
+                page_from           INTEGER,
+                page_to             INTEGER,
+                model_file          TEXT    NOT NULL DEFAULT '',
+                mmproj_file         TEXT    NOT NULL DEFAULT '',
+                output_mode         TEXT    NOT NULL DEFAULT 'single'
+            );
+        "#;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V2_SCHEMA).unwrap();
+        conn.pragma_update(None, "user_version", 2u32).unwrap();
+        conn.execute(
+            "INSERT INTO settings (id, mode, remote_base_url, remote_model, default_quant,
+                                    llama_bin, default_dpi, default_max_tokens, default_prompt)
+             VALUES (1, 'remote', 'http://gpu:8000', 'baidu/Unlimited-OCR', 'Q4_K_M',
+                     '/opt/llama-server', 300, 8192, '<|x|>')",
+            [],
+        )
+        .unwrap();
+
+        init_conn(&conn).unwrap();
+
+        let v: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(v, 3);
+
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(settings)").unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert!(cols.contains(&"temperature".to_string()));
+
+        let mode: String = conn
+            .query_row("SELECT mode FROM settings WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(mode, "remote");
     }
 
     /// A pre-migration v1 DB (the old 10-column `settings` shape) upgrades
-    /// cleanly: `init_conn` adds the 13 new columns, bumps `user_version` to 2,
-    /// and does not touch the pre-existing row's original values.
+    /// cleanly through both batches: `init_conn` adds the 13 v2 columns plus
+    /// `temperature`, bumps `user_version` to 3, and does not touch the
+    /// pre-existing row's original values.
     #[test]
-    fn migration_upgrades_v1_db_to_v2() {
+    fn migration_upgrades_v1_db_to_v3() {
         const V1_SCHEMA: &str = r#"
             CREATE TABLE settings (
                 id                  INTEGER PRIMARY KEY CHECK(id = 1),
@@ -308,7 +384,7 @@ mod tests {
         let v: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
 
         let cols: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(settings)").unwrap();
@@ -331,6 +407,7 @@ mod tests {
             "model_file",
             "mmproj_file",
             "output_mode",
+            "temperature",
         ] {
             assert!(cols.contains(&c.to_string()), "missing column {c}");
         }

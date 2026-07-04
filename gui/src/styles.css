@@ -1152,6 +1152,26 @@ button {
   font-size: 12px;
 }
 
+/* Settings > Cached model files: one row per on-disk GGUF (name/size/sha/mtime + delete). */
+.settings__model-files {
+  margin-top: 18px;
+}
+.settings__files-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.settings__files-table th,
+.settings__files-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--bd);
+}
+.settings__files-table td.mono {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
 /* Settings > System Requirements: same row layout as Dependencies.
    Adds a warn (amber) state for marginal metrics and colored verdict labels. */
 .settings__sysreq {

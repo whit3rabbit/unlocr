@@ -23,6 +23,7 @@ import {
 import {
   wireSettings,
   wireCacheControls,
+  wireModelFilesTable,
   wireDependencies,
   wireSystemRequirements,
   wireAutoSaveEngineOptions,
@@ -133,6 +134,7 @@ window.addEventListener("DOMContentLoaded", () => {
     wireAutoSaveEngineOptions();
   });
   wireCacheControls();
+  wireModelFilesTable();
   wireSystemRequirements();
   wireDependencies();
   wireQuickSettingsPopup();

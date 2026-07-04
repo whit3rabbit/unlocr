@@ -365,42 +365,55 @@ export function attachLoadListeners() {
   });
 }
 
-/** Map a raw quant value to the human-readable tier label used in the select.
- *  Matches the CLI tier semantics: best=BF16, good=Q8_0, less=Q4_K_M.
- *  Unknown quants fall back to the raw value so future quants degrade gracefully. */
-export function quantTierLabel(quant) {
-  const TIERS = { BF16: "best", Q8_0: "good", Q4_K_M: "less" };
-  const tier = TIERS[quant];
-  return tier ? tr("tier.format", { tier: tr("tier." + tier), quant }) : quant;
+/** Format a quant's display label: "good (Q8_0)"-style when the backend
+ *  supplies a best/good/less tier alias, else just the raw quant tag (the 10
+ *  quants with no CLI Quality alias). */
+export function quantTierLabel(name, tier) {
+  return tier ? tr("tier.format", { tier: tr("tier." + tier), quant: name }) : name;
 }
 
-/** Mark which quant options are already cached on disk (list_local_models) by
- *  appending a check to their label. Applies to both the run-time Quant select and
- *  the Settings default-quant select. Best-effort; never throws. Preserves the tier
- *  label prefix so the cached marker appends to "good (Q8_0)", not just "Q8_0". */
-export async function markCachedQuants() {
+/** Rebuild the 3 quant `<select>`s (`#optQuant`, `#setQuant`, `#qsQuant`) from
+ *  the backend's full published lineup (list_available_quants: all 13 quants,
+ *  not just the 3 CLI Quality tiers), marking each already-cached option.
+ *  Replaces the previously-static `<option>` lists in index.html. Preserves
+ *  each select's current selection when it's still an available quant, else
+ *  falls back to Q8_0 (OcrOptions::default().quant). Best-effort; never throws. */
+export async function populateQuantSelects() {
   let t;
   try {
     t = requireTauri();
   } catch (err) {
     return;
   }
-  let cached = [];
+  let quants = [];
   try {
-    cached = await t.core.invoke("list_local_models");
+    quants = await t.core.invoke("list_available_quants");
   } catch (err) {
     return;
   }
-  const set = new Set(cached || []);
-  ["optQuant", "setQuant"].forEach((id) => {
+  const names = new Set(quants.map((q) => q.name));
+  ["optQuant", "setQuant", "qsQuant"].forEach((id) => {
     const sel = document.getElementById(id);
     if (!sel) return;
-    Array.from(sel.options).forEach((opt) => {
-      const base = opt.value;
-      const label = quantTierLabel(base);
-      opt.textContent = set.has(base) ? label + tr("model.cached") : label;
+    const prevValue = sel.value;
+    sel.innerHTML = "";
+    quants.forEach((q) => {
+      const opt = document.createElement("option");
+      opt.value = q.name;
+      const label = quantTierLabel(q.name, q.tier);
+      opt.textContent = q.cached ? label + tr("model.cached") : label;
+      sel.appendChild(opt);
     });
+    sel.value = names.has(prevValue) ? prevValue : names.has("Q8_0") ? "Q8_0" : sel.value;
   });
+}
+
+/** Alias kept for existing call sites (main.js, settings.js): a single
+ *  re-fetch now does both jobs (relabeling AND cached-marking), since the
+ *  `<select>` options are rebuilt from the backend rather than statically
+ *  relabeled in place. */
+export async function markCachedQuants() {
+  await populateQuantSelects();
 }
 
 // EH-0013: re-render the quant tier labels and the model Load-button label on a
