@@ -84,7 +84,10 @@ pub fn generate_install_hint() -> String {
         }
     }
 
-    let mut hint = "llama-server (from llama.cpp >= b8530) is required.\nInstall it using one of these options:\n".to_string();
+    let mut hint = "llama-server (llama.cpp) is required. unlocr auto-downloads a patched build \
+         (Unlimited-OCR R-SWA, PR #24975) on first run; a manually installed llama.cpp may lack it.\n\
+         To install manually, use one of these options:\n"
+        .to_string();
     for m in &methods {
         hint.push_str(m);
         hint.push('\n');

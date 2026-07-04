@@ -22,22 +22,22 @@ This is vibe coded so don't expect everything to be perfect. Feel free to submit
 
 To run `unlocr`, you need:
 1.  **poppler** (provides `pdftoppm` for rasterizing PDF pages to images).
-2.  **llama.cpp** build `>= b8530` (PR [#17400](https://github.com/ggml-org/llama.cpp/pull/17400) merged 2026-03-25 is required to support DeepSeek-OCR).
+2.  **llama-server** — a **patched** `llama.cpp` build carrying the Unlimited-OCR R-SWA support from PR [#24975](https://github.com/ggml-org/llama.cpp/pull/24975). That PR is not yet merged upstream, so stock/Homebrew/apt builds do **not** work. **unlocr downloads its own patched build for you** (CLI and GUI) on first run — you do not install it manually. See the note below.
 3.  **pandoc** *(optional)* — only for the GUI's "export to DOCX/ODT/RTF/HTML/TXT" feature. OCR works without it.
 4.  **Rust Toolchain** (only if building from source or installing via cargo).
 
 #### How prerequisites are provided (per platform)
 
-The **CLI** always expects `pdftoppm` and `llama-server` already on your `PATH`. The **Desktop GUI** makes this easier, differently per OS:
+Both the **CLI** and the **Desktop GUI** auto-download the sha256-pinned patched `llama-server` into the app cache on first run (macOS arm64/x64, Linux x64, Windows x64; CPU build, macOS with Metal). You only supply `pdftoppm`:
 
-| OS | poppler (`pdftoppm`) | llama.cpp (`llama-server`) | pandoc (export) |
-|----|----------------------|----------------------------|-----------------|
-| **Windows** | GUI downloads it for you | GUI downloads a **CPU** build for you | GUI downloads it for you |
-| **Linux** | installed by the `.deb`/`.rpm` (declared dep) | **install manually** (no apt/dnf package) | installed by the `.deb`/`.rpm` (recommended dep) |
-| **macOS** | `brew install poppler` (cask dep) | **`brew install llama.cpp`** (Homebrew required) | GUI downloads it, or `brew install pandoc` |
+| OS | poppler (`pdftoppm`) | llama-server (patched R-SWA build) | pandoc (export) |
+|----|----------------------|------------------------------------|-----------------|
+| **Windows** | GUI downloads it for you | **auto-downloaded** (CLI + GUI) | GUI downloads it for you |
+| **Linux** | installed by the `.deb`/`.rpm` (declared dep) | **auto-downloaded** (CLI + GUI, x86_64) | installed by the `.deb`/`.rpm` (recommended dep) |
+| **macOS** | `brew install poppler` (cask dep) | **auto-downloaded** (CLI + GUI) | GUI downloads it, or `brew install pandoc` |
 
 > [!NOTE]
-> In the GUI, open **Settings → Dependencies** to see what is found/missing and to fetch what's available for your platform (a sha256-pinned download on Windows / pandoc on macOS, or a one-click `brew install` on macOS). Windows GPU users should install their own CUDA/Vulkan `llama.cpp` build instead of the bundled CPU one.
+> The patched `llama-server` is built by unlocr's own CI (`build-llama.yml`) and hosted on a dedicated `llama-rswa-*` GitHub release. In the GUI, **Settings → Dependencies** shows what is found/missing and can (re)download it. If you point unlocr at your OWN `llama-server` (`--llama-bin`, or one on `PATH`/Homebrew), it is used but you get a warning that it cannot be verified for R-SWA support; silence it with `UNLOCR_ALLOW_EXTERNAL_LLAMA=1`. GPU users (CUDA/Vulkan) should build llama.cpp from PR #24975 themselves and pass `--llama-bin`.
 
 ### Model Variants & System Specs
 By default, `unlocr` runs a quantized GGUF on `llama.cpp` (CPU or GPU-offloaded). You can also run the full, unquantized model on a dedicated GPU via `vLLM`.
@@ -54,9 +54,9 @@ By default, `unlocr` runs a quantized GGUF on `llama.cpp` (CPU or GPU-offloaded)
 Select your operating system below for quick setup instructions.
 
 #### macOS
-Homebrew is required (mainly for `llama.cpp`, which has no standalone macOS binary). Install the prerequisites:
+Homebrew is required for `poppler` (unlocr auto-downloads the patched `llama-server` itself; do NOT `brew install llama.cpp` — the Homebrew build lacks R-SWA). Install the prerequisite:
 ```bash
-brew install llama.cpp poppler   # pandoc optional, only for GUI export: brew install pandoc
+brew install poppler   # pandoc optional, only for GUI export: brew install pandoc
 ```
 Then install `unlocr` using Homebrew:
 ```bash
@@ -73,12 +73,12 @@ brew install --cask whit3rabbit/tap/unlocr
 #### Linux
 1. Download the pre-built CLI binary or GUI installer (`.AppImage`, `.deb`, `.rpm`) from [GitHub Releases](../../releases).
 2. The `.deb`/`.rpm` declares **poppler** (and **pandoc** for GUI export) as dependencies, so your package manager pulls them in automatically.
-3. **`llama.cpp` must be installed manually** — it is not in apt/dnf. Build it (`>= b8530`) or fetch a release binary and put `llama-server` on your `PATH`. The package's post-install step warns if it is missing.
+3. **`llama-server` is auto-downloaded** (x86_64) — unlocr fetches its patched R-SWA build (PR #24975) into the app cache on first run; you do not install `llama.cpp` manually. (Other arches, e.g. arm64, have no pinned download: build llama.cpp from PR #24975 and pass `--llama-bin`.)
 
 #### Windows
 1. Download the CLI executable or the Windows GUI Installer (`.msi`) from [GitHub Releases](../../releases).
-2. **GUI**: no manual setup — open **Settings → Dependencies** and click Download for any missing tool. The GUI fetches sha256-pinned `pdftoppm`, a CPU `llama-server`, and `pandoc` into its cache (GPU users should install their own `llama.cpp` build).
-3. **CLI**: ensure `llama-server` and `pdftoppm` are installed and on your `PATH`, then run the installer or script:
+2. **GUI**: no manual setup — open **Settings → Dependencies** and click Download for any missing tool. The GUI fetches sha256-pinned `pdftoppm`, the patched `llama-server`, and `pandoc` into its cache (GPU users should build llama.cpp from PR #24975 and pass `--llama-bin`).
+3. **CLI**: the patched `llama-server` auto-downloads on first run; just ensure `pdftoppm` is on your `PATH`, then run the installer or script:
    ```powershell
    powershell -ExecutionPolicy Bypass -File packaging\windows\install.ps1
    ```
@@ -151,7 +151,7 @@ unlocr report.pdf --out ./out --quality best
 **Subcommands**: `unlocr doctor` (alias `preflight`) validates system deps, model files, RAM, and disk space without running OCR. Accepts `--llama-bin`, `--model-dir`, `--quant`.
 
 ### How It Works Under the Hood
-1.  **Preflight**: Locates `llama-server` and `pdftoppm`, checks versions, and warns if `llama-server` is below b8530.
+1.  **Preflight**: Resolves `llama-server` (preferring unlocr's cached patched R-SWA build, auto-downloading it if absent) and locates `pdftoppm`. An external `llama-server` (`--llama-bin`/`PATH`) is used with a warning that it cannot be verified for R-SWA support (silence via `UNLOCR_ALLOW_EXTERNAL_LLAMA=1`).
 2.  **Model Cache**: Checks for `Unlimited-OCR-<quant>.gguf` and `mmproj-Unlimited-OCR-F16.gguf` in the cache directory, downloading them from HF if missing.
 3.  **Spawn Server**: Starts a single background `llama-server` instance and polls `/health` until active.
 4.  **OCR Processing**: For each PDF, runs `pdftoppm` to extract pages as PNGs, POSTs them sequentially (base64 encoded) to `/v1/chat/completions`, and appends the markdown output.

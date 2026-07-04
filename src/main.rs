@@ -71,6 +71,7 @@ fn run() -> Res<()> {
         repeat_penalty: args.repeat_penalty,
         dry_multiplier: args.dry_multiplier,
         dry_base: args.dry_base,
+        temperature: args.temperature,
         pages: args.resolved_pages()?,
         ..OcrOptions::default()
     }
@@ -117,8 +118,26 @@ fn run() -> Res<()> {
         return Err("--mmproj requires --model".into());
     }
 
-    // 1. Preflight: locate external binaries and validate the llama.cpp build.
-    let tools = preflight::check(args.llama_bin.as_deref())?;
+    // 1. Preflight: resolve external binaries (auto-downloading unlocr's managed
+    // R-SWA llama-server if absent) and validate the llama.cpp build.
+    let mut on_llama_dl = |p: unlocr::Progress| {
+        if let unlocr::Progress::Download {
+            pct, done, total, ..
+        } = p
+        {
+            use std::io::Write;
+            print!(
+                "\r  llama-server {pct:>3}%  ({} / {} MiB)",
+                done >> 20,
+                total >> 20
+            );
+            if pct >= 100 {
+                println!();
+            }
+            let _ = std::io::stdout().flush();
+        }
+    };
+    let tools = preflight::check(args.llama_bin.as_deref(), &mut on_llama_dl)?;
 
     // 2. Ensure model + projector are present (download from HF if missing).
     // Explicit --quant wins; otherwise --quality maps to a quant.

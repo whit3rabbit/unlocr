@@ -50,7 +50,7 @@ where
     // check(None) when no tools are provided so the caller-agnostic path still works.
     let tools = match resolved_tools {
         Some(t) => t,
-        None => preflight::check(None)?,
+        None => preflight::check(None, on_progress)?,
     };
 
     let cache = model::cache_dir(opts.model_dir.clone())?;
@@ -268,6 +268,7 @@ where
             &opts.prompt,
             &data_uri,
             opts.max_tokens,
+            opts.temperature,
             opts.repeat_penalty,
             opts.dry_multiplier,
             opts.dry_base,

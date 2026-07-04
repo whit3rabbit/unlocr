@@ -36,6 +36,21 @@ node --check gui/src/main.js                             # cheap static-frontend
 
 `cargo fmt --all -- --check` instead of `--all` if you want a no-write verification in CI.
 
+**Patched llama-server PINS gate.** The `llama-server` pins in `src/tools/mod.rs` point at
+our own `llama-rswa-<date>` release (built from the unmerged llama.cpp PR #24975). Never
+release with placeholder pins:
+
+```bash
+grep -n "0000000000000000000000000000000000000000000000000000000000000000\|llama-rswa-00000000" src/tools/mod.rs && echo "STOP: placeholder llama-server PINS -- run build-llama.yml and fill them"
+```
+
+If that matches, run **Actions → build-llama** (workflow_dispatch) with the latest good
+commit SHA on `sf/unlimited-ocr-rswa` + a fresh `llama-rswa-<date>` tag, copy the four
+printed sha256s + URLs into the four pins, smoke-test each platform (the managed build
+downloads, loads Unlimited-OCR, and does NOT die in `await_health`), then re-run the gates.
+Re-check the pinned commit on every dep bump; this moves because the PR is a draft (see the
+PIN-bump checklist in `CLAUDE.md`).
+
 ## Tag + publish
 
 ```bash

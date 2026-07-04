@@ -165,8 +165,17 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
 - Needs the Tauri CLI: `cargo install tauri-cli` (or `cargo tauri` if already present).
 
 ## Runtime deps (same as the CLI, NOT bundled)
-- `pdftoppm` (poppler) and `llama-server` (llama.cpp >= b8530) must be on PATH /
-  Homebrew prefixes. The `preflight` command surfaces missing ones to the UI.
+- `pdftoppm` (poppler) must be on PATH / Homebrew prefixes.
+- `llama-server`: the Unlimited-OCR model needs unlocr's patched R-SWA build (PR #24975,
+  unmerged upstream). `load_model` calls `unlocr::preflight::check`, which now AUTO-DOWNLOADS
+  the managed build (progress via the existing `ocr://progress` / `Progress::Download` path,
+  `name: "llama-server"`, shown on the model bar). The Settings > Dependencies panel also
+  offers a Download button (llama-server is now `downloadable` on mac/linux/win); its
+  `TOOL_INFO` entry has NO `brew` field because Homebrew's llama.cpp is stock and lacks
+  R-SWA. The passive `preflight` status command (`cmd_model/cache.rs`) uses the
+  NON-downloading `find_llama_server`, so opening the panel never pulls the binary. An
+  external build (PATH/brew/`--llama-bin`) is an unverified fallback; silence its warning
+  with `UNLOCR_ALLOW_EXTERNAL_LLAMA=1`.
 - `pandoc` is an OPTIONAL, GUI-only runtime dep: used ONLY by the review-pane export
   (`export_markdown`, md -> docx/odt/rtf/html/txt). Declared as a WEAK dep in the GUI
   deb/rpm (`tauri.conf.json` bundle.linux deb.recommends / rpm.recommends) and a hard
