@@ -1,0 +1,133 @@
+name: build-llama
+
+# Builds unlocr's OWN patched llama-server from llama.cpp PR #24975
+# (Reference Sliding Window Attention for Unlimited-OCR, branch
+# sf/unlimited-ocr-rswa). That PR is UNMERGED, so no upstream release has R-SWA and
+# we cannot point src/tools/mod.rs PINS at ggml-org. This workflow compiles the
+# server per OS, repackages each as a .zip (the on-demand downloader's extract_zip is
+# zip-only), and publishes them to a dedicated `llama-rswa-<date>` release, decoupled
+# from unlocr version tags.
+#
+# Manual trigger only. Because the draft PR moves, pin an exact commit SHA
+# (`llama_commit`) for reproducibility. After it publishes, copy the four printed
+# sha256s + asset URLs into the PINS blocks in src/tools/mod.rs (see the PIN-bump
+# checklist in CLAUDE.md), then smoke-test each platform before cutting an unlocr
+# release.
+on:
+  workflow_dispatch:
+    inputs:
+      llama_commit:
+        description: 'Exact commit SHA on ggml-org/llama.cpp PR #24975 (sf/unlimited-ocr-rswa)'
+        required: true
+        type: string
+      release_tag:
+        description: 'Release tag to publish the zips under (e.g. llama-rswa-20260704)'
+        required: true
+        default: 'llama-rswa-00000000'
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            asset: macos-arm64
+            # Metal is built into macOS (zero extra dep); embed the shader so nothing
+            # loose ships next to the exe. "CPU-only" for us means no CUDA/Vulkan.
+            cmake_flags: '-DGGML_METAL_EMBED_LIBRARY=ON'
+          - os: macos-15-intel
+            asset: macos-x64
+            cmake_flags: '-DGGML_METAL=OFF'
+          - os: ubuntu-latest
+            asset: linux-x64
+            cmake_flags: ''
+          - os: windows-latest
+            asset: win-x64
+            cmake_flags: ''
+    steps:
+      - name: Clone llama.cpp + checkout PR #24975 at the pinned commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone --filter=blob:none https://github.com/ggml-org/llama.cpp.git
+          cd llama.cpp
+          # gh resolves the PR's (fork) head repo and adds it as a remote.
+          gh pr checkout 24975
+          # Hard-pin: the draft branch moves, so build exactly what was requested.
+          git checkout "${{ inputs.llama_commit }}"
+          echo "Built llama.cpp at commit \`$(git rev-parse HEAD)\` (PR #24975)" >> "$GITHUB_STEP_SUMMARY"
+
+      # GGML_NATIVE=OFF: portable CPU baseline (no AVX-512 baked in) or users SIGILL.
+      # BUILD_SHARED_LIBS=OFF: one self-contained binary, so the .zip is just the exe.
+      # LLAMA_CURL=OFF: drop the libcurl link so there is no runtime .so/.dll to find.
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S llama.cpp -B llama.cpp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_CURL=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_NATIVE=OFF \
+            ${{ matrix.cmake_flags }}
+
+      - name: Build llama-server
+        shell: bash
+        run: cmake --build llama.cpp/build --config Release --target llama-server -j
+
+      - name: Package (unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          name="${{ inputs.release_tag }}-${{ matrix.asset }}"
+          bin=$(find llama.cpp/build -type f -name llama-server | head -n1)
+          test -n "$bin" || { echo "llama-server binary not found"; exit 1; }
+          zip -j "${name}.zip" "$bin"
+          sha256sum "${name}.zip" > "${name}.zip.sha256"
+          cat "${name}.zip.sha256" >> "$GITHUB_STEP_SUMMARY"
+          echo "ASSET=${name}.zip" >> "$GITHUB_ENV"
+          echo "CHECKSUM=${name}.zip.sha256" >> "$GITHUB_ENV"
+
+      - name: Package (windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $name = "${{ inputs.release_tag }}-${{ matrix.asset }}"
+          $bin = Get-ChildItem -Path llama.cpp/build -Recurse -Filter llama-server.exe | Select-Object -First 1
+          if (-not $bin) { throw "llama-server.exe not found" }
+          Compress-Archive -Path $bin.FullName -DestinationPath "$name.zip"
+          $hash = (Get-FileHash -Path "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -FilePath "$name.zip.sha256" -Encoding ascii
+          Get-Content "$name.zip.sha256" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding ascii
+          "ASSET=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CHECKSUM=$name.zip.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: ${{ env.ASSET }}
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: llama-server (Unlimited-OCR R-SWA) ${{ inputs.release_tag }}
+          body: >
+            unlocr's patched llama-server built from ggml-org/llama.cpp PR #24975
+            (Unlimited-OCR R-SWA). Consumed by src/tools/mod.rs PINS. Not a product
+            release. Never mutate a published asset: cut a new dated tag for a rebuild.
+          prerelease: true
+          make_latest: false
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.CHECKSUM }}
