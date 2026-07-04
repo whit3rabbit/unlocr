@@ -42,18 +42,15 @@ jobs:
             # Metal is built into macOS (zero extra dep); embed the shader so nothing
             # loose ships next to the exe. "CPU-only" for us means no CUDA/Vulkan.
             cmake_flags: '-DGGML_METAL_EMBED_LIBRARY=ON'
-          # TEMP: only macos-arm64 while re-running the sha256sum fix; the other three
-          # (macos-x64, linux-x64, win-x64) already uploaded to llama-rswa-20260704.
-          # RESTORE these before merging:
-          # - os: macos-15-intel
-          #   asset: macos-x64
-          #   cmake_flags: '-DGGML_METAL=OFF'
-          # - os: ubuntu-latest
-          #   asset: linux-x64
-          #   cmake_flags: ''
-          # - os: windows-latest
-          #   asset: win-x64
-          #   cmake_flags: ''
+          - os: macos-15-intel
+            asset: macos-x64
+            cmake_flags: '-DGGML_METAL=OFF'
+          - os: ubuntu-latest
+            asset: linux-x64
+            cmake_flags: ''
+          - os: windows-latest
+            asset: win-x64
+            cmake_flags: ''
     steps:
       - name: Clone llama.cpp + checkout PR #24975 at the pinned commit
         shell: bash
