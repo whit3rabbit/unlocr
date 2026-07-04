@@ -103,6 +103,11 @@ pub struct Settings {
     /// Output mode: "single" | "pages" | "both".
     #[serde(default = "default_output_mode")]
     pub output_mode: String,
+    /// Sampling temperature. `None` = 0.0 (deterministic OCR, the historical
+    /// hardcoded default). Unlike the DRY/repeat-penalty knobs, applies to both
+    /// local and remote modes.
+    #[serde(default)]
+    pub temperature: Option<f64>,
 }
 
 fn default_mode() -> String {
@@ -168,6 +173,7 @@ impl Default for Settings {
             model_file: String::new(),
             mmproj_file: String::new(),
             output_mode: default_output_mode(),
+            temperature: None,
         }
     }
 }
@@ -187,7 +193,7 @@ fn fetch(conn: &Connection) -> Result<Settings, String> {
                 default_prompt, idle_unload_minutes,
                 engine_preset, image_max_tokens, chat_template, repeat_penalty,
                 dry_multiplier, dry_base, keep_images, pages_mode, page_from,
-                page_to, model_file, mmproj_file, output_mode
+                page_to, model_file, mmproj_file, output_mode, temperature
          FROM settings WHERE id = 1",
         [],
         |row| {
@@ -215,6 +221,7 @@ fn fetch(conn: &Connection) -> Result<Settings, String> {
                 model_file: row.get(20)?,
                 mmproj_file: row.get(21)?,
                 output_mode: row.get(22)?,
+                temperature: row.get(23)?,
             })
         },
     ) {
@@ -233,9 +240,9 @@ fn persist(conn: &Connection, s: &Settings) -> Result<(), String> {
             default_prompt, idle_unload_minutes,
             engine_preset, image_max_tokens, chat_template, repeat_penalty,
             dry_multiplier, dry_base, keep_images, pages_mode, page_from,
-            page_to, model_file, mmproj_file, output_mode)
+            page_to, model_file, mmproj_file, output_mode, temperature)
          VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                 ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                 ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         rusqlite::params![
             s.mode,
             s.remote_base_url,
@@ -260,6 +267,7 @@ fn persist(conn: &Connection, s: &Settings) -> Result<(), String> {
             s.model_file,
             s.mmproj_file,
             s.output_mode,
+            s.temperature,
         ],
     )
     .map_err(|e| format!("could not save settings: {e}"))?;
@@ -388,6 +396,7 @@ mod tests {
             model_file: "/models/custom.gguf".into(),
             mmproj_file: "/models/mmproj.gguf".into(),
             output_mode: "both".into(),
+            temperature: Some(0.7),
         };
         persist(&conn, &s).unwrap();
         let got = fetch(&conn).unwrap();
@@ -414,6 +423,7 @@ mod tests {
         assert_eq!(got.model_file, "/models/custom.gguf");
         assert_eq!(got.mmproj_file, "/models/mmproj.gguf");
         assert_eq!(got.output_mode, "both");
+        assert_eq!(got.temperature, Some(0.7));
     }
 
     /// Nullable numeric fields round-trip both a `Some(x)` and a `None` case (the
@@ -428,6 +438,7 @@ mod tests {
             dry_base: None,
             page_from: Some(3),
             page_to: None,
+            temperature: Some(0.0), // explicit "off"/deterministic, distinct from unset
             ..Settings::default()
         };
         persist(&conn, &s).unwrap();
@@ -438,6 +449,7 @@ mod tests {
         assert_eq!(got.dry_base, None);
         assert_eq!(got.page_from, Some(3));
         assert_eq!(got.page_to, None);
+        assert_eq!(got.temperature, Some(0.0));
     }
 
     /// The settings table is a singleton: a second save replaces, never adds a row.
@@ -472,6 +484,7 @@ mod tests {
         assert!(json.contains("\"dryMultiplier\""));
         assert!(json.contains("\"pagesMode\""));
         assert!(json.contains("\"outputMode\""));
+        assert!(json.contains("\"temperature\""));
         assert!(!json.contains("\"remote_base_url\""));
     }
 }

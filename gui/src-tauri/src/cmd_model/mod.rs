@@ -12,7 +12,10 @@ use unlocr::{OcrOptions, Progress};
 use crate::state::{AppState, Backend, LoadedModel};
 
 mod cache;
-pub(crate) use cache::{clear_model_cache, get_cache_info, list_local_models, preflight};
+pub(crate) use cache::{
+    clear_model_cache, get_cache_info, list_available_quants, list_cached_files, list_local_models,
+    preflight, remove_cached_file,
+};
 mod sysreq;
 pub(crate) use sysreq::system_requirements;
 
@@ -133,13 +136,10 @@ pub(crate) async fn load_model(
                 (Backend::Remote(ep), base, "remote".to_string(), pdftoppm)
             }
             _ => {
-                let tools = unlocr::preflight::check(llama_override.as_deref())
-                    .map_err(|e| e.to_string())?;
-                let quant = quant
-                    .filter(|q| !q.trim().is_empty())
-                    .unwrap_or_else(|| OcrOptions::default().quant);
-                unlocr::model::validate_quant(&quant).map_err(|e| e.to_string())?;
-                let cache = unlocr::model::cache_dir(None).map_err(|e| e.to_string())?;
+                // Build the download-progress sink FIRST: preflight::check now
+                // auto-downloads unlocr's managed llama-server and emits
+                // Progress::Download for it, so the same sink surfaces both the
+                // llama-server and the model download to the model bar.
                 let app_dl = app.clone();
                 let mut on_progress = |p: Progress| {
                     if let Progress::Download {
@@ -160,6 +160,14 @@ pub(crate) async fn load_model(
                         );
                     }
                 };
+
+                let tools = unlocr::preflight::check(llama_override.as_deref(), &mut on_progress)
+                    .map_err(|e| e.to_string())?;
+                let quant = quant
+                    .filter(|q| !q.trim().is_empty())
+                    .unwrap_or_else(|| OcrOptions::default().quant);
+                unlocr::model::validate_quant(&quant).map_err(|e| e.to_string())?;
+                let cache = unlocr::model::cache_dir(None).map_err(|e| e.to_string())?;
 
                 let files = unlocr::model::ensure_with_overrides(
                     &cache,

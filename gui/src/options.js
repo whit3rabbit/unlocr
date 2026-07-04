@@ -66,6 +66,7 @@ export function readRunOptions() {
   const keepImagesEl = document.getElementById("optKeepImages");
   const promptEl = document.getElementById("optPrompt");
   const taskEl = document.getElementById("optTask");
+  const temperatureEl = document.getElementById("optTemperature");
   const repeatPenaltyEl = document.getElementById("optRepeatPenalty");
   const dryMultiplierEl = document.getElementById("optDryMultiplier");
   const dryBaseEl = document.getElementById("optDryBase");
@@ -89,6 +90,9 @@ export function readRunOptions() {
     maxTokens: numOr(maxTokensEl, DEFAULT_MAX_TOKENS),
     keepImages: !!(keepImagesEl && keepImagesEl.checked),
     prompt: promptOr(promptEl, taskPrompt),
+    // 0 is the meaningful default (deterministic OCR), so use the DRY-style
+    // "0 is real" parse rather than repeatPenalty's "blank/0 -> null".
+    temperature: floatOrNullMin0(temperatureEl),
     repeatPenalty: floatOrNull(repeatPenaltyEl),
     dryMultiplier: floatOrNullMin0(dryMultiplierEl),
     // No "0 = off" meaning for a DRY base; blank/invalid/0 -> null (server default).

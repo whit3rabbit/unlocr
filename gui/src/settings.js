@@ -4,6 +4,7 @@
 // get_cache_info / clear_model_cache commands.
 
 import { requireTauri } from "./tauri.js";
+import { formatEpoch } from "./paths.js";
 import { applyPreset, markCachedQuants, ENGINE_PRESETS } from "./model.js";
 import {
   renderEffectiveSummary,
@@ -88,6 +89,7 @@ const SYNCED_FIELDS = [
   ["optMaxTokens", "defaultMaxTokens"],
   ["optImageMaxTokens", "imageMaxTokens"],
   ["optChatTemplate", "chatTemplate"],
+  ["optTemperature", "temperature"],
   ["optRepeatPenalty", "repeatPenalty"],
   ["optDryMultiplier", "dryMultiplier"],
   ["optDryBase", "dryBase"],
@@ -299,6 +301,7 @@ export function wireAutoSaveEngineOptions() {
           remoteModel: (get("remoteModel") && get("remoteModel").value) || base.remoteModel,
           imageMaxTokens: numOr(get("optImageMaxTokens"), null),
           chatTemplate: (get("optChatTemplate") && get("optChatTemplate").value) || "",
+          temperature: floatOrNullMin0(get("optTemperature")),
           repeatPenalty: floatOrNull(get("optRepeatPenalty")),
           dryMultiplier: floatOrNullMin0(get("optDryMultiplier")),
           dryBase: floatOrNull(get("optDryBase")),
@@ -328,6 +331,21 @@ export function wireAutoSaveEngineOptions() {
   });
 }
 
+/** Format bytes to a human-readable string (MiB for GB-scale GGUFs). Shared by
+ *  wireCacheControls (aggregate size) and wireModelFilesTable (per-file size)
+ *  so the two surfaces can't drift on formatting. */
+function fmtBytes(n) {
+  if (n < 0) {
+    // eslint-disable-next-line no-console
+    console.error("[settings] fmtBytes: negative size:", n);
+  }
+  if (n <= 0) return "0 B";
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KiB";
+  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MiB";
+  return (n / (1024 * 1024 * 1024)).toFixed(2) + " GiB";
+}
+
 /** Wire the Settings panel's Model cache section: load the cache path + GGUF
  *  size via get_cache_info, and wire the Clear button to clear_model_cache.
  *  Called once on startup (the Settings view exists in the DOM at load time).
@@ -343,19 +361,6 @@ export async function wireCacheControls() {
   const sizeEl = document.getElementById("cacheSizeBytes");
   const clearBtn = document.getElementById("clearCacheBtn");
   const statusEl = document.getElementById("clearCacheStatus");
-
-  /** Format bytes to a human-readable string (MiB for GB-scale GGUFs). */
-  function fmtBytes(n) {
-    if (n < 0) {
-      // eslint-disable-next-line no-console
-      console.error("[settings] fmtBytes: negative size:", n);
-    }
-    if (n <= 0) return "0 B";
-    if (n < 1024) return n + " B";
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KiB";
-    if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MiB";
-    return (n / (1024 * 1024 * 1024)).toFixed(2) + " GiB";
-  }
 
   /** Refresh the path + size display from the backend. */
   async function refreshCacheInfo() {
@@ -391,6 +396,83 @@ export async function wireCacheControls() {
       }
     });
   }
+}
+
+/** Wire the Settings panel's per-file model cache table: list every cached
+ *  GGUF (name/size/sha256/mtime) via list_cached_files, with a per-row delete
+ *  button calling remove_cached_file. Mirrors wireCacheControls' shape (fetch
+ *  -> render -> wire -> refresh). Also re-lists after the aggregate "Clear
+ *  cached models" button fires, since it wipes the same files this table
+ *  shows. Called once on startup; fail-soft outside the webview. */
+export async function wireModelFilesTable() {
+  let t;
+  try {
+    t = requireTauri();
+  } catch (err) {
+    return;
+  }
+  const tbody = document.getElementById("modelFilesTbody");
+  const emptyEl = document.getElementById("modelFilesEmpty");
+  if (!tbody) return;
+
+  async function refresh() {
+    let files = [];
+    try {
+      files = await t.core.invoke("list_cached_files");
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[settings] list_cached_files failed", err);
+    }
+    tbody.innerHTML = "";
+    if (emptyEl) emptyEl.hidden = files.length > 0;
+    files.forEach((f) => {
+      const tr_ = document.createElement("tr");
+      const shortSha = f.sha256.length > 12 ? f.sha256.slice(0, 12) + "…" : f.sha256;
+      const nameCell = document.createElement("td");
+      nameCell.textContent = f.name;
+      nameCell.title = f.name;
+      const sizeCell = document.createElement("td");
+      sizeCell.textContent = fmtBytes(Number(f.sizeBytes) || 0);
+      const shaCell = document.createElement("td");
+      shaCell.className = "mono";
+      shaCell.textContent = shortSha;
+      shaCell.title = f.sha256;
+      const modifiedCell = document.createElement("td");
+      modifiedCell.textContent = f.modified != null ? formatEpoch(f.modified) : "-";
+      const actionCell = document.createElement("td");
+      const delBtn = document.createElement("button");
+      delBtn.className = "model-btn model-btn--ghost";
+      delBtn.type = "button";
+      delBtn.textContent = tr("settings.deleteFile");
+      delBtn.dataset.name = f.name;
+      actionCell.appendChild(delBtn);
+      tr_.append(nameCell, sizeCell, shaCell, modifiedCell, actionCell);
+      tbody.appendChild(tr_);
+    });
+    tbody.querySelectorAll("button[data-name]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await t.core.invoke("remove_cached_file", { filename: btn.dataset.name });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error("[settings] remove_cached_file failed", err);
+        } finally {
+          await refresh();
+          // Re-sync the quant dropdown's cached markers after a per-file delete.
+          markCachedQuants();
+        }
+      });
+    });
+  }
+
+  await refresh();
+
+  // The aggregate "Clear cached models" button wipes the same files this
+  // table shows; re-list after it fires (own listener, independent of
+  // wireCacheControls' own click handler on the same button).
+  const clearBtn = document.getElementById("clearCacheBtn");
+  if (clearBtn) clearBtn.addEventListener("click", () => setTimeout(refresh, 0));
 }
 
 // Human-facing labels + recommendation hints for system metrics, keyed by
@@ -499,9 +581,14 @@ const TOOL_INFO = {
     hints: { macos: "brew install poppler", linux: "apt install poppler-utils  ·  dnf install poppler-utils" },
   },
   "llama-server": {
-    label: "llama-server (llama.cpp)",
-    brew: "llama.cpp",
-    hints: { macos: "brew install llama.cpp", linux: "build llama.cpp >= b8530 (no distro package)" },
+    label: "llama-server (unlocr patched build)",
+    // No `brew`: Homebrew's llama.cpp is stock and lacks the Unlimited-OCR R-SWA
+    // patch (PR #24975), so unlocr downloads its own patched build instead. The
+    // hints below only show on exotic arches with no pinned download.
+    hints: {
+      macos: "unlocr downloads a patched build (stock llama.cpp lacks R-SWA, PR #24975)",
+      linux: "unlocr downloads a patched build (stock llama.cpp lacks R-SWA, PR #24975)",
+    },
   },
   pandoc: {
     label: "pandoc (export)",

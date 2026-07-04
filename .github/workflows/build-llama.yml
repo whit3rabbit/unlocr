@@ -67,6 +67,21 @@ jobs:
           git checkout "${{ inputs.llama_commit }}"
           echo "Built llama.cpp at commit \`$(git rev-parse HEAD)\` (PR #24975)" >> "$GITHUB_STEP_SUMMARY"
 
+      # Headroom for the static link (it OOM'd -> SIGTERM/exit 143 on the smaller
+      # runner). Harmless on the larger public-repo runner; keep as a backstop.
+      - name: Add swap (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # The runner already ships a /swapfile ("Text file busy" on fallocate),
+          # so put ours on the larger /mnt ephemeral disk. dd fallback if fallocate
+          # is unsupported on that fs.
+          sudo fallocate -l 10G /mnt/swapfile || \
+            sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=10240
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
+
       # GGML_NATIVE=OFF: portable CPU baseline (no AVX-512 baked in) or users SIGILL.
       # BUILD_SHARED_LIBS=OFF: one self-contained binary, so the .zip is just the exe.
       # LLAMA_CURL=OFF: drop the libcurl link so there is no runtime .so/.dll to find.
@@ -93,7 +108,13 @@ jobs:
           bin=$(find llama.cpp/build -type f -name llama-server | head -n1)
           test -n "$bin" || { echo "llama-server binary not found"; exit 1; }
           zip -j "${name}.zip" "$bin"
-          sha256sum "${name}.zip" > "${name}.zip.sha256"
+          # macOS runners lack GNU `sha256sum`; fall back to `shasum -a 256`
+          # (same "<hash>  <file>" output format).
+          if command -v sha256sum >/dev/null; then
+            sha256sum "${name}.zip" > "${name}.zip.sha256"
+          else
+            shasum -a 256 "${name}.zip" > "${name}.zip.sha256"
+          fi
           cat "${name}.zip.sha256" >> "$GITHUB_STEP_SUMMARY"
           echo "ASSET=${name}.zip" >> "$GITHUB_ENV"
           echo "CHECKSUM=${name}.zip.sha256" >> "$GITHUB_ENV"
@@ -112,6 +133,7 @@ jobs:
           "ASSET=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CHECKSUM=$name.zip.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      # Provenance attestation (needs a public repo; the repo is now public).
       - name: Attest Build Provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:

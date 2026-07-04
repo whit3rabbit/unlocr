@@ -91,8 +91,9 @@ fn await_health(child: &mut Child, stderr_log: &tempfile::NamedTempFile, port: u
         if let Some(status) = child.try_wait()? {
             return Err(format!(
                 "llama-server exited ({status}) before becoming healthy. \
-                 Likely an old build without DeepSeek-OCR support \
-                 (run `brew upgrade llama.cpp`).\n--- llama-server stderr ---\n{}",
+                 Likely an old build without DeepSeek-OCR support, or an external build \
+                 without the Unlimited-OCR R-SWA patch (PR #24975) -- drop --llama-bin to \
+                 use unlocr's bundled build.\n--- llama-server stderr ---\n{}",
                 read_stderr_log(stderr_log)
             )
             .into());
@@ -255,6 +256,7 @@ impl Server {
         prompt: &str,
         data_uri: &str,
         max_tokens: u32,
+        temperature: Option<f32>,
         repeat_penalty: Option<f32>,
         dry_multiplier: Option<f32>,
         dry_base: Option<f32>,
@@ -266,6 +268,7 @@ impl Server {
             prompt,
             data_uri,
             max_tokens,
+            temperature.unwrap_or(0.0),
             repeat_penalty,
             dry_multiplier,
             dry_base,
@@ -314,6 +317,7 @@ impl ImageOcr for Server {
         prompt: &str,
         data_uri: &str,
         max_tokens: u32,
+        temperature: Option<f32>,
         repeat_penalty: Option<f32>,
         dry_multiplier: Option<f32>,
         dry_base: Option<f32>,
@@ -323,6 +327,7 @@ impl ImageOcr for Server {
             prompt,
             data_uri,
             max_tokens,
+            temperature,
             repeat_penalty,
             dry_multiplier,
             dry_base,
@@ -334,6 +339,7 @@ impl ImageOcr for Server {
         prompt: &str,
         data_uri: &str,
         max_tokens: u32,
+        temperature: Option<f32>,
         repeat_penalty: Option<f32>,
         dry_multiplier: Option<f32>,
         dry_base: Option<f32>,
@@ -347,6 +353,7 @@ impl ImageOcr for Server {
             prompt,
             data_uri,
             max_tokens,
+            temperature.unwrap_or(0.0),
             repeat_penalty,
             dry_multiplier,
             dry_base,

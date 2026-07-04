@@ -59,8 +59,13 @@ Thin wrapper. Full usage/benchmarks in README.md.
 
 ## Runtime deps (external, NOT bundled)
 - `pdftoppm` <- poppler-utils. Declared in deb/rpm.
-- `llama-server` <- llama.cpp, build >= b8530 (PR #17400). NOT in apt/dnf; cannot
-  declare as a package dep. deb postinst / rpm %post warn if missing.
+- `llama-server` <- llama.cpp. The Unlimited-OCR model needs the R-SWA patch from the
+  UNMERGED draft PR #24975 (branch `sf/unlimited-ocr-rswa`); no upstream/apt/dnf/brew
+  build has it. So unlocr builds its OWN patched llama-server in CI
+  (`.github/workflows/build-llama.yml`) and auto-downloads it (see the managed-llama
+  resolver gotcha below). An external binary is used only as an unverified fallback.
+  (The base DeepSeek-OCR arch also needs >= b8530 / PR #17400, kept as a secondary
+  warning.) deb postinst / rpm %post still warn if missing.
 
 ## Gotchas
 - CI `cargo audit` (`.github/workflows/audit.yml`) has no severity/warning filter, so
@@ -75,12 +80,39 @@ Thin wrapper. Full usage/benchmarks in README.md.
   below): `cargo tree -i <crate>` misses gui-only deps (e.g. `quick-xml` via tauri).
   Use `cargo tree --workspace -i <crate>` to find true reverse-dependents.
 - `src/tools/mod.rs`: on-demand tool downloader. `PINS` is per OS+arch (cfg-selected):
-  Windows = pandoc/poppler/llama-server CPU (.zip); macOS = pandoc only (per-arch .zip;
-  poppler has no standalone mac binary, llama ships .tar.gz so both stay on brew); Linux
-  = none. Pins (url+sha256+exe) are version-locked; bump on upgrade. The GitHub release
+  Windows = pandoc/poppler/llama-server (.zip); macOS = pandoc + llama-server (per-arch;
+  poppler has no standalone mac binary, stays on brew); Linux x86_64 = llama-server only
+  (poppler stays a deb/rpm/apt/dnf dep); other = none. The llama-server pins point at OUR
+  `whit3rabbit/unlocr` `llama-rswa-<date>` release (patched R-SWA build), NOT upstream
+  ggml-org. Pins (url+sha256+exe) are version-locked; bump on upgrade. The GitHub release
   API `digest` field gives the sha256 (also for `src/model/mod.rs` DIGESTS). `extract_zip` sets the
   unix exec bit from the zip entry (mac binary won't run otherwise). `preflight::locate`
   also scans `<cache>/tools/` so a downloaded tool resolves for every caller. Needs `zip`.
+  The llama-server pins currently carry 64-hex-zero placeholders (`TODO(rswa)`): fill them
+  from the first `build-llama.yml` run BEFORE any release (runtime sha256 verify rejects
+  placeholders). The `pins_are_well_formed`/`downloadable_matches_pins` tests run under
+  `#[cfg(test)]` against a pandoc-only test pin, so they do NOT validate the real per-OS
+  pins; `cargo check --workspace` is the only compile gate for those.
+- Managed llama-server resolver (`src/preflight.rs`): the R-SWA patch (PR #24975) is
+  unmerged, so a build NUMBER can't prove compatibility. `resolve_llama_server` (the RUN
+  path, called by `check()`) prefers unlocr's cached managed build under
+  `<cache>/tools/llama-server/`, else AUTO-DOWNLOADS it via `ensure_tool` (like the GGUF
+  model), else falls back to PATH/brew (`Provenance::External`) with a soft warning.
+  `--llama-bin` is always respected but flagged External. Silence the external warning with
+  `UNLOCR_ALLOW_EXTERNAL_LLAMA=1`. `find_llama_server` is the NON-downloading variant for
+  diagnostics (CLI `doctor`, the GUI status/preflight command in `cmd_model/cache.rs`) so a
+  passive status check never triggers the download. `check()` now takes an `on_progress`
+  sink (all callers updated: `main.rs`, `job.rs`, GUI `load_model`). The hard gate is still
+  the real model load in `server::local::await_health`.
+- PIN-bump / re-verify checklist for the patched llama-server (a release gate; the draft PR
+  moves): (1) pick the latest good commit SHA on `sf/unlimited-ocr-rswa`; (2) run
+  `build-llama.yml` (workflow_dispatch) with that SHA + a fresh `llama-rswa-<date>` tag;
+  (3) copy the four printed sha256s + asset URLs into the PINS blocks in `src/tools/mod.rs`;
+  (4) smoke-test each platform (managed build downloads, loads Unlimited-OCR, produces
+  output, does NOT die in `await_health`); (5) `cargo check --workspace`, then release.
+  Irreversible: once users cache a `llama-rswa-*` asset, changing its bytes under the same
+  tag breaks sha256 verify. Always cut a NEW dated tag for a rebuild; never mutate a
+  published asset.
 - OS detection is compile-time `cfg!(target_os)` everywhere (per-platform builds), never
   runtime. Tests asserting OS-gating put the `cfg!` check INSIDE the test body (runs
   per-host on CI), not `#[cfg]` on the fn, so each OS verifies its own branch.

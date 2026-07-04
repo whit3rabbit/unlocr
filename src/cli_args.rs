@@ -120,6 +120,14 @@ pub struct Args {
     #[arg(long)]
     pub dry_base: Option<f32>,
 
+    /// Sampling temperature (e.g. 0.2 for slight variability). Defaults to 0 for
+    /// deterministic OCR output (matches the historical fixed behavior and the
+    /// upstream README's recommendation). Unlike the llama.cpp-only DRY/repeat-
+    /// penalty knobs, this is a standard OpenAI field: it applies to both local
+    /// and remote (`--endpoint`/`--gpu`) mode.
+    #[arg(long)]
+    pub temperature: Option<f32>,
+
     /// Path to llama-server (default: PATH / Homebrew)
     #[arg(long)]
     pub llama_bin: Option<PathBuf>,
@@ -207,7 +215,10 @@ pub enum Commands {
     },
 }
 
-/// Quality tiers for selecting the GGUF model quantization level.
+/// Quality tiers for selecting the GGUF model quantization level. A friendly
+/// 3-way alias over the full 13-quant lineup in `unlocr::model::KNOWN_QUANTS`
+/// (`tier` field there cross-references these same 3 tags) -- keep the two in
+/// sync if a tier's underlying quant ever changes.
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 pub enum Quality {
     /// BF16 (5.47GB), highest fidelity

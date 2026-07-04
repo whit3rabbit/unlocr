@@ -32,6 +32,84 @@ pub struct Tools {
     pub pdftoppm: PathBuf,
 }
 
+/// Where a resolved llama-server came from.
+pub enum Provenance {
+    /// unlocr's own R-SWA build under `<cache>/tools/llama-server/` (trusted:
+    /// we built it from PR #24975, so it has the Unlimited-OCR patch).
+    Managed,
+    /// A `--llama-bin` override, or a PATH/Homebrew binary. Cannot be verified for
+    /// the Unlimited-OCR R-SWA patch (PR #24975), which is unmerged upstream.
+    External,
+}
+
+/// True when the user opts into an unverified external llama-server via
+/// `UNLOCR_ALLOW_EXTERNAL_LLAMA` (any non-empty value).
+fn allow_external_llama() -> bool {
+    std::env::var_os("UNLOCR_ALLOW_EXTERNAL_LLAMA")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+}
+
+fn llama_exe() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    }
+}
+
+/// Non-downloading resolution for diagnostics (doctor, the GUI status panel):
+/// override -> managed cached build -> PATH/Homebrew. NEVER triggers a download, so
+/// a passive status check does not pull a multi-hundred-MB binary. Returns None when
+/// nothing is found.
+pub fn find_llama_server(override_: Option<&Path>) -> Option<(PathBuf, Provenance)> {
+    if let Some(p) = override_ {
+        return Some((p.to_path_buf(), Provenance::External));
+    }
+    if let Ok(cache) = crate::model::cache_dir(None) {
+        let managed = crate::tools::tools_dir(&cache).join("llama-server");
+        if let Some(p) = crate::tools::find_exe(&managed, llama_exe()) {
+            return Some((p, Provenance::Managed));
+        }
+    }
+    locate("llama-server").map(|p| (p, Provenance::External))
+}
+
+/// Resolve llama-server for a RUN, preferring unlocr's managed R-SWA build and
+/// auto-downloading it when absent (like the GGUF model). Order: `--llama-bin`
+/// override -> managed cached build -> auto-download the managed build (where a pin
+/// exists for this OS+arch) -> external PATH/Homebrew. Only unlocr's own download is
+/// `Managed`; an override or PATH/brew binary is `External` (unverifiable for the
+/// unmerged Unlimited-OCR R-SWA patch, PR #24975). A download failure (e.g. offline)
+/// falls through to PATH so a user who already has a compatible build still runs.
+pub fn resolve_llama_server(
+    override_: Option<&Path>,
+    on_progress: &mut dyn FnMut(crate::Progress),
+) -> Res<(PathBuf, Provenance)> {
+    if let Some(p) = override_ {
+        return Ok((p.to_path_buf(), Provenance::External));
+    }
+    if let Ok(cache) = crate::model::cache_dir(None) {
+        let managed = crate::tools::tools_dir(&cache).join("llama-server");
+        if let Some(p) = crate::tools::find_exe(&managed, llama_exe()) {
+            return Ok((p, Provenance::Managed));
+        }
+        if crate::tools::downloadable().contains(&"llama-server") {
+            match crate::tools::ensure_tool(&cache, "llama-server", on_progress) {
+                Ok(p) => return Ok((p, Provenance::Managed)),
+                Err(e) => eprintln!(
+                    "warning: could not download unlocr's bundled llama-server ({e}); \
+                     falling back to any llama-server on PATH."
+                ),
+            }
+        }
+    }
+    match locate("llama-server") {
+        Some(p) => Ok((p, Provenance::External)),
+        None => Err(generate_install_hint().into()),
+    }
+}
+
 /// Runs diagnostic checks on dependencies, model files, memory, and disk space.
 pub fn run_doctor(
     llama_override: Option<&Path>,
@@ -54,32 +132,35 @@ pub fn run_doctor(
         }
     }
 
-    // Check llama-server
-    let llama_path = llama_override
-        .map(|p| p.to_path_buf())
-        .or_else(|| locate("llama-server"));
-    match llama_path {
-        Some(path) => {
+    // Check llama-server (non-downloading: report the managed R-SWA build if cached,
+    // else whatever is on PATH -- unverified for the Unlimited-OCR patch, PR #24975).
+    match find_llama_server(llama_override) {
+        Some((path, Provenance::Managed)) => {
+            println!(
+                "  [OK] llama-server: found at {} (unlocr managed R-SWA build)",
+                path.display()
+            );
+        }
+        Some((path, Provenance::External)) => {
             print!("  [OK] llama-server: found at {}", path.display());
             match build_number(&path) {
-                Some(b) => {
-                    print!(" (build b{b})");
-                    if b < MIN_BUILD {
-                        println!("\n       [WARN] build b{b} is older than b{MIN_BUILD}. DeepSeek-OCR support may fail.");
-                    } else {
-                        println!();
-                    }
-                }
-                None => println!("\n       [WARN] could not parse llama-server build version."),
+                Some(b) => println!(
+                    " (build b{b}; external -- unverified for the Unlimited-OCR R-SWA patch, PR #24975)"
+                ),
+                None => println!(
+                    "\n       [WARN] external llama-server: could not parse the build version, \
+                     and cannot verify the Unlimited-OCR R-SWA patch (PR #24975)."
+                ),
             }
         }
         None => {
-            println!("  [FAIL] llama-server: not found on PATH.");
+            println!(
+                "  [INFO] llama-server: no managed R-SWA build cached (auto-downloads on first run)."
+            );
             let hint_str = generate_install_hint();
             for line in hint_str.lines() {
                 println!("         {}", line);
             }
-            tools_ok = false;
         }
     }
 
@@ -178,27 +259,39 @@ pub fn run_doctor(
     Ok(())
 }
 
-/// Validates that both llama-server and pdftoppm are installed and reachable.
-pub fn check(llama_override: Option<&Path>) -> Res<Tools> {
-    let llama_server = match llama_override {
-        Some(p) => p.to_path_buf(),
-        None => locate("llama-server").ok_or_else(|| {
-            let hint_str = generate_install_hint();
-            Box::<dyn std::error::Error>::from(hint_str)
-        })?,
-    };
+/// Validates that both llama-server and pdftoppm are installed and reachable,
+/// resolving (and auto-downloading, via `resolve_llama_server`) unlocr's managed
+/// R-SWA llama-server. `on_progress` receives `Progress::Download` ticks for that
+/// download; pass a no-op sink if you don't surface it.
+pub fn check(
+    llama_override: Option<&Path>,
+    on_progress: &mut dyn FnMut(crate::Progress),
+) -> Res<Tools> {
+    let (llama_server, provenance) = resolve_llama_server(llama_override, on_progress)?;
     let pdftoppm = locate("pdftoppm").ok_or_else(|| hint("pdftoppm", "brew install poppler"))?;
 
-    // Soft version gate. The hard gate is the real model load in server.rs.
-    match build_number(&llama_server) {
-        Some(b) if b < MIN_BUILD => eprintln!(
-            "warning: llama-server build b{b} is older than b{MIN_BUILD} (DeepSeek-OCR support, PR #17400). \
-             Run `brew upgrade llama.cpp` if model loading fails."
-        ),
-        Some(_) => {}
-        None => eprintln!(
-            "warning: could not parse llama-server version; need build >= b{MIN_BUILD}."
-        ),
+    // Compatibility warning. The Unlimited-OCR R-SWA patch (PR #24975) is unmerged
+    // upstream, so no stock build has it and the build number cannot prove support.
+    // An external binary is therefore unverifiable; warn unless the user opts out.
+    // The managed build is our own R-SWA build, trusted silently. The hard gate is
+    // the real model load in server::start (catches an incompatible binary anyway).
+    if matches!(provenance, Provenance::External) && !allow_external_llama() {
+        eprintln!(
+            "warning: using an external llama-server ({}); unlocr cannot verify it includes \
+             the Unlimited-OCR Reference Sliding Window Attention patch (PR #24975). unlocr \
+             ships a patched build -- drop --llama-bin to use it, or set \
+             UNLOCR_ALLOW_EXTERNAL_LLAMA=1 to silence this.",
+            llama_server.display()
+        );
+        // Secondary: the base DeepSeek-OCR arch also needs >= b8530.
+        if let Some(b) = build_number(&llama_server) {
+            if b < MIN_BUILD {
+                eprintln!(
+                    "warning: llama-server build b{b} is also older than b{MIN_BUILD} \
+                     (DeepSeek-OCR base support, PR #17400)."
+                );
+            }
+        }
     }
 
     Ok(Tools {
@@ -280,7 +373,8 @@ mod tests {
     #[test]
     fn test_generate_install_hint() {
         let hint = super::generate_install_hint();
-        assert!(hint.contains("llama-server (from llama.cpp >= b8530) is required."));
+        assert!(hint.contains("llama-server"));
+        assert!(hint.contains("PR #24975"));
         assert!(hint.contains("llama-cpp") || hint.contains("llama.cpp"));
     }
 }
