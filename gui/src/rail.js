@@ -6,7 +6,7 @@
  *  Board route reloads the store so a run completed in the Workspace appears
  *  without a manual Reload click (both views are otherwise only refreshed on app
  *  load + on Run). */
-export function wireRail(library, board) {
+export function wireRail(library, board, onSettingsShown) {
   const buttons = document.querySelectorAll(".rail__btn");
   const screenTitle = document.getElementById("screenTitle");
   const announcer = document.getElementById("routeAnnouncer");
@@ -49,6 +49,12 @@ export function wireRail(library, board) {
       }
       if (route === "board" && board && typeof board.load === "function") {
         board.load();
+      }
+      // Settings' model-files table sha256-hashes every cached GGUF (multi-GB, real
+      // CPU seconds). Load it lazily on Settings-open, NOT at boot, or the app pegs a
+      // core and appears to hang before the window is usable.
+      if (route === "settings" && typeof onSettingsShown === "function") {
+        onSettingsShown();
       }
     });
   });
