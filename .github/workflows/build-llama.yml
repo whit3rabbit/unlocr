@@ -70,10 +70,15 @@ jobs:
       - name: Add swap (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo fallocate -l 10G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          # The runner already ships a /swapfile ("Text file busy" on fallocate),
+          # so put ours on the larger /mnt ephemeral disk. dd fallback if fallocate
+          # is unsupported on that fs.
+          sudo fallocate -l 10G /mnt/swapfile || \
+            sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=10240
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
 
       # GGML_NATIVE=OFF: portable CPU baseline (no AVX-512 baked in) or users SIGILL.
       # BUILD_SHARED_LIBS=OFF: one self-contained binary, so the .zip is just the exe.
