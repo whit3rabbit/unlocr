@@ -47,7 +47,7 @@ function mdName(path) {
 window.addEventListener("DOMContentLoaded", () => {
   const library = makeLibrary();
   const board = makeBoard();
-  wireRail(library, board);
+  wireRail(library, board, wireModelFilesTable);
 
   const ui = makeUi();
   const rail = makeFileRail();
@@ -134,7 +134,8 @@ window.addEventListener("DOMContentLoaded", () => {
     wireAutoSaveEngineOptions();
   });
   wireCacheControls();
-  wireModelFilesTable();
+  // wireModelFilesTable is NOT called here: it sha256-hashes every cached GGUF
+  // (multi-GB) and would peg a core at boot. wireRail runs it lazily on Settings-open.
   wireSystemRequirements();
   wireDependencies();
   wireQuickSettingsPopup();
