@@ -28,6 +28,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -65,8 +67,8 @@ jobs:
           git checkout "${{ inputs.llama_commit }}"
           echo "Built llama.cpp at commit \`$(git rev-parse HEAD)\` (PR #24975)" >> "$GITHUB_STEP_SUMMARY"
 
-      # The private-repo Linux runner is small (2 vCPU / ~7 GB); the static link OOMs
-      # and the runner is SIGTERM'd (exit 143). Extra swap covers the peak.
+      # Headroom for the static link (it OOM'd -> SIGTERM/exit 143 on the smaller
+      # runner). Harmless on the larger public-repo runner; keep as a backstop.
       - name: Add swap (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -131,9 +133,12 @@ jobs:
           "ASSET=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CHECKSUM=$name.zip.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      # NOTE: no attest-build-provenance step. It requires a PUBLIC repo (fails with
-      # "Feature not available for user-owned private repositories") and would block the
-      # upload. Re-add it once whit3rabbit/unlocr is public if provenance is wanted.
+      # Provenance attestation (needs a public repo; the repo is now public).
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: ${{ env.ASSET }}
+
       - name: Upload to release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
