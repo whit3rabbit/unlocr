@@ -70,7 +70,16 @@ fn job_update_status_preserves_created_at() {
     j.created_at = 100;
     j.updated_at = 100;
     db::insert(&conn, &j).unwrap();
-    db::update_status(&conn, "u", "done", "/tmp/u.md", "", 200, &JobMetrics::default()).unwrap();
+    db::update_status(
+        &conn,
+        "u",
+        "done",
+        "/tmp/u.md",
+        "",
+        200,
+        &JobMetrics::default(),
+    )
+    .unwrap();
     let got = db::list(&conn).unwrap();
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].status, "done");

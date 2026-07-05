@@ -143,7 +143,8 @@ pub(crate) fn process_single_input(
         Err(e) if state.cancel.load(Ordering::SeqCst) => {
             let _ = e;
             if let Some(j) = &job {
-                let _ = store::finish_job(&j.id, "failed", "", "stopped by user", &make_metrics(None));
+                let _ =
+                    store::finish_job(&j.id, "failed", "", "stopped by user", &make_metrics(None));
                 emit_jobs_changed(app);
             }
             return Ok(None);
@@ -241,7 +242,13 @@ pub(crate) fn process_single_input(
 
     if let Some(j) = &job {
         let page_count = Some(out.pages.len() as u32);
-        let _ = store::finish_job(&j.id, job_status, &job_out, &job_err, &make_metrics(page_count));
+        let _ = store::finish_job(
+            &j.id,
+            job_status,
+            &job_out,
+            &job_err,
+            &make_metrics(page_count),
+        );
         emit_jobs_changed(app);
     }
 
@@ -300,9 +307,15 @@ mod tests {
     fn next_free_stem_single_bumps_on_existing_md() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("foo.md"), b"x").unwrap();
-        assert_eq!(next_free_stem(dir.path(), "foo", OutputMode::Single), "foo-2");
+        assert_eq!(
+            next_free_stem(dir.path(), "foo", OutputMode::Single),
+            "foo-2"
+        );
         std::fs::write(dir.path().join("foo-2.md"), b"x").unwrap();
-        assert_eq!(next_free_stem(dir.path(), "foo", OutputMode::Single), "foo-3");
+        assert_eq!(
+            next_free_stem(dir.path(), "foo", OutputMode::Single),
+            "foo-3"
+        );
     }
 
     #[test]
@@ -310,7 +323,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("foo")).unwrap();
         // Pages mode collides on the {stem}/ folder, not a .md file.
-        assert_eq!(next_free_stem(dir.path(), "foo", OutputMode::Pages), "foo-2");
+        assert_eq!(
+            next_free_stem(dir.path(), "foo", OutputMode::Pages),
+            "foo-2"
+        );
         // A stray foo.md alone does not block Pages mode (it wants the folder).
         let dir2 = tempfile::tempdir().unwrap();
         std::fs::write(dir2.path().join("foo.md"), b"x").unwrap();

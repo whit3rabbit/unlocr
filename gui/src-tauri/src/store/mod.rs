@@ -80,7 +80,9 @@ pub fn finish_job(
     metrics: &JobMetrics,
 ) -> Result<(), String> {
     let updated_at = now_secs();
-    crate::db::with_db(|c| db::update_status(c, id, status, output_path, error, updated_at, metrics))
+    crate::db::with_db(|c| {
+        db::update_status(c, id, status, output_path, error, updated_at, metrics)
+    })
 }
 
 /// Flip any rows left `running` by a previous session that crashed mid-run to
