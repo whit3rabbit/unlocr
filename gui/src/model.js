@@ -4,6 +4,7 @@
 // listeners, and the quant tier labels / cached markers.
 
 import { requireTauri } from "./tauri.js";
+import { showToast, removeToast } from "./toasts.js";
 
 // EH-0013 bite 2: i18n hook. Named `tr` -- `t` is the Tauri handle in every fn.
 const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
@@ -19,6 +20,51 @@ let modelLoaded = false;
 // late-arriving server-ready event cannot clobber the resting "Loaded: ..." text
 // after refreshModelStatus has already set it.
 let loadingModel = false;
+
+// Load-phase "still alive" feedback. The backend emits ocr://status ("loading
+// model into memory…") ONCE, then Server::start blocks in await_health for 30-90s
+// (CPU load of the multi-GB GGUF) emitting nothing; meanwhile the download toast
+// has already been removed, so both the model bar and the toast stack look frozen.
+// This ticks a 1s elapsed-seconds counter on both surfaces until server-ready or
+// the load resolves, so the user can see it is working, not hung.
+let loadHeartbeat = null;
+let loadHeartbeatBase = "";
+let loadHeartbeatStart = 0;
+const LOAD_TOAST_ID = "load:memory";
+
+/** Stop the load heartbeat and clear its toast. Idempotent. */
+function stopLoadFeedback() {
+  if (loadHeartbeat) {
+    clearInterval(loadHeartbeat);
+    loadHeartbeat = null;
+  }
+  removeToast(LOAD_TOAST_ID);
+}
+
+/** Show `baseMsg` on the model bar + a toast, both with a live "(Ns)" elapsed
+ *  counter, so a long event-less load phase is visibly progressing. Self-stops if
+ *  the load gate (loadingModel) drops. ponytail: "(Ns)" is an elapsed unit, not
+ *  prose, so it is not routed through i18n (the base message is backend-supplied
+ *  and already English). */
+function startLoadFeedback(baseMsg) {
+  stopLoadFeedback();
+  loadHeartbeatBase = baseMsg || tr("model.loading");
+  loadHeartbeatStart = Date.now();
+  const statusText = document.getElementById("modelStatusText");
+  const paint = () => {
+    const secs = Math.floor((Date.now() - loadHeartbeatStart) / 1000);
+    if (statusText) statusText.textContent = loadHeartbeatBase + " (" + secs + "s)";
+    showToast(LOAD_TOAST_ID, { kind: "download", title: loadHeartbeatBase, meta: secs + "s" });
+  };
+  paint();
+  loadHeartbeat = setInterval(() => {
+    if (!loadingModel) {
+      stopLoadFeedback();
+      return;
+    }
+    paint();
+  }, 1000);
+}
 
 /** Paint the titlebar model-light + label from a model_status payload. This is
  *  the single at-a-glance status (the model-bar text below carries detail):
@@ -68,6 +114,10 @@ export async function refreshModelStatus(ui) {
   // Upgrade the unloaded "Load model" label to "Download & load model" when the
   // selected local quant is not yet cached (best-effort; loaded state is left).
   updateLoadLabel();
+  // Signal load/unload/startup completion so the file-rail pipeline pane can
+  // re-run preflight (a download may have added the GGUF). DOM event is the seam
+  // (this fn has no `rail`), same pattern as the GGUF picker's unlocr:gguf-changed.
+  document.dispatchEvent(new CustomEvent("unlocr:model-changed"));
 }
 
 /** When no model is loaded, label the Load button "Download & load model" if the
@@ -284,7 +334,10 @@ export function wireModelBar(ui) {
           baseUrl: urlEl ? urlEl.value : null,
           apiKey: keyEl ? keyEl.value : null,
           model: modelEl ? modelEl.value : null,
-          llamaBin: null,
+          // Explicit llama-server override from Settings (#setLlamaBin). Empty =
+          // null so the backend auto-resolves (managed cached -> download -> PATH).
+          // A set path is flagged External in the preflight/pipeline provenance.
+          llamaBin: ((document.getElementById("setLlamaBin") || {}).value || "").trim() || null,
           imageMaxTokens: Number.isFinite(imtVal) && imtVal > 0 ? imtVal : null,
           chatTemplate: ctEl && ctEl.value ? ctEl.value : null,
           modelFile: pickedGguf("modelFilePath"),
@@ -301,6 +354,10 @@ export function wireModelBar(ui) {
       } catch (err) {
         if (statusText) statusText.textContent = tr("model.loadFailed", { error: String(err) });
       } finally {
+        // Load resolved (success line above / catch). Kill the heartbeat + its
+        // toast now so a pending tick cannot overwrite the final "Loaded: ..."
+        // label; loadingModel drops just below as a second backstop.
+        stopLoadFeedback();
         loadBtn.disabled = false;
         // Clear the gate BEFORE refreshModelStatus's await: otherwise a late
         // ocr://server-ready landing during that re-fetch passes the gate and
@@ -356,10 +413,13 @@ export function attachLoadListeners() {
   t.event.listen("ocr://status", (e) => {
     if (!loadingModel) return;
     const { message } = (e && e.payload) || {};
-    if (statusText && message) statusText.textContent = message;
+    // This status marks the long, event-less "loading into memory" phase; drive
+    // the elapsed-seconds heartbeat (bar + toast) so it does not look frozen.
+    if (message) startLoadFeedback(message);
   });
   t.event.listen("ocr://server-ready", (e) => {
     if (!loadingModel) return;
+    stopLoadFeedback();
     const { port } = (e && e.payload) || {};
     if (statusText) statusText.textContent = tr("model.serverReady", { port });
   });

@@ -404,6 +404,12 @@ window.addEventListener("DOMContentLoaded", () => {
     console.warn("[preflight] skipped:", err.message);
   }
 
+  // The pipeline pane (preflight-derived) must not stay frozen at boot state.
+  // Re-run preflight when readiness can change: quant selection (checks a
+  // different GGUF) or a model load/unload (a download may have added the GGUF).
+  document.getElementById("optQuant")?.addEventListener("change", () => preflightOnLoad(ui, rail));
+  document.addEventListener("unlocr:model-changed", () => preflightOnLoad(ui, rail));
+
   // EH-0006: load the persisted job store on startup so the Library grid (bite 2)
   // and the Board columns (bite 3) show prior runs immediately (both are reloaded on
   // Run + on tab switch too). Fail soft outside the webview (plain browser) so layout

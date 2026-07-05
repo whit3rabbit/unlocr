@@ -14,7 +14,11 @@ import { requireTauri } from "./tauri.js";
 export async function preflightOnLoad(ui, rail) {
   const t = requireTauri();
   try {
-    const report = await t.core.invoke("preflight");
+    // Check GGUF presence for the CURRENTLY SELECTED quant, not the backend
+    // default (Q8_0). Without this the pipeline "Model GGUF" dot always reflects
+    // the default quant's disk presence and disagrees with the loaded model.
+    const quant = document.getElementById("optQuant")?.value || undefined;
+    const report = await t.core.invoke("preflight", quant ? { quant } : {});
     // eslint-disable-next-line no-console
     console.log("[preflight]", report);
 
