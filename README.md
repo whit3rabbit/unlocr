@@ -7,10 +7,6 @@
 ╚██████╔╝██║ ╚████║███████╗╚██████╔╝╚██████╗██║  ██║
  ╚═════╝ ╚═╝  ╚═══╝╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝
 
- |  |     |_)      _) |            |      _ \  __| _ \
- |  |  \  | |  ` \  |  _|  -_)  _` |____|(   |(      /
-\__/_| _|_|_|_|_|_|_|\__|\___|\__,_|    \___/\___|_|_\
-
 GUI/CLI for unlimited-ocr
 </pre>
 
@@ -20,6 +16,9 @@ GUI/CLI for unlimited-ocr
 [![License](https://img.shields.io/github/license/whit3rabbit/unlocr.svg)](https://github.com/whit3rabbit/unlocr/blob/main/LICENSE)
 </div>
 
+<p align="center">
+  <b>English</b> | <a href="README_zh.md">简体中文</a>
+</p>
 
 **Not affiliated with Unlimited OCR but a wrapper/GUI around Unlimited OCR**
 
@@ -72,7 +71,19 @@ By default, `unlocr` runs a quantized GGUF on `llama.cpp` (CPU or GPU-offloaded)
 
 ### How to Install by OS
 
-Select your operating system below for quick setup instructions.
+All installation files (pre-built binaries, desktop installers, and packages) are available on the **[GitHub Releases](https://github.com/whit3rabbit/unlocr/releases)** page.
+
+*   **macOS (Apple Silicon & Intel)**:
+    *   **GUI (Desktop App)**: Download the `.dmg` installer from [Releases](https://github.com/whit3rabbit/unlocr/releases) (or install via Homebrew Cask: `brew install --cask whit3rabbit/tap/unlocr`)
+    *   **CLI**: `brew install whit3rabbit/tap/unlocr`
+*   **Windows**:
+    *   **GUI**: Download the `.msi` installer from [Releases](https://github.com/whit3rabbit/unlocr/releases)
+    *   **CLI**: Download the CLI zip file from [Releases](https://github.com/whit3rabbit/unlocr/releases)
+*   **Linux**:
+    *   **GUI**: Download the `.AppImage`, `.deb`, or `.rpm` package from [Releases](https://github.com/whit3rabbit/unlocr/releases)
+    *   **CLI**: Download the `.tar.gz` package from [Releases](https://github.com/whit3rabbit/unlocr/releases)
+
+---
 
 #### macOS
 Homebrew is required for `poppler` (unlocr auto-downloads the patched `llama-server` itself; do NOT `brew install llama.cpp` — the Homebrew build lacks R-SWA). Install the prerequisite:

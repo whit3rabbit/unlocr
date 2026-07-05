@@ -229,6 +229,7 @@ Thin wrapper. Full usage/benchmarks in README.md.
   The static probes (RAM/CPU/model/GPU) are memoized per-process via a `OnceLock`
   (`detect_gpu` shells `system_profiler` ~1-2s on macOS / `lspci`+`nvidia-smi` on
   Linux); only disk free is re-probed per call (it changes as models download).
+- Documentation Mirroring: Any changes or updates made to `README.md` (English) must be accurately translated and mirrored in `README_zh.md` (Chinese) to keep both versions in sync.
 
 ## Tauri GUI run log (2026-06-28)
 
