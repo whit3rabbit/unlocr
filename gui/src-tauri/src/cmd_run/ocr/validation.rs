@@ -14,6 +14,8 @@ pub(crate) fn validate_and_prepare_options(
     repeat_penalty: Option<f32>,
     dry_multiplier: Option<f32>,
     dry_base: Option<f32>,
+    dry_allowed_length: Option<u32>,
+    dry_penalty_last_n: Option<i32>,
     temperature: Option<f32>,
     first_page: Option<u32>,
     last_page: Option<u32>,
@@ -35,6 +37,8 @@ pub(crate) fn validate_and_prepare_options(
     opts.repeat_penalty = repeat_penalty;
     opts.dry_multiplier = dry_multiplier;
     opts.dry_base = dry_base;
+    opts.dry_allowed_length = dry_allowed_length;
+    opts.dry_penalty_last_n = dry_penalty_last_n;
     opts.temperature = temperature;
     opts.pages = match (first_page, last_page) {
         (None, None) => None,

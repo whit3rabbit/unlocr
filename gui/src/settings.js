@@ -12,6 +12,7 @@ import {
   numOr,
   floatOrNull,
   floatOrNullMin0,
+  intMinNeg1,
   setVal,
 } from "./options.js";
 
@@ -93,6 +94,8 @@ const SYNCED_FIELDS = [
   ["optRepeatPenalty", "repeatPenalty"],
   ["optDryMultiplier", "dryMultiplier"],
   ["optDryBase", "dryBase"],
+  ["optDryAllowedLength", "dryAllowedLength"],
+  ["optDryPenaltyLastN", "dryPenaltyLastN"],
   ["optOutputMode", "outputMode"],
   ["optPagesMode", "pagesMode"],
   ["optPageFrom", "pageFrom"],
@@ -128,6 +131,9 @@ export function applySettingsToControls(s) {
   SYNCED_FIELDS.forEach(([id, key]) => setVal(id, s[key]));
   const keepImagesEl = document.getElementById("optKeepImages");
   if (keepImagesEl && s.keepImages != null) keepImagesEl.checked = !!s.keepImages;
+  // Anti-loop toggle: a checkbox, so restored outside the setVal (.value) loop.
+  const antiLoopEl = document.getElementById("optAntiLoop");
+  if (antiLoopEl && s.antiLoop != null) antiLoopEl.checked = !!s.antiLoop;
   // Pages: mode + bounds, then re-run the visibility toggle directly (not via
   // a dispatched `change` event -- that would also fire wireAutoSaveEngineOptions'
   // listener on #optPagesMode and spuriously re-trigger an auto-save) so the
@@ -247,7 +253,12 @@ export async function wireSettings(onSaved) {
 // select) that applySettingsToControls restores outside the plain setVal loop.
 // Deliberately excludes #remoteKey (see the function doc) -- everything else the
 // Workspace's engine bar + Advanced panel exposes.
-const AUTO_SAVE_CHANGE_IDS = [...SYNCED_FIELDS.map(([id]) => id), "optKeepImages", "enginePreset"];
+const AUTO_SAVE_CHANGE_IDS = [
+  ...SYNCED_FIELDS.map(([id]) => id),
+  "optKeepImages",
+  "optAntiLoop",
+  "enginePreset",
+];
 
 /** Auto-save the Workspace's engine/run-option knobs (quant, DPI, max tokens,
  *  Advanced panel, pages, output mode, engine preset, remote URL/model, custom
@@ -305,6 +316,11 @@ export function wireAutoSaveEngineOptions() {
           repeatPenalty: floatOrNull(get("optRepeatPenalty")),
           dryMultiplier: floatOrNullMin0(get("optDryMultiplier")),
           dryBase: floatOrNull(get("optDryBase")),
+          // Persist the RAW override fields (null when blank), not the anti-loop
+          // fallback: readRunOptions re-derives 2/-1 from the toggle at run time.
+          dryAllowedLength: numOr(get("optDryAllowedLength"), null),
+          dryPenaltyLastN: intMinNeg1(get("optDryPenaltyLastN"), null),
+          antiLoop: !!(get("optAntiLoop") && get("optAntiLoop").checked),
           keepImages: !!(get("optKeepImages") && get("optKeepImages").checked),
           outputMode: (get("optOutputMode") && get("optOutputMode").value) || "single",
           pagesMode: (get("optPagesMode") && get("optPagesMode").value) || "all",
@@ -668,6 +684,17 @@ export async function wireDependencies() {
       status.dataset.toolStatus = tool.name;
       status.textContent = tool.found ? tr("deps.found") : tr("deps.notFound");
       if (tool.found && tool.path) status.title = tool.path;
+
+      // Show the resolved llama-server location as the override field's PLACEHOLDER
+      // (never its value): empty keeps auto-resolve (managed cached -> download ->
+      // PATH), so a downloaded managed build is still reported Managed. Setting the
+      // value would force an External override and wrongly trip the loop warning.
+      // This is the "default from download": after Download the row rebuilds found,
+      // and the placeholder updates to where the managed build landed.
+      if (tool.name === "llama-server" && tool.found && tool.path) {
+        const bin = document.getElementById("setLlamaBin");
+        if (bin) bin.placeholder = tool.path;
+      }
 
       row.appendChild(name);
       row.appendChild(status);

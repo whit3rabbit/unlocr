@@ -9,6 +9,12 @@ pub(crate) struct PreflightReport {
     ok: bool,
     build_number: Option<u64>,
     llama_server: Option<String>,
+    /// Which llama-server the resolver picked: "managed" = unlocr's patched
+    /// R-SWA build (has the Unlimited-OCR vision patch, PR #24975), "external" =
+    /// a PATH/Homebrew/override binary that CANNOT be verified for that patch and
+    /// is the common cause of the `ocr-ocr` repetition loops. None when no
+    /// llama-server was found. The frontend warns on "external".
+    provenance: Option<String>,
     pdftoppm: Option<String>,
     model_present: bool,
     mmproj_present: bool,
@@ -49,6 +55,7 @@ pub(crate) fn preflight(
             ok: false,
             build_number: None,
             llama_server: None,
+            provenance: None,
             pdftoppm: None,
             model_present: false,
             mmproj_present: false,
@@ -64,6 +71,7 @@ pub(crate) fn preflight(
                 ok: false,
                 build_number: None,
                 llama_server: None,
+                provenance: None,
                 pdftoppm: None,
                 model_present: false,
                 mmproj_present: false,
@@ -75,7 +83,17 @@ pub(crate) fn preflight(
 
     // Passive status report: resolve WITHOUT downloading (find_llama_server), so
     // opening the model panel never triggers the multi-hundred-MB managed download.
-    let llama = unlocr::preflight::find_llama_server(llama_override.as_deref()).map(|(p, _)| p);
+    // Keep the Provenance so the frontend can warn when a stock/external binary
+    // (the repetition-loop cause) is in use instead of the managed R-SWA build.
+    let llama_resolved = unlocr::preflight::find_llama_server(llama_override.as_deref());
+    let provenance = llama_resolved.as_ref().map(|(_, prov)| {
+        match prov {
+            unlocr::preflight::Provenance::Managed => "managed",
+            unlocr::preflight::Provenance::External => "external",
+        }
+        .to_string()
+    });
+    let llama = llama_resolved.map(|(p, _)| p);
     let pdftoppm_path = unlocr::preflight::locate("pdftoppm");
     let tools = match (llama, pdftoppm_path) {
         (Some(llama_server), Some(pdftoppm)) => unlocr::preflight::Tools {
@@ -100,6 +118,7 @@ pub(crate) fn preflight(
                 llama_server: llama
                     .map(|p| p.display().to_string())
                     .or_else(|| llama_override.map(|p| p.display().to_string())),
+                provenance: provenance.clone(),
                 pdftoppm: pdftoppm_path.map(|p| p.display().to_string()),
                 model_present,
                 mmproj_present,
@@ -117,6 +136,7 @@ pub(crate) fn preflight(
         ok: true,
         build_number,
         llama_server: Some(tools.llama_server.display().to_string()),
+        provenance,
         pdftoppm: Some(tools.pdftoppm.display().to_string()),
         model_present,
         mmproj_present,

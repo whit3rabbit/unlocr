@@ -24,7 +24,7 @@ pub mod types;
 
 pub(crate) use helpers::is_md;
 pub use helpers::{delete_output_file, make_id, now_secs};
-pub use types::{Job, JobOptions};
+pub use types::{Job, JobMetrics, JobOptions};
 
 /// Path of the SQLite store, for surfacing to the UI (the `jobs_store_path`
 /// command). Delegates to `db::db_path` (`<app-data>/unlocr/unlocr.db`).
@@ -59,6 +59,11 @@ pub fn start_job(input_path: &str, options: JobOptions) -> Result<Job, String> {
         error: String::new(),
         created_at: now,
         updated_at: now,
+        // Filled by finish_job; a running row has no results yet.
+        page_count: None,
+        duration_ms: None,
+        backend: String::new(),
+        output_mode: String::new(),
     };
     crate::db::with_db(|c| db::insert(c, &job))?;
     Ok(job)
@@ -67,9 +72,15 @@ pub fn start_job(input_path: &str, options: JobOptions) -> Result<Job, String> {
 /// Move a started job to its terminal state (`done` or `failed`), advancing
 /// `updated_at` and preserving `created_at`. Pair with `start_job`: the caller
 /// passes back the id `start_job` returned.
-pub fn finish_job(id: &str, status: &str, output_path: &str, error: &str) -> Result<(), String> {
+pub fn finish_job(
+    id: &str,
+    status: &str,
+    output_path: &str,
+    error: &str,
+    metrics: &JobMetrics,
+) -> Result<(), String> {
     let updated_at = now_secs();
-    crate::db::with_db(|c| db::update_status(c, id, status, output_path, error, updated_at))
+    crate::db::with_db(|c| db::update_status(c, id, status, output_path, error, updated_at, metrics))
 }
 
 /// Flip any rows left `running` by a previous session that crashed mid-run to

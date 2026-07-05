@@ -16,6 +16,10 @@ fn job(id: &str, out: &str) -> Job {
         error: String::new(),
         created_at: 100,
         updated_at: 200,
+        page_count: None,
+        duration_ms: None,
+        backend: String::new(),
+        output_mode: String::new(),
     }
 }
 
@@ -66,7 +70,7 @@ fn job_update_status_preserves_created_at() {
     j.created_at = 100;
     j.updated_at = 100;
     db::insert(&conn, &j).unwrap();
-    db::update_status(&conn, "u", "done", "/tmp/u.md", "", 200).unwrap();
+    db::update_status(&conn, "u", "done", "/tmp/u.md", "", 200, &JobMetrics::default()).unwrap();
     let got = db::list(&conn).unwrap();
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].status, "done");
@@ -75,11 +79,33 @@ fn job_update_status_preserves_created_at() {
     assert_eq!(got[0].created_at, 100, "created_at must survive an update");
 }
 
+/// finish_job's metrics (page count, duration, backend, output layout) persist
+/// through update_status and read back on list -- the run-detail dialog's data.
+#[test]
+fn job_update_status_records_metrics() {
+    let conn = mem_db();
+    let mut j = job("m", "");
+    j.status = "running".into();
+    db::insert(&conn, &j).unwrap();
+    let metrics = JobMetrics {
+        page_count: Some(7),
+        duration_ms: Some(4200),
+        backend: "local".into(),
+        output_mode: "pages".into(),
+    };
+    db::update_status(&conn, "m", "done", "/tmp/m.md", "", 300, &metrics).unwrap();
+    let got = db::list(&conn).unwrap();
+    assert_eq!(got[0].page_count, Some(7));
+    assert_eq!(got[0].duration_ms, Some(4200));
+    assert_eq!(got[0].backend, "local");
+    assert_eq!(got[0].output_mode, "pages");
+}
+
 /// update_status on a missing id is a silent no-op (0 rows), not an error.
 #[test]
 fn job_update_status_unknown_is_noop() {
     let conn = mem_db();
-    db::update_status(&conn, "nope", "done", "", "", 1).unwrap();
+    db::update_status(&conn, "nope", "done", "", "", 1, &JobMetrics::default()).unwrap();
     assert!(db::list(&conn).unwrap().is_empty());
 }
 
@@ -180,6 +206,10 @@ fn over_500_jobs_all_survive() {
             error: String::new(),
             created_at: i,
             updated_at: i,
+            page_count: None,
+            duration_ms: None,
+            backend: String::new(),
+            output_mode: String::new(),
         };
         db::insert(&conn, &j).unwrap();
     }

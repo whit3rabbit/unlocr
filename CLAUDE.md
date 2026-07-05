@@ -129,7 +129,12 @@ Thin wrapper. Full usage/benchmarks in README.md.
   called from BOTH CLI `ocr::run_pdf` and GUI `run_ocr`. `-o`/`out_file` is a single
   output file, single-input only (both paths guard `inputs.len() > 1`). It appends `.md`
   only when no extension; a custom non-`.md` name writes fine but the GUI review pane
-  (`read_text_file` is `.md`-only) cannot render it.
+  (`read_text_file` is `.md`-only) cannot render it. GUI-ONLY EXCEPTION: for a default
+  (no `out_file`) path the GUI versions the stem via `next_free_stem` (worker.rs) so
+  re-OCR'ing the same PDF writes `foo.md`, `foo-2.md`, ... (or `foo/`, `foo-2/` in pages
+  mode) instead of overwriting. The CLI and any explicit `-o` still overwrite. Each GUI
+  run now points at its OWN file, so deleting one run's `.md` no longer strands the others
+  (jobs schema is v5: `page_count`/`duration_ms`/`backend`/`output_mode` recorded per run).
 - Bare `cargo build`/`cargo test` build the root CLI ONLY (gui is a workspace member
   with no default-members). After changing the public lib API (`OcrOptions`,
   `Server::start`, `run_ocr_job`, ...) run `cargo build --manifest-path

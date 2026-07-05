@@ -132,6 +132,8 @@ fn remote_endpoint_sends_bearer_and_parses() {
             None,
             None,
             None,
+            None,
+            None,
         )
         .expect("remote ocr");
     assert_eq!(out.text, "# remote ok");
@@ -196,6 +198,8 @@ fn remote_endpoint_injects_model_only_when_set() {
             "p",
             "data:image/png;base64,AAAA",
             64,
+            None,
+            None,
             None,
             None,
             None,
@@ -291,6 +295,8 @@ fn sse_streaming_fires_on_token() {
         None,
         None,
         None,
+        None,
+        None,
         &mut |chunk: &str| {
             tokens.push(chunk.to_string());
             true
@@ -379,6 +385,8 @@ fn stream_falls_back_to_plain_json_completion() {
         None,
         None,
         None,
+        None,
+        None,
         &mut |chunk: &str| {
             tokens.push(chunk.to_string());
             true
@@ -457,6 +465,8 @@ fn sse_streaming_surfaces_provider_error() {
         None,
         None,
         None,
+        None,
+        None,
         &mut |chunk: &str| {
             tokens.push(chunk.to_string());
             true
@@ -486,25 +496,49 @@ fn apply_sampling_sets_fields_only_when_set() {
     let baseline = json!({ "temperature": 0, "max_tokens": 64 });
 
     let mut body = baseline.clone();
-    apply_sampling(&mut body, None, None, None);
-    assert_eq!(body, baseline, "None/None/None must not touch the body");
+    apply_sampling(&mut body, None, None, None, None, None);
+    assert_eq!(body, baseline, "all-None must not touch the body");
 
     let mut body = baseline.clone();
-    apply_sampling(&mut body, Some(1.1), Some(0.8), Some(2.0));
+    apply_sampling(&mut body, Some(1.1), Some(0.8), Some(2.0), None, None);
     assert_eq!(body["repeat_penalty"], json!(1.1f32));
     assert_eq!(body["dry_multiplier"], json!(0.8f32));
-    assert_eq!(body["dry_allowed_length"], json!(4));
+    assert_eq!(
+        body["dry_allowed_length"],
+        json!(4),
+        "dry_allowed_length defaults to 4 when unset"
+    );
     assert_eq!(body["dry_base"], json!(2.0f32));
+    assert!(
+        body.get("dry_penalty_last_n").is_none(),
+        "dry_penalty_last_n absent when unset"
+    );
 
     let mut body = baseline.clone();
-    apply_sampling(&mut body, None, Some(0.8), Some(2.0));
+    apply_sampling(&mut body, None, Some(0.8), Some(2.0), None, None);
     assert!(body.get("repeat_penalty").is_none());
     assert_eq!(body["dry_multiplier"], json!(0.8f32));
     assert_eq!(body["dry_allowed_length"], json!(4));
     assert_eq!(body["dry_base"], json!(2.0f32));
 
+    // Anti-loop preset: with DRY on, an explicit allowed-length of 2 and a
+    // penalty-last-n of -1 must both reach the wire (the dense-page toggle).
     let mut body = baseline.clone();
-    apply_sampling(&mut body, Some(1.1), None, None);
+    apply_sampling(&mut body, None, Some(0.8), None, Some(2), Some(-1));
+    assert_eq!(body["dry_allowed_length"], json!(2));
+    assert_eq!(body["dry_penalty_last_n"], json!(-1));
+
+    // The two anti-loop knobs are inert without DRY: dry_multiplier None must
+    // drop dry_allowed_length AND dry_penalty_last_n even when supplied.
+    let mut body = baseline.clone();
+    apply_sampling(&mut body, None, None, None, Some(2), Some(-1));
+    assert_eq!(
+        body, baseline,
+        "anti-loop knobs are dropped when DRY is off"
+    );
+
+    let mut body = baseline.clone();
+    apply_sampling(&mut body, Some(1.1), None, None, None, None);
     assert_eq!(body["repeat_penalty"], json!(1.1f32));
     assert!(body.get("dry_multiplier").is_none());
     assert!(body.get("dry_allowed_length").is_none());
@@ -512,7 +546,7 @@ fn apply_sampling_sets_fields_only_when_set() {
     // Critical gating case: dry_base supplied but dry_multiplier absent must be
     // dropped, since dry_base alone is inert in llama.cpp.
     let mut body = baseline;
-    apply_sampling(&mut body, Some(1.1), None, Some(2.0));
+    apply_sampling(&mut body, Some(1.1), None, Some(2.0), None, None);
     assert_eq!(body["repeat_penalty"], json!(1.1f32));
     assert!(body.get("dry_multiplier").is_none());
     assert!(body.get("dry_allowed_length").is_none());
@@ -582,6 +616,8 @@ fn ocr_image_sends_dry_fields_only_when_set() {
             None,
             dry_multiplier,
             dry_base,
+            None,
+            None,
         )
         .expect("ocr");
         let body = rx.recv().expect("stub recorded body");
@@ -665,6 +701,8 @@ fn ocr_image_resolves_temperature_default_and_override() {
             "data:image/png;base64,AAAA",
             64,
             temperature,
+            None,
+            None,
             None,
             None,
             None,
@@ -784,6 +822,8 @@ fn ocr_image_flags_truncated_from_finish_reason() {
                 None,
                 None,
                 None,
+                None,
+                None,
             )
             .expect("ocr");
         rx.recv().expect("stub served the request");
@@ -859,6 +899,8 @@ fn sse_streaming_flags_truncated_from_finish_reason() {
         "data:image/png;base64,AAAA",
         64,
         0.0,
+        None,
+        None,
         None,
         None,
         None,

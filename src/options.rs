@@ -49,6 +49,17 @@ pub struct OcrOptions {
     /// no local default is injected for this one, since it's newer/less
     /// battle-tested.
     pub dry_base: Option<f32>,
+    /// llama.cpp `dry_allowed_length`: the run length DRY tolerates before it
+    /// starts penalizing repeats. None = the front-end default of 4 baked into
+    /// `apply_sampling`; the GUI "anti-loop / dense page" toggle sets 2 (the
+    /// community working value for dense math pages). Only reaches the wire when
+    /// `dry_multiplier` is also set. Opt-in, no local default injected.
+    pub dry_allowed_length: Option<u32>,
+    /// llama.cpp `dry_penalty_last_n`: how many recent tokens DRY scans. -1 =
+    /// the whole context (the anti-loop preset's value), 0 = disabled, >0 = a
+    /// fixed window. None omits the field (server default). Only reaches the wire
+    /// when `dry_multiplier` is also set. Opt-in, no local default injected.
+    pub dry_penalty_last_n: Option<i32>,
     /// Sampling temperature sent in the request body. None resolves to 0.0 (the
     /// historical hardcoded value, deterministic OCR, matching the upstream
     /// README's `--temp 0` recommendation). Unlike the llama.cpp-only DRY/
@@ -83,6 +94,8 @@ impl Default for OcrOptions {
             repeat_penalty: None,
             dry_multiplier: None,
             dry_base: None,
+            dry_allowed_length: None,
+            dry_penalty_last_n: None,
             temperature: None,
             pages: None,
         }
@@ -129,6 +142,18 @@ impl OcrOptions {
         if let Some(db) = self.dry_base {
             if !db.is_finite() || db <= 0.0 {
                 return Err("dry_base must be a finite value greater than 0".into());
+            }
+        }
+        // A zero allowed length makes DRY penalize every single token (even
+        // legitimate single-char repeats), so it is never a useful value.
+        if self.dry_allowed_length == Some(0) {
+            return Err("dry_allowed_length must be greater than 0".into());
+        }
+        // dry_penalty_last_n has a defined -1 ("scan whole context") and 0
+        // ("disabled"); only values below -1 are meaningless.
+        if let Some(n) = self.dry_penalty_last_n {
+            if n < -1 {
+                return Err("dry_penalty_last_n must be -1 (whole context), 0, or positive".into());
             }
         }
         // 0.0 is the meaningful default (deterministic OCR), not an "off" value,

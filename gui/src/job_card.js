@@ -48,6 +48,57 @@ export async function openInReview(outputPath, mdPane, buttons) {
   }
 }
 
+/** Format a run duration (milliseconds) as a short human string. Sub-second ->
+ *  "0.4s"; minutes -> "1m 05s". Returns "" for null/undefined so addRow skips it. */
+function fmtDuration(ms) {
+  if (ms === null || ms === undefined) return "";
+  const secs = ms / 1000;
+  if (secs < 60) return secs.toFixed(1) + "s";
+  const m = Math.floor(secs / 60);
+  const s = Math.round(secs % 60);
+  return m + "m " + String(s).padStart(2, "0") + "s";
+}
+
+/** Populate the shared #runInfoDialog with a job's metadata (a key/value list,
+ *  reusing the pdf-info row styling) and open it. Every value comes from the job
+ *  object already in memory -- no backend round-trip. Fail-soft: a missing dialog
+ *  element or showModal support is a no-op. */
+export function openRunInfo(job) {
+  const dlg = document.getElementById("runInfoDialog");
+  const body = document.getElementById("runInfoBody");
+  if (!dlg || !body || typeof dlg.showModal !== "function") return;
+  body.innerHTML = "";
+  const addRow = (label, value) => {
+    if (value === null || value === undefined || value === "") return;
+    const row = document.createElement("div");
+    row.className = "pdf-info__row";
+    const l = document.createElement("span");
+    l.className = "pdf-info__label";
+    l.textContent = label;
+    const v = document.createElement("span");
+    v.className = "pdf-info__value";
+    v.textContent = String(value);
+    row.append(l, v);
+    body.appendChild(row);
+  };
+  const opts = (job && job.options) || {};
+  addRow(tr("runinfo.input"), job && job.inputPath);
+  addRow(tr("runinfo.status"), tr("status." + ((job && job.status) || "queued")));
+  addRow(tr("runinfo.output"), job && job.outputPath);
+  if (job && job.status === "failed") addRow(tr("runinfo.error"), job.error);
+  addRow(tr("runinfo.pages"), job && job.pageCount);
+  addRow(tr("runinfo.duration"), fmtDuration(job && job.durationMs));
+  addRow(tr("runinfo.backend"), job && job.backend);
+  addRow(tr("runinfo.outputMode"), job && job.outputMode);
+  addRow(tr("runinfo.quant"), opts.quant);
+  addRow(tr("runinfo.dpi"), opts.dpi);
+  addRow(tr("runinfo.maxTokens"), opts.maxTokens);
+  addRow(tr("runinfo.keepImages"), opts.keepImages ? tr("job.on") : tr("job.off"));
+  if (job && job.createdAt) addRow(tr("runinfo.created"), formatEpoch(job.createdAt));
+  if (job && job.updatedAt) addRow(tr("runinfo.updated"), formatEpoch(job.updatedAt));
+  dlg.showModal();
+}
+
 /** EH-0006: build a single read-only job card element from a Job record. Status
  *  drives the stripe + badge color via the .job-card--<status> class. Done shows the
  *  output path; failed shows the error. Options + timestamps are the meta footer.
@@ -179,6 +230,19 @@ export function renderJobCard(job, mdPane, railButtons, actions) {
   if (actions) {
     const row = document.createElement("div");
     row.className = "job-card__actions";
+
+    // Info: opens the run-detail dialog. Read-only, so it is offered for every
+    // status (a failed run still has a useful error/backend/duration snapshot).
+    const info = document.createElement("button");
+    info.type = "button";
+    info.className = "job-card__action";
+    info.textContent = tr("job.info");
+    info.title = tr("job.infoTitle");
+    info.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      openRunInfo(job);
+    });
+    row.appendChild(info);
 
     const remove = document.createElement("button");
     remove.type = "button";

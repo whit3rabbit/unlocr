@@ -302,6 +302,12 @@ export function makeUi() {
       gate();
       if (ok) {
         if (!modelLoaded) this.setStatus(tr("status.idle"));
+        // Non-blocking: env is fine, but an external (stock/PATH) llama-server is
+        // unverified for the R-SWA patch and is the usual cause of ocr-ocr loops.
+        // Point the user at the managed build (Settings > Dependencies > Download).
+        if (report && report.provenance === "external") {
+          this.setStatus(tr("run.externalLlamaWarning"));
+        }
       } else {
         const reason = (report && report.error) || tr("run.envNotReady");
         this.setStatus(tr("run.envWarning", { reason }));

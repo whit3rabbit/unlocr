@@ -100,6 +100,8 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
       repeatPenalty: opts.repeatPenalty,
       dryMultiplier: opts.dryMultiplier,
       dryBase: opts.dryBase,
+      dryAllowedLength: opts.dryAllowedLength,
+      dryPenaltyLastN: opts.dryPenaltyLastN,
       firstPage: opts.firstPage,
       lastPage: opts.lastPage,
       // single/pages/both; resolved by the backend's parse_output_mode.

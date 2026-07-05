@@ -31,6 +31,28 @@ pub struct Job {
     /// written once at terminal state; there is no separate queued-time insert). A
     /// future queued -> running -> done state machine would advance this on update.
     pub updated_at: u64,
+    /// Number of pages OCR'd this run, filled at finish. `None` for a `running`
+    /// row or a run that failed before producing pages.
+    pub page_count: Option<u32>,
+    /// Wall-clock run duration in milliseconds (finish - start), filled at finish.
+    pub duration_ms: Option<u64>,
+    /// Which engine ran it: "local" (managed llama-server) or "remote". Empty on a
+    /// `running` row until `finish_job` stamps it.
+    pub backend: String,
+    /// Output layout the run wrote: "single" | "pages" | "both". Empty until finish.
+    pub output_mode: String,
+}
+
+/// Terminal run results recorded when a job finishes, beyond status/output/error.
+/// Kept off `JobOptions` (those are the run's *inputs*); these are *outputs* the UI
+/// shows in the run-detail dialog. `Default` lets the cancel/early-error paths pass
+/// a partial snapshot (backend/output_mode known, page_count unknown).
+#[derive(Clone, Debug, Default)]
+pub struct JobMetrics {
+    pub page_count: Option<u32>,
+    pub duration_ms: Option<u64>,
+    pub backend: String,
+    pub output_mode: String,
 }
 
 /// Snapshot of the OcrOptions a job ran with. Kept as its own struct (not a

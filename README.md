@@ -1,4 +1,25 @@
-# unlocr (unlimited-OCR)
+<div align="center">
+<pre>
+██╗   ██╗███╗   ██╗██╗      ██████╗  ██████╗██████╗
+██║   ██║████╗  ██║██║     ██╔═══██╗██╔════╝██╔══██╗
+██║   ██║██╔██╗ ██║██║     ██║   ██║██║     ██████╔╝
+██║   ██║██║╚██╗██║██║     ██║   ██║██║     ██╔══██╗
+╚██████╔╝██║ ╚████║███████╗╚██████╔╝╚██████╗██║  ██║
+ ╚═════╝ ╚═╝  ╚═══╝╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝
+
+ |  |     |_)      _) |            |      _ \  __| _ \
+ |  |  \  | |  ` \  |  _|  -_)  _` |____|(   |(      /
+\__/_| _|_|_|_|_|_|_|\__|\___|\__,_|    \___/\___|_|_\
+
+GUI/CLI for unlimited-ocr
+</pre>
+
+[![CI](https://github.com/whit3rabbit/unlocr/actions/workflows/ci.yml/badge.svg)](https://github.com/whit3rabbit/unlocr/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/unlocr.svg)](https://crates.io/crates/unlocr)
+[![GitHub release](https://img.shields.io/github/v/release/whit3rabbit/unlocr.svg)](https://github.com/whit3rabbit/unlocr/releases)
+[![License](https://img.shields.io/github/license/whit3rabbit/unlocr.svg)](https://github.com/whit3rabbit/unlocr/blob/main/LICENSE)
+</div>
+
 
 **Not affiliated with Unlimited OCR but a wrapper/GUI around Unlimited OCR**
 
@@ -213,7 +234,7 @@ For high-performance GPU serving of the unquantized model:
 *   **Abnormal exit (macOS)**: If the app is force-killed (`SIGKILL`/segfault) or panics (`panic=abort`), cleanup is skipped. Linux (`PR_SET_PDEATHSIG`) and Windows (Job Objects) kill `llama-server` with the parent; macOS has no equivalent, so a warm server can be orphaned. Recover with `pkill llama-server`.
 *   **Port Race**: Free-port allocation may occasionally conflict; pin using `--port N`.
 *   **Authentication**: The local `llama-server` binds to `127.0.0.1` without auth. On multi-user machines, other local users could access the server port during execution. Single-user environments are recommended.
-*   **Repetition loops on blank/ruled/low-content pages**: The underlying Unlimited-OCR/DeepSeek-OCR model can degenerate into repetitive or hallucinated output (e.g. rambling about "the Ground Truth image" instead of transcribing) on blank regions, ruled/underscore lines, or other low-content input. This is an open, currently unresolved upstream model issue ([deepseek-ai/DeepSeek-OCR#151](https://github.com/deepseek-ai/DeepSeek-OCR/issues/151)), not a bug in unlocr's prompt: upstream's vLLM/SGLang serving suppresses it with a custom n-gram-repetition logits processor that has no llama.cpp/GGUF equivalent. If you hit this, try raising `--repeat-penalty` further (e.g. `1.5`), raising `--dry-multiplier`, or using a higher-precision quant (`--quality best`/`good` over `less`) for documents with a lot of blank/ruled content. A page whose generation hits `--max-tokens` without a natural stop is flagged with a warning (likely a repetition loop) rather than silently written out as if it were real text.
+*   **Repetition loops on blank/ruled/low-content pages**: The underlying Unlimited-OCR/DeepSeek-OCR model can degenerate into repetitive or hallucinated output (e.g. rambling about "the Ground Truth image" instead of transcribing) on blank regions, ruled/underscore lines, or other low-content input. This is an open, currently unresolved upstream model issue ([deepseek-ai/DeepSeek-OCR#151](https://github.com/deepseek-ai/DeepSeek-OCR/issues/151)), not a bug in unlocr's prompt: upstream's vLLM/SGLang serving suppresses it with a custom n-gram-repetition logits processor that has no llama.cpp/GGUF equivalent. If you hit this, **first confirm you are on unlocr's managed R-SWA build**, not a stock/PATH/Homebrew `llama-server`: an unpatched build cannot load the vision tower and is the most common cause of `ocr-ocr`-style loops (the GUI pipeline shows an amber "external" flag when it is; the CLI `doctor` prints the provenance). Then try the anti-loop DRY knobs the community found for dense/math pages: `--dry-allowed-length 2 --dry-penalty-last-n -1` (the GUI's **Anti-loop (dense pages)** toggle sets both), raising `--repeat-penalty` (e.g. `1.5`), raising `--dry-multiplier`, or using a higher-precision quant (`--quality best`/`good` over `less`). A page whose generation hits `--max-tokens` without a natural stop is flagged with a warning (likely a repetition loop) rather than silently written out as if it were real text.
 
 ### License
 The `unlocr` codebase is released under the [MIT License](LICENSE). Note that model weights downloaded automatically from Hugging Face are governed by their respective licenses (see HF model card).

@@ -48,7 +48,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     output_path  TEXT    NOT NULL DEFAULT '',
     error        TEXT    NOT NULL DEFAULT '',
     created_at   INTEGER NOT NULL,
-    updated_at   INTEGER NOT NULL
+    updated_at   INTEGER NOT NULL,
+    page_count   INTEGER,
+    duration_ms  INTEGER,
+    backend      TEXT    NOT NULL DEFAULT '',
+    output_mode  TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_status      ON jobs(status);
@@ -78,7 +82,10 @@ CREATE TABLE IF NOT EXISTS settings (
     model_file          TEXT    NOT NULL DEFAULT '',
     mmproj_file         TEXT    NOT NULL DEFAULT '',
     output_mode         TEXT    NOT NULL DEFAULT 'single',
-    temperature         REAL
+    temperature         REAL,
+    dry_allowed_length  INTEGER,
+    dry_penalty_last_n  INTEGER,
+    anti_loop           INTEGER NOT NULL DEFAULT 0 CHECK(anti_loop IN (0,1))
 );
 
 CREATE TABLE IF NOT EXISTS notifications (
@@ -116,15 +123,15 @@ pub(crate) fn db_path() -> Result<PathBuf, String> {
 
 /// Apply the schema + connection PRAGMAs to an already-open connection. Shared by
 /// the file connection (`open_and_configure`) and in-memory test connections.
-/// `user_version` pins the schema at 3; bump + migrate here when the schema grows.
+/// `user_version` pins the schema at 4; bump + migrate here when the schema grows.
 ///
-/// Three distinct branches, not a `v < 3` catch-all: `SCHEMA_SQL`'s `CREATE TABLE`
-/// already has the full v3 `settings` shape, so a fresh DB (`v == 0`) must NOT
-/// also run either `ALTER TABLE ADD COLUMN` batch below (it would fail with
-/// "duplicate column"). A pre-existing v1 DB needs both migrations (v1->v2 then
-/// v2->v3 columns); a v2 DB needs only the v2->v3 column. `ALTER TABLE ADD
-/// COLUMN` never rewrites existing column data, so every pre-migration field
-/// survives untouched.
+/// Version-gated branches, not a `v < 5` catch-all: `SCHEMA_SQL`'s `CREATE TABLE`
+/// already has the full v5 shape, so a fresh DB (`v == 0`) must NOT also run any
+/// `ALTER TABLE ADD COLUMN` batch below (it would fail with "duplicate column").
+/// Upgrades run only the ALTERs their starting version is missing: a v1 DB runs
+/// v1->v2, v2->v3, v3->v4, v4->v5; a v3 DB runs v3->v4 and v4->v5; a v4 DB runs
+/// only v4->v5 (jobs metadata columns). `ALTER TABLE ADD COLUMN` never rewrites
+/// existing column data, so every pre-migration field survives untouched.
 pub(crate) fn init_conn(conn: &Connection) -> Result<(), String> {
     conn.pragma_update(None, "foreign_keys", true)
         .map_err(|e| format!("could not enable foreign_keys: {e}"))?;
@@ -136,9 +143,9 @@ pub(crate) fn init_conn(conn: &Connection) -> Result<(), String> {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap_or(0);
     if v == 0 {
-        conn.pragma_update(None, "user_version", 3u32)
+        conn.pragma_update(None, "user_version", 5u32)
             .map_err(|e| format!("could not set user_version: {e}"))?;
-    } else if v == 1 || v == 2 {
+    } else if (1..=4).contains(&v) {
         // Wrapped in one transaction: SQLite runs each ALTER TABLE in autocommit
         // mode otherwise, so a mid-batch failure (disk full, killed process) would
         // leave some columns added but `user_version` un-bumped, and the next
@@ -166,12 +173,36 @@ pub(crate) fn init_conn(conn: &Connection) -> Result<(), String> {
             )
             .map_err(|e| format!("could not migrate settings to v2: {e}"))?;
         }
-        tx.execute_batch("ALTER TABLE settings ADD COLUMN temperature REAL;")
-            .map_err(|e| format!("could not migrate settings to v3: {e}"))?;
-        tx.pragma_update(None, "user_version", 3u32)
-            .map_err(|e| format!("could not set user_version to 3: {e}"))?;
+        // v2 -> v3: only v1/v2 lack `temperature` (v3 already has it).
+        if v == 1 || v == 2 {
+            tx.execute_batch("ALTER TABLE settings ADD COLUMN temperature REAL;")
+                .map_err(|e| format!("could not migrate settings to v3: {e}"))?;
+        }
+        // v3 -> v4: the anti-loop DRY knobs (dense-page toggle + its two overrides).
+        // Nullable INTEGERs mirror the sibling nullable numeric columns; anti_loop
+        // is a 0/1 bool like keep_images. Only v1/v2/v3 lack these; a v4 DB has them.
+        if v <= 3 {
+            tx.execute_batch(
+                "ALTER TABLE settings ADD COLUMN dry_allowed_length INTEGER;
+                 ALTER TABLE settings ADD COLUMN dry_penalty_last_n INTEGER;
+                 ALTER TABLE settings ADD COLUMN anti_loop INTEGER NOT NULL DEFAULT 0 CHECK(anti_loop IN (0,1));",
+            )
+            .map_err(|e| format!("could not migrate settings to v4: {e}"))?;
+        }
+        // v4 -> v5: per-run metadata on `jobs` (page count, duration, backend,
+        // output layout) surfaced in the Library run-detail dialog. Every pre-v5 DB
+        // (v1..v4) lacks these columns, so this runs for the whole 1..=4 range.
+        tx.execute_batch(
+            "ALTER TABLE jobs ADD COLUMN page_count  INTEGER;
+             ALTER TABLE jobs ADD COLUMN duration_ms INTEGER;
+             ALTER TABLE jobs ADD COLUMN backend     TEXT NOT NULL DEFAULT '';
+             ALTER TABLE jobs ADD COLUMN output_mode TEXT NOT NULL DEFAULT '';",
+        )
+        .map_err(|e| format!("could not migrate jobs to v5: {e}"))?;
+        tx.pragma_update(None, "user_version", 5u32)
+            .map_err(|e| format!("could not set user_version to 5: {e}"))?;
         tx.commit()
-            .map_err(|e| format!("could not commit settings migration: {e}"))?;
+            .map_err(|e| format!("could not commit schema migration: {e}"))?;
     }
     Ok(())
 }
@@ -232,16 +263,38 @@ pub(crate) fn mem_db() -> rusqlite::Connection {
 mod tests {
     use super::*;
 
-    /// A fresh in-memory DB reports `user_version = 3` after `init_conn`, the
+    /// The pre-v5 `jobs` table shape (12 columns, no per-run metadata). Real v1..v4
+    /// DBs carry this, so the migration tests must pre-create it before `init_conn`
+    /// runs its v4->v5 `ALTER TABLE jobs` (SCHEMA_SQL's `CREATE TABLE IF NOT EXISTS`
+    /// would otherwise create the full v5 jobs shape and the ALTER would then hit
+    /// "duplicate column").
+    const OLD_JOBS_SCHEMA: &str = r#"
+        CREATE TABLE jobs (
+            id           TEXT    PRIMARY KEY,
+            input_path   TEXT    NOT NULL,
+            quant        TEXT    NOT NULL,
+            max_tokens   INTEGER NOT NULL,
+            dpi          INTEGER NOT NULL,
+            prompt       TEXT    NOT NULL,
+            keep_images  INTEGER NOT NULL DEFAULT 0 CHECK(keep_images IN (0,1)),
+            status       TEXT    NOT NULL,
+            output_path  TEXT    NOT NULL DEFAULT '',
+            error        TEXT    NOT NULL DEFAULT '',
+            created_at   INTEGER NOT NULL,
+            updated_at   INTEGER NOT NULL
+        );
+    "#;
+
+    /// A fresh in-memory DB reports `user_version = 5` after `init_conn`, the
     /// schema-version hook that replaces the old per-JSON `version` envelope.
     #[test]
-    fn schema_sets_user_version_to_3() {
+    fn schema_sets_user_version_to_5() {
         let conn = Connection::open_in_memory().unwrap();
         init_conn(&conn).unwrap();
         let v: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 5);
     }
 
     /// `init_conn` is idempotent: running it twice on the same DB does not error
@@ -263,25 +316,26 @@ mod tests {
         assert_eq!(n, 3);
     }
 
-    /// Same as `init_conn_is_idempotent`, but starting from an already-v3 DB: the
-    /// `ALTER TABLE ADD COLUMN` branches (gated on `v == 1 || v == 2`) must not
-    /// re-run on a second call, or it would fail with "duplicate column".
+    /// Same as `init_conn_is_idempotent`, but starting from an already-v5 DB: the
+    /// `ALTER TABLE ADD COLUMN` branches (gated on `(1..=4)`) must not re-run on a
+    /// second call, or they would fail with "duplicate column".
     #[test]
-    fn init_conn_is_idempotent_on_v3() {
+    fn init_conn_is_idempotent_on_v5() {
         let conn = Connection::open_in_memory().unwrap();
         init_conn(&conn).unwrap();
         init_conn(&conn).unwrap();
         let v: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 5);
     }
 
     /// A pre-migration v2 DB (the 23-column `settings` shape, before
-    /// `temperature`) upgrades cleanly: `init_conn` adds just the one new
-    /// column and bumps `user_version` to 3, without re-running the v1->v2 batch.
+    /// `temperature`) upgrades cleanly: `init_conn` adds `temperature` (v2->v3),
+    /// the three anti-loop columns (v3->v4), the jobs metadata columns (v4->v5),
+    /// and bumps `user_version` to 5, without re-running the v1->v2 batch.
     #[test]
-    fn migration_upgrades_v2_db_to_v3() {
+    fn migration_upgrades_v2_db_to_v5() {
         const V2_SCHEMA: &str = r#"
             CREATE TABLE settings (
                 id                  INTEGER PRIMARY KEY CHECK(id = 1),
@@ -312,6 +366,7 @@ mod tests {
         "#;
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(V2_SCHEMA).unwrap();
+        conn.execute_batch(OLD_JOBS_SCHEMA).unwrap();
         conn.pragma_update(None, "user_version", 2u32).unwrap();
         conn.execute(
             "INSERT INTO settings (id, mode, remote_base_url, remote_model, default_quant,
@@ -327,7 +382,7 @@ mod tests {
         let v: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 5);
 
         let cols: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(settings)").unwrap();
@@ -336,7 +391,14 @@ mod tests {
                 .map(|r| r.unwrap())
                 .collect()
         };
-        assert!(cols.contains(&"temperature".to_string()));
+        for c in [
+            "temperature",
+            "dry_allowed_length",
+            "dry_penalty_last_n",
+            "anti_loop",
+        ] {
+            assert!(cols.contains(&c.to_string()), "missing column {c}");
+        }
 
         let mode: String = conn
             .query_row("SELECT mode FROM settings WHERE id = 1", [], |row| {
@@ -347,11 +409,12 @@ mod tests {
     }
 
     /// A pre-migration v1 DB (the old 10-column `settings` shape) upgrades
-    /// cleanly through both batches: `init_conn` adds the 13 v2 columns plus
-    /// `temperature`, bumps `user_version` to 3, and does not touch the
-    /// pre-existing row's original values.
+    /// cleanly through every batch: `init_conn` adds the 13 v2 columns,
+    /// `temperature` (v3), the three anti-loop columns (v4), the jobs metadata
+    /// columns (v5), bumps `user_version` to 5, and does not touch the
+    /// pre-existing row's values.
     #[test]
-    fn migration_upgrades_v1_db_to_v3() {
+    fn migration_upgrades_v1_db_to_v5() {
         const V1_SCHEMA: &str = r#"
             CREATE TABLE settings (
                 id                  INTEGER PRIMARY KEY CHECK(id = 1),
@@ -369,6 +432,7 @@ mod tests {
         "#;
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(V1_SCHEMA).unwrap();
+        conn.execute_batch(OLD_JOBS_SCHEMA).unwrap();
         conn.pragma_update(None, "user_version", 1u32).unwrap();
         conn.execute(
             "INSERT INTO settings (id, mode, remote_base_url, remote_model, default_quant,
@@ -384,7 +448,7 @@ mod tests {
         let v: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 5);
 
         let cols: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(settings)").unwrap();
@@ -408,6 +472,9 @@ mod tests {
             "mmproj_file",
             "output_mode",
             "temperature",
+            "dry_allowed_length",
+            "dry_penalty_last_n",
+            "anti_loop",
         ] {
             assert!(cols.contains(&c.to_string()), "missing column {c}");
         }
@@ -443,5 +510,132 @@ mod tests {
         assert_eq!(preset, "llamacpp");
         assert_eq!(keep_images, 0);
         assert_eq!(pages_mode, "all");
+    }
+
+    /// A v3 DB (has `temperature`, lacks the anti-loop columns) upgrades to v5 by
+    /// adding the three anti-loop columns (v4) plus the jobs metadata columns (v5).
+    /// Guards the `v == 1 || v == 2` gate on the temperature ALTER: re-adding
+    /// `temperature` on a v3 DB would fail with "duplicate column".
+    #[test]
+    fn migration_upgrades_v3_db_to_v5() {
+        const V3_SCHEMA: &str = r#"
+            CREATE TABLE settings (
+                id                  INTEGER PRIMARY KEY CHECK(id = 1),
+                mode                TEXT    NOT NULL DEFAULT 'local',
+                remote_base_url     TEXT    NOT NULL DEFAULT 'http://127.0.0.1:8080',
+                remote_api_key      TEXT    NOT NULL DEFAULT '',
+                remote_model        TEXT    NOT NULL DEFAULT '',
+                default_quant       TEXT    NOT NULL,
+                llama_bin           TEXT    NOT NULL DEFAULT '',
+                default_dpi         INTEGER NOT NULL,
+                default_max_tokens  INTEGER NOT NULL,
+                default_prompt      TEXT    NOT NULL,
+                idle_unload_minutes INTEGER NOT NULL DEFAULT 15,
+                engine_preset       TEXT    NOT NULL DEFAULT 'llamacpp',
+                image_max_tokens    INTEGER,
+                chat_template       TEXT    NOT NULL DEFAULT '',
+                repeat_penalty      REAL,
+                dry_multiplier      REAL,
+                dry_base            REAL,
+                keep_images         INTEGER NOT NULL DEFAULT 0 CHECK(keep_images IN (0,1)),
+                pages_mode          TEXT    NOT NULL DEFAULT 'all',
+                page_from           INTEGER,
+                page_to             INTEGER,
+                model_file          TEXT    NOT NULL DEFAULT '',
+                mmproj_file         TEXT    NOT NULL DEFAULT '',
+                output_mode         TEXT    NOT NULL DEFAULT 'single',
+                temperature         REAL
+            );
+        "#;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V3_SCHEMA).unwrap();
+        conn.execute_batch(OLD_JOBS_SCHEMA).unwrap();
+        conn.pragma_update(None, "user_version", 3u32).unwrap();
+        conn.execute(
+            "INSERT INTO settings (id, mode, remote_base_url, remote_model, default_quant,
+                                    llama_bin, default_dpi, default_max_tokens, default_prompt)
+             VALUES (1, 'remote', 'http://gpu:8000', 'baidu/Unlimited-OCR', 'Q4_K_M',
+                     '/opt/llama-server', 300, 8192, '<|x|>')",
+            [],
+        )
+        .unwrap();
+
+        // Must NOT panic on a duplicate `temperature` column.
+        init_conn(&conn).unwrap();
+
+        let v: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(v, 5);
+
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(settings)").unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        for c in ["dry_allowed_length", "dry_penalty_last_n", "anti_loop"] {
+            assert!(cols.contains(&c.to_string()), "missing column {c}");
+        }
+        let mode: String = conn
+            .query_row("SELECT mode FROM settings WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(mode, "remote");
+    }
+
+    /// A v4 DB (full v4 settings + the old 12-column `jobs`) upgrades to v5 by
+    /// adding ONLY the four jobs metadata columns, WITHOUT re-running any settings
+    /// ALTER (the `v <= 3` gate), and preserving an existing job row untouched.
+    #[test]
+    fn migration_upgrades_v4_jobs_db_to_v5() {
+        let conn = Connection::open_in_memory().unwrap();
+        // A v4 DB has the full v4 settings shape; SCHEMA_SQL (run inside init_conn)
+        // creates it via IF NOT EXISTS, so we only need the old jobs table + a row.
+        conn.execute_batch(OLD_JOBS_SCHEMA).unwrap();
+        conn.pragma_update(None, "user_version", 4u32).unwrap();
+        conn.execute(
+            "INSERT INTO jobs (id, input_path, quant, max_tokens, dpi, prompt,
+                               keep_images, status, output_path, error, created_at, updated_at)
+             VALUES ('j1', '/tmp/a.pdf', 'Q8_0', 4096, 144, 'p', 0, 'done',
+                     '/tmp/a.md', '', 100, 100)",
+            [],
+        )
+        .unwrap();
+
+        // Must NOT re-run the settings ALTERs (would hit "duplicate column").
+        init_conn(&conn).unwrap();
+
+        let v: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(v, 5);
+
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(jobs)").unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        for c in ["page_count", "duration_ms", "backend", "output_mode"] {
+            assert!(cols.contains(&c.to_string()), "missing jobs column {c}");
+        }
+
+        // The pre-existing row survives; new columns read their defaults (NULL /
+        // empty string).
+        let (status, out, backend, page_count): (String, String, String, Option<i64>) = conn
+            .query_row(
+                "SELECT status, output_path, backend, page_count FROM jobs WHERE id = 'j1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "done");
+        assert_eq!(out, "/tmp/a.md");
+        assert_eq!(backend, "");
+        assert_eq!(page_count, None);
     }
 }

@@ -1366,6 +1366,43 @@ button {
   padding: 2px;
 }
 
+/* One PDF's run history: a grid cell holding the latest run's card plus a
+   collapsible list of older runs (library grouping). */
+.job-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Collapsed older runs, indented under the face card with a rail so the grouping
+   reads as "these belong to the card above". */
+.job-group__runs {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-left: 2px solid var(--bd);
+}
+
+/* Small text toggle that expands/collapses a group's older runs. */
+.job-group__toggle {
+  align-self: flex-start;
+  padding: 2px 4px;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.job-group__toggle:hover {
+  text-decoration: underline;
+}
+
 /* A single job card. The status stripe color comes from .job-card--<status>. */
 .job-card {
   display: flex;

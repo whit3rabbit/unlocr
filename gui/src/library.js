@@ -72,13 +72,52 @@ export function makeLibrary() {
     if (removeSelectedDeleteBtn) removeSelectedDeleteBtn.disabled = n === 0;
   }
 
-  /** Replace the grid with cards for the given jobs (newest-first by createdAt so
-   *  the most recent run is top-left). Empty -> placeholder shown. Cards are built
-   *  by the shared module-level renderJobCard, so the Library and Board render the
-   *  same card markup. Done cards are clickable when _mdPane is wired. */
+  /** Build one grid cell for a PDF's run history: the latest run as the face
+   *  card, plus a toggle that reveals the older runs (collapsed by default). A PDF
+   *  run once is a lone card with no toggle. Every run (face + collapsed) is a
+   *  full renderJobCard, so re-open/info/remove work per-run.
+   *
+   *  `runs` is this PDF's runs, newest first. */
+  function renderGroup(runs) {
+    // ponytail: the group cell is an <li> holding the face card <li> + a nested
+    // <ul> of older run cards. Reuses renderJobCard as-is (returns an <li>).
+    const cell = document.createElement("li");
+    cell.className = "job-group";
+    cell.appendChild(renderJobCard(runs[0], _mdPane, _railButtons, actions));
+    if (runs.length > 1) {
+      const sub = document.createElement("ul");
+      sub.className = "job-group__runs";
+      sub.hidden = true;
+      for (const r of runs.slice(1)) {
+        sub.appendChild(renderJobCard(r, _mdPane, _railButtons, actions));
+      }
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "job-group__toggle";
+      const relabel = () => {
+        toggle.textContent = sub.hidden
+          ? tr("library.showRuns", { n: runs.length })
+          : tr("library.hideRuns");
+        toggle.setAttribute("aria-expanded", String(!sub.hidden));
+      };
+      relabel();
+      toggle.addEventListener("click", () => {
+        sub.hidden = !sub.hidden;
+        relabel();
+      });
+      cell.appendChild(toggle);
+      cell.appendChild(sub);
+    }
+    return cell;
+  }
+
+  /** Replace the grid with one cell per PDF (newest-first by createdAt so the most
+   *  recent run is top-left), each grouping that PDF's re-runs. Empty -> placeholder
+   *  shown. Cards are built by the shared renderJobCard, so a run looks identical to
+   *  the Board. Done cards are clickable when _mdPane is wired. */
   function render(jobs) {
     if (!grid) return;
-    grid.querySelectorAll(".job-card").forEach((n) => n.remove());
+    grid.querySelectorAll(".job-group, .job-card").forEach((n) => n.remove());
     const list = (jobs || []).slice();
     list.sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0));
     lastJobs = list;
@@ -96,8 +135,16 @@ export function makeLibrary() {
       return;
     }
     if (empty) empty.hidden = true;
+    // Group runs by input PDF, preserving newest-first order (the first run seen
+    // for a path is its latest, since `list` is sorted desc).
+    const groups = new Map();
     for (const job of list) {
-      grid.appendChild(renderJobCard(job, _mdPane, _railButtons, actions));
+      const key = (job && job.inputPath) || "";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(job);
+    }
+    for (const runs of groups.values()) {
+      grid.appendChild(renderGroup(runs));
     }
     syncSelectAll();
     updateToolbar();

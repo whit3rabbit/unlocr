@@ -1,4 +1,4 @@
-use super::{Job, JobOptions};
+use super::{Job, JobMetrics, JobOptions};
 use rusqlite::{params, params_from_iter, Connection};
 
 /// Upsert by id (insert-or-replace). Used by both the "record a fresh run"
@@ -7,8 +7,9 @@ pub(crate) fn insert(conn: &Connection, job: &Job) -> Result<(), String> {
     conn.execute(
         "INSERT OR REPLACE INTO jobs
            (id, input_path, quant, max_tokens, dpi, prompt, keep_images,
-            status, output_path, error, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            status, output_path, error, created_at, updated_at,
+            page_count, duration_ms, backend, output_mode)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             job.id,
             job.input_path,
@@ -22,6 +23,10 @@ pub(crate) fn insert(conn: &Connection, job: &Job) -> Result<(), String> {
             job.error,
             job.created_at as i64,
             job.updated_at as i64,
+            job.page_count,
+            job.duration_ms.map(|v| v as i64),
+            job.backend,
+            job.output_mode,
         ],
     )
     .map_err(|e| format!("could not insert job {}: {e}", job.id))?;
@@ -40,11 +45,23 @@ pub(crate) fn update_status(
     output_path: &str,
     error: &str,
     updated_at: u64,
+    metrics: &JobMetrics,
 ) -> Result<(), String> {
     conn.execute(
-        "UPDATE jobs SET status = ?2, output_path = ?3, error = ?4, updated_at = ?5
+        "UPDATE jobs SET status = ?2, output_path = ?3, error = ?4, updated_at = ?5,
+                page_count = ?6, duration_ms = ?7, backend = ?8, output_mode = ?9
          WHERE id = ?1",
-        params![id, status, output_path, error, updated_at as i64],
+        params![
+            id,
+            status,
+            output_path,
+            error,
+            updated_at as i64,
+            metrics.page_count,
+            metrics.duration_ms.map(|v| v as i64),
+            metrics.backend,
+            metrics.output_mode,
+        ],
     )
     .map_err(|e| format!("could not update job {id}: {e}"))?;
     Ok(())
@@ -71,7 +88,8 @@ pub(crate) fn list(conn: &Connection) -> Result<Vec<Job>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, input_path, quant, max_tokens, dpi, prompt, keep_images,
-                    status, output_path, error, created_at, updated_at
+                    status, output_path, error, created_at, updated_at,
+                    page_count, duration_ms, backend, output_mode
              FROM jobs ORDER BY created_at DESC",
         )
         .map_err(|e| format!("could not prepare jobs select: {e}"))?;
@@ -92,6 +110,10 @@ pub(crate) fn list(conn: &Connection) -> Result<Vec<Job>, String> {
                 error: row.get(9)?,
                 created_at: row.get::<_, i64>(10)? as u64,
                 updated_at: row.get::<_, i64>(11)? as u64,
+                page_count: row.get(12)?,
+                duration_ms: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
+                backend: row.get(14)?,
+                output_mode: row.get(15)?,
             })
         })
         .map_err(|e| format!("could not query jobs: {e}"))?;

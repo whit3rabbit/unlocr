@@ -6,10 +6,11 @@
 //! store never wedges the app. Holds the local/remote provider mode, the remote
 //! endpoint, and the engine-option defaults the Workspace controls seed from.
 //!
-//! ponytail: `remoteApiKey` is stored as plaintext in the DB under the app-data
-//! dir (same trust level as the old JSON-under-cache model). Upgrade path if it
-//! ever matters: the OS keychain (adds a `keyring`-style dep). The Settings UI
-//! shows a one-line warning so the storage location is not a surprise.
+//! `remoteApiKey` is stored in the OS credential manager (keychain/secret
+//! service) via the `keyring` dep, NOT in the DB. The `settings` row holds only a
+//! `__saved__` marker; `load_settings`/`save_settings` mask it to `••••••••` for
+//! the UI. A legacy plaintext key found in the row is migrated into the keychain
+//! on load, then cleared from the DB.
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};

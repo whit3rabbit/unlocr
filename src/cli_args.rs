@@ -120,6 +120,19 @@ pub struct Args {
     #[arg(long)]
     pub dry_base: Option<f32>,
 
+    /// DRY allowed run length (`dry_allowed_length`): tokens DRY tolerates before
+    /// penalizing repeats. Sent only when --dry-multiplier is also set. Omitted =
+    /// the local default of 4; pass 2 (the community anti-loop value) for dense
+    /// math pages that still loop. Inert for remote (`--endpoint`/`--gpu`) mode.
+    #[arg(long)]
+    pub dry_allowed_length: Option<u32>,
+
+    /// DRY scan window (`dry_penalty_last_n`): -1 = whole context (the anti-loop
+    /// value), 0 = disabled, >0 = a fixed window. Sent only when --dry-multiplier
+    /// is also set; omitted = server default. Inert for remote mode.
+    #[arg(long, allow_hyphen_values = true)]
+    pub dry_penalty_last_n: Option<i32>,
+
     /// Sampling temperature (e.g. 0.2 for slight variability). Defaults to 0 for
     /// deterministic OCR output (matches the historical fixed behavior and the
     /// upstream README's recommendation). Unlike the llama.cpp-only DRY/repeat-

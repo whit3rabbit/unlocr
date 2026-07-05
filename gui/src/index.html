@@ -355,6 +355,27 @@
                       <span class="opts__label" data-i18n="opts.dryBase">DRY base</span>
                       <input class="opts__num" id="optDryBase" type="number" min="1" max="8" step="0.05" placeholder="1.75 (server default)" data-i18n-ph="opts.dryBasePh" />
                     </label>
+                    <!-- Anti-loop preset for dense/math pages: sets dry_allowed_length=2
+                         and dry_penalty_last_n=-1 (the community working values) unless
+                         the two fields below are set explicitly. Local GGUF only (DRY is
+                         a llama.cpp field; remote endpoints ignore it). -->
+                    <label class="opts__toggle">
+                      <input class="opts__check" id="optAntiLoop" type="checkbox" />
+                      <span class="opts__toggle-label" data-i18n="opts.antiLoop">Anti-loop (dense pages)</span>
+                    </label>
+                    <!-- DRY tolerated run length; blank = anti-loop value (2) when the
+                         toggle is on, else the local default (4). Only takes effect when
+                         DRY multiplier is set. -->
+                    <label class="opts__field">
+                      <span class="opts__label" data-i18n="opts.dryAllowedLength">DRY allowed length</span>
+                      <input class="opts__num" id="optDryAllowedLength" type="number" min="1" max="64" step="1" placeholder="4 (local default)" data-i18n-ph="opts.dryAllowedLengthPh" />
+                    </label>
+                    <!-- DRY scan window; blank = anti-loop value (-1 = whole context)
+                         when the toggle is on, else server default. -1/0/positive only. -->
+                    <label class="opts__field">
+                      <span class="opts__label" data-i18n="opts.dryPenaltyLastN">DRY scan window</span>
+                      <input class="opts__num" id="optDryPenaltyLastN" type="number" min="-1" step="1" placeholder="server default" data-i18n-ph="opts.dryPenaltyLastNPh" />
+                    </label>
                     <label class="opts__toggle">
                       <input class="opts__check" id="optKeepImages" type="checkbox" />
                       <span class="opts__toggle-label" data-i18n="opts.keepImages">Keep page images</span>
@@ -781,6 +802,20 @@
         <button class="run-popup__close" value="close" type="submit" title="Close" aria-label="Close" data-i18n-aria="action.close">&times;</button>
       </form>
       <div class="pdf-info__body" id="pdfInfoBody"></div>
+      <form method="dialog" class="engine-dialog__actions">
+        <button class="model-btn" value="close" type="submit" data-i18n="action.done">Done</button>
+      </form>
+    </dialog>
+
+    <!-- Run info popup: metadata for one OCR run (job_card.js #jobInfoBtn opens it
+         via openRunInfo, filling #runInfoBody from the in-memory Job record). Reuses
+         the engine-dialog + pdf-info look. -->
+    <dialog class="engine-dialog" id="runInfoDialog">
+      <form method="dialog" class="engine-dialog__head">
+        <span class="engine-dialog__title" data-i18n="runinfo.dialogTitle">Run details</span>
+        <button class="run-popup__close" value="close" type="submit" title="Close" aria-label="Close" data-i18n-aria="action.close">&times;</button>
+      </form>
+      <div class="pdf-info__body" id="runInfoBody"></div>
       <form method="dialog" class="engine-dialog__actions">
         <button class="model-btn" value="close" type="submit" data-i18n="action.done">Done</button>
       </form>

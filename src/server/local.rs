@@ -260,6 +260,8 @@ impl Server {
         repeat_penalty: Option<f32>,
         dry_multiplier: Option<f32>,
         dry_base: Option<f32>,
+        dry_allowed_length: Option<u32>,
+        dry_penalty_last_n: Option<i32>,
     ) -> Res<OcrResult> {
         ocr_via(
             &format!("http://127.0.0.1:{}", self.port),
@@ -272,6 +274,8 @@ impl Server {
             repeat_penalty,
             dry_multiplier,
             dry_base,
+            dry_allowed_length,
+            dry_penalty_last_n,
         )
     }
 }
@@ -321,6 +325,8 @@ impl ImageOcr for Server {
         repeat_penalty: Option<f32>,
         dry_multiplier: Option<f32>,
         dry_base: Option<f32>,
+        dry_allowed_length: Option<u32>,
+        dry_penalty_last_n: Option<i32>,
     ) -> Res<OcrResult> {
         Server::ocr_image(
             self,
@@ -331,6 +337,8 @@ impl ImageOcr for Server {
             repeat_penalty,
             dry_multiplier,
             dry_base,
+            dry_allowed_length,
+            dry_penalty_last_n,
         )
     }
 
@@ -343,6 +351,8 @@ impl ImageOcr for Server {
         repeat_penalty: Option<f32>,
         dry_multiplier: Option<f32>,
         dry_base: Option<f32>,
+        dry_allowed_length: Option<u32>,
+        dry_penalty_last_n: Option<i32>,
         on_token: &mut dyn FnMut(&str) -> bool,
         should_cancel: &dyn Fn() -> bool,
     ) -> Res<OcrResult> {
@@ -357,6 +367,8 @@ impl ImageOcr for Server {
             repeat_penalty,
             dry_multiplier,
             dry_base,
+            dry_allowed_length,
+            dry_penalty_last_n,
             on_token,
             should_cancel,
         )

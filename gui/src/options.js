@@ -42,6 +42,13 @@ export const floatOrNullMin0 = (el) => {
   return Number.isFinite(v) && v >= 0 ? v : null;
 };
 
+/** Integer >= -1 (dry_penalty_last_n: -1 = whole context, 0 = off, >0 = window),
+ *  else the fallback. The backend's OcrOptions::validate rejects < -1. */
+export const intMinNeg1 = (el, fallback) => {
+  const v = parseInt((el && el.value) || "", 10);
+  return Number.isFinite(v) && v >= -1 ? v : fallback;
+};
+
 /** Assign `document.getElementById(id).value = v`, but only when both the
  *  element exists and `v` isn't null/undefined (preserves a legitimate 0/false
  *  rather than skipping it). Shared by every settings restore/save-feedback
@@ -70,6 +77,9 @@ export function readRunOptions() {
   const repeatPenaltyEl = document.getElementById("optRepeatPenalty");
   const dryMultiplierEl = document.getElementById("optDryMultiplier");
   const dryBaseEl = document.getElementById("optDryBase");
+  const antiLoopEl = document.getElementById("optAntiLoop");
+  const dryAllowedLengthEl = document.getElementById("optDryAllowedLength");
+  const dryPenaltyLastNEl = document.getElementById("optDryPenaltyLastN");
 
   const DEFAULT_DPI = 144;
   const DEFAULT_MAX_TOKENS = 4096;
@@ -97,6 +107,13 @@ export function readRunOptions() {
     dryMultiplier: floatOrNullMin0(dryMultiplierEl),
     // No "0 = off" meaning for a DRY base; blank/invalid/0 -> null (server default).
     dryBase: floatOrNull(dryBaseEl),
+    // Anti-loop preset (dense/math pages): an explicit field wins; else the toggle
+    // supplies the community working value (allowed length 2, scan window -1 = whole
+    // context); else null so the backend uses its default. These only reach the wire
+    // when DRY is active (local GGUF), which the backend guarantees via its 1.0
+    // dry_multiplier default; remote endpoints drop them.
+    dryAllowedLength: numOr(dryAllowedLengthEl, antiLoopEl && antiLoopEl.checked ? 2 : null),
+    dryPenaltyLastN: intMinNeg1(dryPenaltyLastNEl, antiLoopEl && antiLoopEl.checked ? -1 : null),
     // 1-based inclusive page range; both null = all pages. The backend validates
     // first>=1 and last>=first (a direct invoke bypasses the form min= clamp).
     firstPage: pages.firstPage,

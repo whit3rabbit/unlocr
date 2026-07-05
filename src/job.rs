@@ -272,6 +272,8 @@ where
             opts.repeat_penalty,
             opts.dry_multiplier,
             opts.dry_base,
+            opts.dry_allowed_length,
+            opts.dry_penalty_last_n,
             &mut |chunk: &str| {
                 streamed_any = true;
                 let chunk = if strip {

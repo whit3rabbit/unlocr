@@ -65,6 +65,8 @@ pub trait ImageOcr {
         repeat_penalty: Option<f32>,
         dry_multiplier: Option<f32>,
         dry_base: Option<f32>,
+        dry_allowed_length: Option<u32>,
+        dry_penalty_last_n: Option<i32>,
     ) -> Res<OcrResult>;
 
     /// Stream completions: like `ocr_image` but calls `on_token` with each partial
@@ -81,6 +83,8 @@ pub trait ImageOcr {
         repeat_penalty: Option<f32>,
         dry_multiplier: Option<f32>,
         dry_base: Option<f32>,
+        dry_allowed_length: Option<u32>,
+        dry_penalty_last_n: Option<i32>,
         on_token: &mut dyn FnMut(&str) -> bool,
         should_cancel: &dyn Fn() -> bool,
     ) -> Res<OcrResult> {
@@ -94,6 +98,8 @@ pub trait ImageOcr {
             repeat_penalty,
             dry_multiplier,
             dry_base,
+            dry_allowed_length,
+            dry_penalty_last_n,
         )
     }
 }
@@ -106,30 +112,39 @@ pub trait ImageOcr {
 /// `dry_multiplier` enables llama.cpp's DRY sampler, the closest analog of the
 /// sliding-window no-repeat-ngram logits processor the upstream Python wrapper
 /// uses for loop prevention (that processor doesn't ship in the GGUF). When set,
-/// `dry_allowed_length` is raised from the server default 2 to 4: OCR output
-/// legitimately repeats short in-line runs (table separators, repeated units),
-/// while runaway loops repeat far longer sequences, so 4 keeps the loop-killing
-/// power at zero cost to real document structure. `dry_penalty_last_n` and the
-/// sequence breakers (which include `\n`, protecting row-by-row tables) stay at
-/// server defaults. `dry_base` (growth rate of the penalty past
-/// `dry_allowed_length`, server default 1.75) is an opt-in override: only sent
-/// when `dry_multiplier` is also set (it is inert in llama.cpp without DRY
-/// enabled), and no local default is injected for it (unlike repeat_penalty/
-/// dry_multiplier) since it is newer/less battle-tested.
+/// `dry_allowed_length` defaults to 4 (raised from the server default 2): OCR
+/// output legitimately repeats short in-line runs (table separators, repeated
+/// units), while runaway loops repeat far longer sequences, so 4 keeps the
+/// loop-killing power at zero cost to real document structure. `dry_allowed_length`
+/// and `dry_penalty_last_n` are now opt-in overrides (the GUI "anti-loop / dense
+/// page" toggle drops the allowed length to 2 and sets `dry_penalty_last_n` to -1
+/// = whole context, matching the community working command for dense pages); both
+/// are inert in llama.cpp unless DRY is enabled, so they are only sent when
+/// `dry_multiplier` is also set. The sequence breakers (which include `\n`,
+/// protecting row-by-row tables) stay at server defaults. `dry_base` (growth rate
+/// of the penalty past `dry_allowed_length`, server default 1.75) is likewise only
+/// sent when `dry_multiplier` is set; no local default is injected for the opt-in
+/// knobs (unlike repeat_penalty/dry_multiplier) since they are newer/less
+/// battle-tested.
 pub(crate) fn apply_sampling(
     body: &mut serde_json::Value,
     repeat_penalty: Option<f32>,
     dry_multiplier: Option<f32>,
     dry_base: Option<f32>,
+    dry_allowed_length: Option<u32>,
+    dry_penalty_last_n: Option<i32>,
 ) {
     if let Some(rp) = repeat_penalty {
         body["repeat_penalty"] = serde_json::json!(rp);
     }
     if let Some(dm) = dry_multiplier {
         body["dry_multiplier"] = serde_json::json!(dm);
-        body["dry_allowed_length"] = serde_json::json!(4);
+        body["dry_allowed_length"] = serde_json::json!(dry_allowed_length.unwrap_or(4));
         if let Some(db) = dry_base {
             body["dry_base"] = serde_json::json!(db);
+        }
+        if let Some(n) = dry_penalty_last_n {
+            body["dry_penalty_last_n"] = serde_json::json!(n);
         }
     }
 }
@@ -149,6 +164,8 @@ pub(crate) fn ocr_via(
     repeat_penalty: Option<f32>,
     dry_multiplier: Option<f32>,
     dry_base: Option<f32>,
+    dry_allowed_length: Option<u32>,
+    dry_penalty_last_n: Option<i32>,
 ) -> Res<OcrResult> {
     let url = format!("{base_url}/v1/chat/completions");
     let mut body = serde_json::json!({
@@ -165,7 +182,14 @@ pub(crate) fn ocr_via(
     if let Some(m) = model {
         body["model"] = serde_json::Value::String(m.to_string());
     }
-    apply_sampling(&mut body, repeat_penalty, dry_multiplier, dry_base);
+    apply_sampling(
+        &mut body,
+        repeat_penalty,
+        dry_multiplier,
+        dry_base,
+        dry_allowed_length,
+        dry_penalty_last_n,
+    );
     let api_key = api_key.map(|s| s.to_string());
 
     block_on(async move {
@@ -230,6 +254,8 @@ pub(crate) fn ocr_via_stream(
     repeat_penalty: Option<f32>,
     dry_multiplier: Option<f32>,
     dry_base: Option<f32>,
+    dry_allowed_length: Option<u32>,
+    dry_penalty_last_n: Option<i32>,
     on_token: &mut dyn FnMut(&str) -> bool,
     should_cancel: &dyn Fn() -> bool,
 ) -> Res<OcrResult> {
@@ -249,7 +275,14 @@ pub(crate) fn ocr_via_stream(
     if let Some(m) = model {
         body["model"] = serde_json::Value::String(m.to_string());
     }
-    apply_sampling(&mut body, repeat_penalty, dry_multiplier, dry_base);
+    apply_sampling(
+        &mut body,
+        repeat_penalty,
+        dry_multiplier,
+        dry_base,
+        dry_allowed_length,
+        dry_penalty_last_n,
+    );
     let api_key = api_key.map(|s| s.to_string());
 
     let mut full = String::new();

@@ -45,6 +45,8 @@ pub fn run_pdf<S: ImageOcr>(backend: &S, pdftoppm: &Path, input: &Path, args: &A
         repeat_penalty: args.repeat_penalty,
         dry_multiplier: args.dry_multiplier,
         dry_base: args.dry_base,
+        dry_allowed_length: args.dry_allowed_length,
+        dry_penalty_last_n: args.dry_penalty_last_n,
         temperature: args.temperature,
         pages: args.resolved_pages()?,
     };
