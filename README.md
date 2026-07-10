@@ -234,7 +234,9 @@ For high-performance GPU serving of the unquantized model:
     *(In the GUI, select the **GPU full model (vLLM · DeepSeek-OCR)** engine preset.)*
 
 > [!TIP]
-> **Google Colab**: Check out the [`colab/unlocr-deepseek-ocr-gpu.ipynb`](colab/unlocr-deepseek-ocr-gpu.ipynb) notebook to run the full GPU pipeline on a free or cheap Colab cloud instance.
+> **Google Colab**: Check out the Google Colab notebooks to run the full GPU pipeline on a free Colab T4 cloud instance:
+> - **English**: [`colab/unlocr-deepseek-ocr-gpu.ipynb`](colab/unlocr-deepseek-ocr-gpu.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/whit3rabbit/unlocr/blob/main/colab/unlocr-deepseek-ocr-gpu.ipynb)
+> - **简体中文**: [`colab/unlocr-deepseek-ocr-gpu_zh.ipynb`](colab/unlocr-deepseek-ocr-gpu_zh.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/whit3rabbit/unlocr/blob/main/colab/unlocr-deepseek-ocr-gpu_zh.ipynb)
 
 ### Unofficial Benchmark
 *   **Hardware**: macOS (Apple Silicon, Metal)

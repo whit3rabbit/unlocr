@@ -239,7 +239,9 @@ GGUF 文件会在本地进行缓存。它们的文件体积可能相当大（根
     *(在 GUI 中，选择 **GPU 完整模型 (vLLM · DeepSeek-OCR)** 引擎预设。)*
 
 > [!TIP]
-> **Google Colab**：查看 [`colab/unlocr-deepseek-ocr-gpu.ipynb`](colab/unlocr-deepseek-ocr-gpu.ipynb) 笔记本，在免费或便宜的 Colab 云实例上运行完整的 GPU 流水线。
+> **Google Colab**：查看 Google Colab 笔记本，在免费的 Colab T4 云实例上运行完整的 GPU 流水线：
+> - **English**: [`colab/unlocr-deepseek-ocr-gpu.ipynb`](colab/unlocr-deepseek-ocr-gpu.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/whit3rabbit/unlocr/blob/main/colab/unlocr-deepseek-ocr-gpu.ipynb)
+> - **简体中文**: [`colab/unlocr-deepseek-ocr-gpu_zh.ipynb`](colab/unlocr-deepseek-ocr-gpu_zh.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/whit3rabbit/unlocr/blob/main/colab/unlocr-deepseek-ocr-gpu_zh.ipynb)
 
 ### 非官方基准测试
 
