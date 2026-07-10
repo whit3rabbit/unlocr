@@ -75,6 +75,12 @@ pub struct OcrOptions {
     /// image is implicitly page 1, and a batch mixing PDFs and image files
     /// under one `--pages` flag must not error out on the image entries.
     pub pages: Option<(u32, Option<u32>)>,
+    /// Candidate user/open passwords for encrypted PDFs, tried per-file by
+    /// `pdf::select_password` (empty = none, the common case, no probe cost). With
+    /// one candidate it is used verbatim; with several (e.g. a bulk `--password-file`
+    /// over PDFs with different passwords) each is probed and the first that unlocks
+    /// wins. Ignored for image inputs. Never persisted by the GUI (secret).
+    pub passwords: Vec<String>,
 }
 
 impl Default for OcrOptions {
@@ -98,6 +104,7 @@ impl Default for OcrOptions {
             dry_penalty_last_n: None,
             temperature: None,
             pages: None,
+            passwords: Vec::new(),
         }
     }
 }

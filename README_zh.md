@@ -20,6 +20,12 @@ GUI/CLI for unlimited-ocr
   <a href="README.md">English</a> | <b>简体中文</b>
 </p>
 
+<p align="center">
+  <a href="assets/unlocr-screenshot.png" target="_blank">
+    <img src="assets/unlocr-screenshot.png" alt="unlocr screenshot" width="600" style="max-width: 100%; border: 1px solid #eaecef; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" />
+  </a>
+</p>
+
 **与 Unlimited OCR 无官方关联，仅为其封装库/GUI。**
 
 一个快速、轻量级的工具，用于将 PDF OCR 转换为干净的 Markdown。它由本地通过 **`llama.cpp`** (GGUF) 运行的 **[Unlimited-OCR](https://huggingface.co/sahilchachra/Unlimited-OCR-GGUF)** 模型 (DeepSeek-OCR 3B VLM) 提供动力。
@@ -152,6 +158,8 @@ unlocr report.pdf --out ./out --quality best
 
 ## 开发者参考 & CLI 参数
 
+有关所有 CLI 参数、采样配置和高级设置的完整深入指南，请参阅 [docs/CLI_zh.md](docs/CLI_zh.md)。
+
 ### CLI 参数 & 选项
 
 | 选项 | 默认值 | 描述 |
@@ -160,6 +168,8 @@ unlocr report.pdf --out ./out --quality best
 | `-o, --output FILE` | *(来自输入名称)* | 单个输出文件路径（仅限单输入）。无扩展名时会自动追加 `.md`；如果是相对路径，则会在 `--out` 目录下拼接。 |
 | `--recursive` | `false` | 当输入是文件夹时，递归进入子目录。 |
 | `--from-list FILE` | *(无)* | 从文本文件中读取额外的 PDF 路径（每行一个；跳过 `#` 注释和空行）。 |
+| `--password PW` | `UNLOCR_PDF_PASSWORD` | 加密 PDF 的用户/打开密码。`--password` 会覆盖环境变量。建议使用 `UNLOCR_PDF_PASSWORD` 环境变量或 `--password-file`，以避免密码出现在 shell 历史记录和 unlocr 自身的 argv 中。（注意：poppler（pdfinfo/pdftoppm）仍会以 `-upw` 接收该密码，因此无论使用哪种来源，在这些子进程运行期间密码都会出现在进程列表中。） |
+| `--password-file FILE` | *(无)* | 候选 PDF 密码的文本文件（每行一个；跳过 `#` 注释和空行）。每个 PDF 会依次尝试每个密码直到解锁，因此可处理使用不同密码的批量文件。无法解锁的 PDF 会被跳过（并记录），批处理继续进行。 |
 | `--quality TIER` | `good` | 质量预设。选项：`best` (BF16), `good` (Q8_0), `less` (Q4_K_M)。 |
 | `--quant TAG` | *(来自质量)* | 精确的 Hugging Face 模型量化标签（例如 `Q6_K`, `IQ4_XS`）。会覆盖 `--quality`。 |
 | `--model PATH` | *(HF 下载)* | 直接使用此 GGUF 文件，跳过 HF 下载和命名规范。这会禁用 `--quant`/`--quality`/`--model-dir` 的选择。 |

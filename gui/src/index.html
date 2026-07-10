@@ -380,6 +380,19 @@
                       <input class="opts__check" id="optKeepImages" type="checkbox" />
                       <span class="opts__toggle-label" data-i18n="opts.keepImages">Keep page images</span>
                     </label>
+                    <!-- Bulk password file for encrypted PDFs: a plain text file, one
+                         password per line. Each PDF is tried against every line until one
+                         unlocks it, so a batch with different passwords works. A single
+                         encrypted PDF with no file loaded is prompted for interactively at
+                         run time (pdf_password.js). Never persisted (secret). -->
+                    <label class="opts__field opts__field--full">
+                      <span class="opts__label" data-i18n="opts.passwordFile">PDF password file (bulk)</span>
+                      <span class="model-path-row">
+                        <button type="button" class="model-btn model-btn--ghost" id="optPasswordFileBtn" data-i18n="opts.passwordFilePick">Choose file…</button>
+                        <span class="model-path" id="optPasswordFilePath" data-i18n="opts.passwordFileNone">No file (interactive prompt)</span>
+                        <button type="button" class="model-btn model-btn--ghost" id="optPasswordFileClear" data-i18n="action.clear">Clear</button>
+                      </span>
+                    </label>
                     </div>
                   </details>
                   <!-- Task preset: the user prompt actually sent to the model. The
@@ -804,6 +817,26 @@
       <div class="pdf-info__body" id="pdfInfoBody"></div>
       <form method="dialog" class="engine-dialog__actions">
         <button class="model-btn" value="close" type="submit" data-i18n="action.done">Done</button>
+      </form>
+    </dialog>
+
+    <!-- PDF password prompt: shown for an encrypted PDF that needs a user/open
+         password (pdf_password.js opens it, validates via check_pdf_password, and
+         re-prompts on a wrong password). Cancel skips the file. The password is
+         session-only and never persisted. -->
+    <dialog class="engine-dialog" id="pdfPasswordDialog">
+      <form method="dialog" class="engine-dialog__head">
+        <span class="engine-dialog__title" data-i18n="pdfPassword.dialogTitle">Password required</span>
+        <button class="run-popup__close" value="cancel" type="submit" title="Cancel" aria-label="Cancel" data-i18n-aria="action.cancel">&times;</button>
+      </form>
+      <div class="pdf-info__body">
+        <p class="pdf-password__prompt" id="pdfPasswordPrompt" data-i18n="pdfPassword.prompt">This PDF is password-protected. Enter its password to continue.</p>
+        <input class="opts__input" id="pdfPasswordInput" type="password" autocomplete="off" spellcheck="false" data-i18n-ph="pdfPassword.placeholder" placeholder="Password" />
+        <p class="pdf-password__error" id="pdfPasswordError" role="alert" hidden></p>
+      </div>
+      <form method="dialog" class="engine-dialog__actions">
+        <button class="model-btn model-btn--ghost" value="cancel" type="submit" data-i18n="action.cancel">Cancel</button>
+        <button class="model-btn" value="ok" type="submit" data-i18n="action.unlock">Unlock</button>
       </form>
     </dialog>
 

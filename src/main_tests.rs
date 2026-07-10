@@ -157,6 +157,45 @@ fn resolved_pages_none_when_flag_absent() {
 }
 
 #[test]
+fn resolved_passwords_orders_flag_then_file_and_skips_comments() {
+    // No password sources -> empty (the common path; select_password treats it as
+    // "no password"). Env is process-global, so this asserts only flag+file to stay
+    // deterministic under parallel test runs.
+    let args = Args::parse_from(["unlocr", "x.pdf"]);
+    assert!(args.resolved_passwords().unwrap().is_empty());
+
+    // Build a password file with blanks + a # comment that must be skipped.
+    let dir = std::env::temp_dir().join(format!("unlocr-pwtest-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("pw.txt");
+    std::fs::write(&file, "# comment\n\nfile-one\n  file-two  \n").unwrap();
+
+    let args = Args::parse_from([
+        "unlocr",
+        "x.pdf",
+        "--password",
+        "flag-pw",
+        "--password-file",
+        file.to_str().unwrap(),
+    ]);
+    // Order: --password first, then each non-blank/non-comment file line (trimmed).
+    assert_eq!(
+        args.resolved_passwords().unwrap(),
+        vec![
+            "flag-pw".to_string(),
+            "file-one".to_string(),
+            "file-two".to_string()
+        ]
+    );
+
+    // A missing password file is a hard error (surfaced, not silently ignored).
+    let args = Args::parse_from(["unlocr", "x.pdf", "--password-file", "/no/such/pw.txt"]);
+    assert!(args.resolved_passwords().is_err());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn output_mode_parses_and_defaults_to_single() {
     // Default (no flag) is single, preserving the original single-file behaviour.
     let args = Args::parse_from(["unlocr", "x.pdf"]);

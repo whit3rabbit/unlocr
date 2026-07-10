@@ -47,8 +47,9 @@ use cmd_model::{
     unload_model,
 };
 use cmd_run::{
-    brew_available, brew_install, download_tool, export_markdown, host_os, list_tools, pdf_info,
-    read_text_file, render_page, render_pages, run_ocr, scan_input_paths, write_text_file,
+    brew_available, brew_install, check_pdf_password, download_tool, export_markdown, host_os,
+    list_tools, pdf_info, pdf_needs_password, pick_password_file, read_text_file, render_page,
+    render_pages, run_ocr, scan_input_paths, write_text_file,
 };
 use cmd_store::{
     add_notification, clear_all_notifications, clear_notification, delete_job, delete_jobs,
@@ -208,6 +209,9 @@ pub fn run() {
             render_pages,
             render_page,
             pdf_info,
+            pdf_needs_password,
+            check_pdf_password,
+            pick_password_file,
             scan_input_paths,
             read_text_file,
             write_text_file,

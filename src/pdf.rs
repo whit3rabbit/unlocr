@@ -7,8 +7,15 @@ use std::time::Duration;
 
 /// Run `pdftoppm -png -r <dpi> <pdf> <outdir>/page` and collect the PNGs sorted
 /// by page number. Renders all pages; thin wrapper over `rasterize_range`.
-pub fn rasterize(pdftoppm: &Path, pdf: &Path, outdir: &Path, dpi: u32) -> Res<Vec<PathBuf>> {
-    rasterize_range(pdftoppm, pdf, outdir, dpi, None, None)
+/// `password`, when `Some`, is the PDF's user/open password (poppler `-upw`).
+pub fn rasterize(
+    pdftoppm: &Path,
+    pdf: &Path,
+    outdir: &Path,
+    dpi: u32,
+    password: Option<&str>,
+) -> Res<Vec<PathBuf>> {
+    rasterize_range(pdftoppm, pdf, outdir, dpi, None, None, password)
 }
 
 /// How often `rasterize_range` polls `outdir` for newly-written pages while
@@ -42,6 +49,7 @@ pub fn rasterize_range(
     dpi: u32,
     range: Option<(u32, Option<u32>)>,
     mut on_page: Option<&mut dyn FnMut(usize)>,
+    password: Option<&str>,
 ) -> Res<Vec<PathBuf>> {
     let prefix = outdir.join("page");
     // pdftoppm has no `--` end-of-options guard, so a relative path that begins
@@ -59,6 +67,12 @@ pub fn rasterize_range(
         if let Some(last) = last {
             cmd.arg("-l").arg(last.to_string());
         }
+    }
+    // User/open password for an encrypted PDF. `-upw` takes the value literally
+    // (no `./` guard needed even if it starts with `-`); poppler ignores it on an
+    // unencrypted PDF. Placed after the flags, before the pdf positional.
+    if let Some(pw) = password {
+        cmd.arg("-upw").arg(pw);
     }
     let mut child = cmd.arg(&pdf_arg).arg(&prefix).spawn()?;
     let mut last_count = 0usize;
@@ -137,8 +151,8 @@ fn sibling_pdfinfo(pdftoppm: &Path) -> Option<PathBuf> {
 /// `--pages` range. Returns `None` on anything unexpected (no sibling
 /// `pdfinfo`, spawn failure, non-zero exit, unparsable output) -- this is a
 /// nice-to-have, not a hard dependency, so failures degrade silently.
-pub fn total_pages(pdftoppm: &Path, pdf: &Path) -> Option<u32> {
-    info(pdftoppm, pdf).ok().map(|i| i.pages)
+pub fn total_pages(pdftoppm: &Path, pdf: &Path, password: Option<&str>) -> Option<u32> {
+    info(pdftoppm, pdf, password).ok().map(|i| i.pages)
 }
 
 /// Metadata about a PDF, shown by the GUI's "PDF info" popup. `file_size_bytes`
@@ -161,12 +175,16 @@ pub struct PdfInfo {
 /// User-triggered (not best-effort like `total_pages`): a missing `pdfinfo` or
 /// a failed run is a real `Err` the GUI surfaces in the info dialog, rather
 /// than a silently degraded field.
-pub fn info(pdftoppm: &Path, pdf: &Path) -> Res<PdfInfo> {
+pub fn info(pdftoppm: &Path, pdf: &Path, password: Option<&str>) -> Res<PdfInfo> {
     let pdfinfo = sibling_pdfinfo(pdftoppm).ok_or(
         "pdfinfo not found next to pdftoppm (it ships in the same poppler install; \
          reinstalling poppler should add it)",
     )?;
-    let out = Command::new(&pdfinfo).arg(pdf).output()?;
+    let mut cmd = Command::new(&pdfinfo);
+    if let Some(pw) = password {
+        cmd.arg("-upw").arg(pw);
+    }
+    let out = cmd.arg(pdf).output()?;
     if !out.status.success() {
         return Err(format!("pdfinfo failed ({})", out.status).into());
     }
@@ -196,6 +214,92 @@ pub fn info(pdftoppm: &Path, pdf: &Path) -> Res<PdfInfo> {
         encrypted,
         file_size_bytes,
     })
+}
+
+/// Can `pdf` be opened with `password` (None = try with no password)? Prefers the
+/// sibling `pdfinfo` (cheap, no render): exit 0 means the password (or lack of one)
+/// unlocks it. When no sibling `pdfinfo` exists (pdftoppm resolved as a bare PATH
+/// name), falls back to rendering page 1 with pdftoppm into a throwaway dir at a low
+/// dpi -- a non-empty result means it opened. Any spawn/OS error counts as "cannot
+/// open" (false), never a hard error, since this is a probe. Pub so the GUI's
+/// password probe commands share this exact logic (incl. the no-sibling-pdfinfo
+/// fallback) instead of re-deriving it from `info`.
+pub fn can_open(pdftoppm: &Path, pdf: &Path, password: Option<&str>) -> bool {
+    if let Some(pdfinfo) = sibling_pdfinfo(pdftoppm) {
+        let mut cmd = Command::new(&pdfinfo);
+        if let Some(pw) = password {
+            cmd.arg("-upw").arg(pw);
+        }
+        return matches!(cmd.arg(pdf).output(), Ok(o) if o.status.success());
+    }
+    // No sibling pdfinfo: probe by rendering just page 1 at a small dpi.
+    match tempfile::tempdir() {
+        Ok(tmp) => rasterize_range(
+            pdftoppm,
+            pdf,
+            tmp.path(),
+            36,
+            Some((1, Some(1))),
+            None,
+            password,
+        )
+        .map(|pages| !pages.is_empty())
+        .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// Does `pdf` require a user/open password? True ONLY when it cannot be opened with
+/// no password AND poppler reports a password error -- so a corrupt or otherwise
+/// unreadable PDF is not misreported as "needs password" (which would trap the GUI
+/// in an infinite re-prompt: no password could ever satisfy it). Best-effort probe:
+/// - opens with no password -> `false` (unencrypted or owner-only-restricted).
+/// - sibling `pdfinfo` present -> `true` only if its stderr mentions "password".
+/// - no sibling `pdfinfo` (bare-name pdftoppm) -> `true`, since we can't sniff the
+///   reason and an encrypted PDF must still surface the prompt; a corrupt PDF in
+///   that narrow config falls back to the prompt, escapable via Cancel.
+pub fn needs_user_password(pdftoppm: &Path, pdf: &Path) -> bool {
+    if can_open(pdftoppm, pdf, None) {
+        return false;
+    }
+    match sibling_pdfinfo(pdftoppm) {
+        Some(pdfinfo) => match Command::new(&pdfinfo).arg(pdf).output() {
+            Ok(o) if !o.status.success() => String::from_utf8_lossy(&o.stderr)
+                .to_lowercase()
+                .contains("password"),
+            _ => false,
+        },
+        None => true,
+    }
+}
+
+/// Resolve which of `candidates` (if any) unlocks `pdf`, returning the password to
+/// pass to `-upw` (`None` = no password needed):
+/// - 0 candidates -> `Ok(None)` (unchanged behavior, no probe).
+/// - 1+ candidates -> probe with no password first (covers unencrypted and
+///   owner-only-restricted PDFs), then each candidate in order; the first that
+///   opens wins. If the PDF is encrypted and none work, `Err` -- a clear
+///   "password required or incorrect" the caller surfaces as a per-file skip (see
+///   the CLI batch loop / GUI prompt), rather than a cryptic pdftoppm failure at
+///   rasterize time.
+pub fn select_password(pdftoppm: &Path, pdf: &Path, candidates: &[String]) -> Res<Option<String>> {
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    if can_open(pdftoppm, pdf, None) {
+        return Ok(None);
+    }
+    for pw in candidates {
+        if can_open(pdftoppm, pdf, Some(pw)) {
+            return Ok(Some(pw.clone()));
+        }
+    }
+    Err(format!(
+        "password required or incorrect for {} (tried {} candidate(s))",
+        pdf.display(),
+        candidates.len()
+    )
+    .into())
 }
 
 /// Pull the trailing integer out of a stem like "page-12" -> 12. Pub(crate) so
@@ -253,10 +357,10 @@ mod tests {
         let pdftoppm = Path::new("pdftoppm");
 
         let out72 = tempfile::tempdir().expect("tmp 72 dir");
-        let pages72 =
-            super::rasterize(pdftoppm, &pdf_path, out72.path(), 72).expect("rasterize at 72 dpi");
+        let pages72 = super::rasterize(pdftoppm, &pdf_path, out72.path(), 72, None)
+            .expect("rasterize at 72 dpi");
         let out144 = tempfile::tempdir().expect("tmp 144 dir");
-        let pages144 = super::rasterize(pdftoppm, &pdf_path, out144.path(), 144)
+        let pages144 = super::rasterize(pdftoppm, &pdf_path, out144.path(), 144, None)
             .expect("rasterize at 144 dpi");
 
         let (w72, h72) = png_dimensions(&pages72[0]).expect("read 72dpi png dims");
@@ -310,8 +414,8 @@ mod tests {
 
         let out = tempfile::tempdir().expect("tmp page dir");
         let pdftoppm = Path::new("pdftoppm");
-        let pages =
-            super::rasterize(pdftoppm, &pdf_path, out.path(), 72).expect("rasterize fixture pdf");
+        let pages = super::rasterize(pdftoppm, &pdf_path, out.path(), 72, None)
+            .expect("rasterize fixture pdf");
 
         // 2 pages, sorted ascending, each one rasterizes to a non-empty PNG whose
         // trailing number parses to 1 then 2.
@@ -359,6 +463,7 @@ mod tests {
             72,
             None,
             Some(&mut on_page),
+            None,
         )
         .expect("rasterize with progress callback");
 
@@ -411,6 +516,7 @@ mod tests {
             72,
             Some((2, None)),
             None,
+            None,
         )
         .expect("rasterize open tail");
         assert_eq!(
@@ -429,6 +535,7 @@ mod tests {
             out_all.path(),
             72,
             Some((1, None)),
+            None,
             None,
         )
         .expect("rasterize open all");
@@ -467,7 +574,7 @@ mod tests {
         let cache = tempfile::tempdir().expect("tmp cache dir");
         let pdftoppm = Path::new("pdftoppm");
 
-        let pages = crate::render_pages(pdftoppm, &pdf_path, 72, cache.path())
+        let pages = crate::render_pages(pdftoppm, &pdf_path, 72, cache.path(), None)
             .expect("render_pages on fixture");
         assert_eq!(
             pages.len(),
@@ -486,7 +593,7 @@ mod tests {
         }
 
         // Second call hits the per-PDF preview cache: same paths, no re-render.
-        let again = crate::render_pages(pdftoppm, &pdf_path, 72, cache.path())
+        let again = crate::render_pages(pdftoppm, &pdf_path, 72, cache.path(), None)
             .expect("render_pages cache hit");
         assert_eq!(again, pages, "cache hit must return the same page paths");
     }
@@ -514,7 +621,8 @@ mod tests {
         let cache = tempfile::tempdir().expect("tmp cache dir");
         let pdftoppm = Path::new("pdftoppm");
 
-        let p1 = crate::render_page(pdftoppm, &pdf_path, 72, cache.path(), 1).expect("page 1");
+        let p1 =
+            crate::render_page(pdftoppm, &pdf_path, 72, cache.path(), 1, None).expect("page 1");
         assert_eq!(
             trailing_number(&p1),
             Some(1),
@@ -522,7 +630,8 @@ mod tests {
         );
         assert!(p1.exists() && std::fs::metadata(&p1).unwrap().len() > 0);
 
-        let p2 = crate::render_page(pdftoppm, &pdf_path, 72, cache.path(), 2).expect("page 2");
+        let p2 =
+            crate::render_page(pdftoppm, &pdf_path, 72, cache.path(), 2, None).expect("page 2");
         assert_eq!(
             trailing_number(&p2),
             Some(2),
@@ -531,13 +640,13 @@ mod tests {
 
         // A page beyond the doc must Err even though the cache dir now holds pages 1-2.
         assert!(
-            crate::render_page(pdftoppm, &pdf_path, 72, cache.path(), 3).is_err(),
+            crate::render_page(pdftoppm, &pdf_path, 72, cache.path(), 3, None).is_err(),
             "page 3 of a 2-page PDF must be out-of-range, not a stale cache hit"
         );
 
         // Re-rendering page 1 is a cache hit: same path, no dependence on pdftoppm.
         let again =
-            crate::render_page(pdftoppm, &pdf_path, 72, cache.path(), 1).expect("cache hit");
+            crate::render_page(pdftoppm, &pdf_path, 72, cache.path(), 1, None).expect("cache hit");
         assert_eq!(again, p1, "cache hit must return the same page path");
     }
 
@@ -584,7 +693,7 @@ mod tests {
         std::fs::write(&pdf_path, minimal_two_page_pdf()).expect("write fixture pdf");
 
         assert_eq!(
-            super::total_pages(&pdftoppm, &pdf_path),
+            super::total_pages(&pdftoppm, &pdf_path, None),
             Some(2),
             "pdfinfo-derived page count must match the 2-page fixture"
         );
@@ -602,12 +711,112 @@ mod tests {
         let bytes = minimal_two_page_pdf();
         std::fs::write(&pdf_path, &bytes).expect("write fixture pdf");
 
-        let info = super::info(&pdftoppm, &pdf_path).expect("pdfinfo on 2-page fixture");
+        let info = super::info(&pdftoppm, &pdf_path, None).expect("pdfinfo on 2-page fixture");
         assert_eq!(info.pages, 2, "must match the 2-page fixture");
         assert_eq!(
             info.file_size_bytes,
             bytes.len() as u64,
             "file size must come from the filesystem, not pdfinfo"
+        );
+    }
+
+    // No candidates -> no password, no probe: the common (unencrypted) path is
+    // unchanged. Needs no external binary since 0 candidates short-circuits.
+    #[test]
+    fn select_password_none_when_no_candidates() {
+        let pdf = Path::new("/nonexistent.pdf");
+        let got = super::select_password(Path::new("pdftoppm"), pdf, &[]).expect("no candidates");
+        assert_eq!(
+            got, None,
+            "empty candidate list must resolve to no password"
+        );
+    }
+
+    // A single candidate is probed like any other (no blind passthrough): an
+    // unopenable PDF with one wrong candidate must Err with the clear
+    // "password required or incorrect" message, not silently return the password to
+    // fail cryptically at rasterize time. A nonexistent path fails every can_open
+    // probe regardless of whether pdftoppm is on PATH, so this needs no fixture.
+    #[test]
+    fn select_password_single_candidate_is_probed() {
+        let pdf = Path::new("/nonexistent.pdf");
+        let cands = vec!["hunter2".to_string()];
+        assert!(
+            super::select_password(Path::new("pdftoppm"), pdf, &cands).is_err(),
+            "a lone candidate is probed; an unopenable PDF must Err, not pass it through"
+        );
+    }
+
+    // 2+ candidates on an UNENCRYPTED PDF: the no-password probe succeeds first, so
+    // none of the candidates are needed and select resolves to None. Needs a
+    // resolvable pdftoppm + sibling pdfinfo (the probe path).
+    #[test]
+    fn select_password_multi_unencrypted_resolves_none() {
+        let Some(pdftoppm) = resolve_pdftoppm_with_pdfinfo() else {
+            eprintln!("skipping select_password_multi_unencrypted_resolves_none: pdftoppm/pdfinfo not resolvable");
+            return;
+        };
+        let pdf_dir = tempfile::tempdir().expect("tmp pdf dir");
+        let pdf_path = pdf_dir.path().join("fixture.pdf");
+        std::fs::write(&pdf_path, minimal_two_page_pdf()).expect("write fixture pdf");
+
+        let cands = vec!["wrong-a".to_string(), "wrong-b".to_string()];
+        let got = super::select_password(&pdftoppm, &pdf_path, &cands)
+            .expect("unencrypted PDF opens with no password");
+        assert_eq!(
+            got, None,
+            "an unencrypted PDF must resolve to no password even with candidates present"
+        );
+    }
+
+    // Encrypted PDF: the right password unlocks, a wrong-only list errors. poppler
+    // cannot create an encrypted PDF, so generate one with `qpdf --encrypt` and skip
+    // when qpdf (or pdftoppm/pdfinfo) is unavailable, matching the pdftoppm-on-PATH
+    // skip pattern used throughout this module.
+    #[test]
+    fn select_password_encrypted_picks_working_and_errors_on_none() {
+        let Some(pdftoppm) = resolve_pdftoppm_with_pdfinfo() else {
+            eprintln!("skipping select_password_encrypted: pdftoppm/pdfinfo not resolvable");
+            return;
+        };
+        if std::process::Command::new("qpdf")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping select_password_encrypted: qpdf not on PATH");
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tmp dir");
+        let plain = dir.path().join("plain.pdf");
+        let enc = dir.path().join("enc.pdf");
+        std::fs::write(&plain, minimal_two_page_pdf()).expect("write plain pdf");
+        // qpdf --encrypt <user-pw> <owner-pw> <keylen> -- in out
+        let status = std::process::Command::new("qpdf")
+            .args(["--encrypt", "s3cret", "ownerpw", "256", "--"])
+            .arg(&plain)
+            .arg(&enc)
+            .status()
+            .expect("run qpdf");
+        assert!(status.success(), "qpdf must produce an encrypted PDF");
+
+        // Right password present among candidates -> Some(right).
+        let ok = vec!["nope".to_string(), "s3cret".to_string()];
+        let got = super::select_password(&pdftoppm, &enc, &ok).expect("a candidate unlocks it");
+        assert_eq!(
+            got.as_deref(),
+            Some("s3cret"),
+            "select must pick the candidate that actually unlocks the PDF"
+        );
+
+        // Only wrong passwords -> Err (the CLI batch loop / GUI surfaces this as a skip).
+        let bad = vec!["nope".to_string(), "still-wrong".to_string()];
+        assert!(
+            super::select_password(&pdftoppm, &enc, &bad).is_err(),
+            "an encrypted PDF with no working candidate must Err"
         );
     }
 

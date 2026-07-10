@@ -470,7 +470,7 @@ fn render_pages_returns_cached_pngs_without_pdftoppm() {
     }
 
     let bogus = Path::new("/nonexistent/pdftoppm");
-    let pages = render_pages(bogus, &pdf, 144, root).expect("cache hit");
+    let pages = render_pages(bogus, &pdf, 144, root, None).expect("cache hit");
     let names: Vec<_> = pages
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())

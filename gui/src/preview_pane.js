@@ -1,5 +1,6 @@
 import { requireTauri } from "./tauri.js";
 import { fmtBytes } from "./toasts.js";
+import { ensurePasswordFor, sessionPasswordFor } from "./pdf_password.js";
 
 // window.unlocrI18n loads before this module (classic <script> in <head>); fall
 // back to identity so a plain-browser/no-i18n context still renders something.
@@ -43,7 +44,8 @@ export function makePreviewPane(handlers = {}) {
     const key = n + ":" + dpi;
     if (key in cache) return cache[key];
     try {
-      const p = await t.core.invoke("render_page", { pdfPath, page: n, dpi });
+      const password = sessionPasswordFor(pdfPath) || undefined;
+      const p = await t.core.invoke("render_page", { pdfPath, page: n, dpi, password });
       cache[key] = t.core.convertFileSrc(p);
     } catch (err) {
       // Only an out-of-range page marks the end of the document: cache the null and
@@ -181,7 +183,8 @@ export function makePreviewPane(handlers = {}) {
       infoBody.innerHTML = "";
       infoDlg.showModal();
       try {
-        const info = await t.core.invoke("pdf_info", { pdfPath });
+        const password = sessionPasswordFor(pdfPath) || undefined;
+        const info = await t.core.invoke("pdf_info", { pdfPath, password });
         renderInfo(info);
       } catch (err) {
         infoBody.innerHTML = "";
@@ -253,6 +256,11 @@ export function makePreviewPane(handlers = {}) {
     cache = {};
     idx = 1;
     lastPage = null;
+    // Encrypted PDF: prompt for a password on import so the preview renders (and the
+    // later run reuses the cached password). Cancel leaves the preview blank; the run
+    // will prompt again. A newer show()/clear() during the prompt supersedes this.
+    await ensurePasswordFor(t, path);
+    if (my !== token) return;
     const dpiEl = document.getElementById("optDpi");
     const dv = parseInt((dpiEl && dpiEl.value) || "", 10);
     const dpi = Number.isFinite(dv) && dv > 0 ? dv : null;

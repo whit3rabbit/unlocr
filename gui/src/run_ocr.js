@@ -4,6 +4,7 @@ import { readRunOptions } from "./options.js";
 import { refreshModelStatus } from "./model.js";
 import { parentDirOf, splitPath } from "./paths.js";
 import { showToast, removeToast, addNotification } from "./toasts.js";
+import { ensurePasswordFor } from "./pdf_password.js";
 
 // EH-0013 bite 2: i18n hook. Named `tr` -- `t` is the Tauri handle in runOcrOnPath.
 const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
@@ -86,12 +87,35 @@ export async function runOcrOnPath(path, ui, mdPane, unlistensRef, outOverride) 
 
     // out_file: single-file custom name (null for batch; the caller gates this).
     const outFile = (ov.file || "").trim() || null;
+
+    // Encrypted PDF: resolve a password before the run (session cache -> bulk file ->
+    // interactive prompt). Cancel skips this file without failing the batch. Non-PDF
+    // / unencrypted inputs resolve to no password with no dialog.
+    const { password, cancelled } = await ensurePasswordFor(t, path);
+    if (cancelled) {
+      if (ui) {
+        ui.setRunning(false);
+        ui.setStatus(tr("run.passwordSkipped"));
+      }
+      const stem = (splitPath(path) || {}).name || path;
+      showToast("run:" + path, {
+        kind: "info",
+        title: tr("run.passwordSkippedTitle", { stem }),
+        meta: tr("run.passwordSkippedMeta"),
+      });
+      removeToast("run:" + path, 6000);
+      return false;
+    }
+
     // quant is fixed at load time (the model is already held warm); run_ocr only
     // takes the per-run options below.
     const res = await t.core.invoke("run_ocr", {
       inputs: [path],
       outDir,
       outFile,
+      // 0 or 1 resolved candidate (already validated here via check_pdf_password;
+      // select_password re-probes it, a cheap no-op for an already-known-good pw).
+      passwords: password ? [password] : [],
       maxTokens: opts.maxTokens,
       dpi: opts.dpi,
       prompt: opts.prompt,

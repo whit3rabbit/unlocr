@@ -10,7 +10,13 @@ use std::path::{Path, PathBuf};
 /// Cache key = hash(canonical PDF path + mtime + dpi): a changed file (different
 /// mtime) or a different dpi misses and re-renders. `cache_root` is the resolved
 /// unlocr cache dir; previews live under `<cache_root>/previews/<key>/`.
-pub fn render_pages(pdftoppm: &Path, pdf: &Path, dpi: u32, cache_root: &Path) -> Res<Vec<PathBuf>> {
+pub fn render_pages(
+    pdftoppm: &Path,
+    pdf: &Path,
+    dpi: u32,
+    cache_root: &Path,
+    password: Option<&str>,
+) -> Res<Vec<PathBuf>> {
     // ponytail: unbounded cache (no eviction). It is under the OS cache dir, so the
     // user/OS can clear it; add an LRU/size cap here if the previews dir grows.
     let dir = preview_cache_dir(pdf, dpi, cache_root);
@@ -22,7 +28,7 @@ pub fn render_pages(pdftoppm: &Path, pdf: &Path, dpi: u32, cache_root: &Path) ->
         return Ok(cached);
     }
     std::fs::create_dir_all(&dir)?;
-    pdf::rasterize(pdftoppm, pdf, &dir, dpi)
+    pdf::rasterize(pdftoppm, pdf, &dir, dpi, password)
 }
 
 /// Resolve the per-PDF previews directory: `<cache_root>/previews/<key>` where
@@ -63,6 +69,7 @@ pub fn render_page(
     dpi: u32,
     cache_root: &Path,
     page: u32,
+    password: Option<&str>,
 ) -> Res<PathBuf> {
     let dir = preview_cache_dir(pdf, dpi, cache_root);
     let want = page as u64;
@@ -80,7 +87,15 @@ pub fn render_page(
     // pdftoppm failure (non-zero exit, spawn, malformed PDF) propagates via `?`;
     // rasterize_range returns an empty Vec when the page is past EOF, which the
     // find() below turns into the out-of-range error the GUI uses to bound nav.
-    pdf::rasterize_range(pdftoppm, pdf, &dir, dpi, Some((page, Some(page))), None)?;
+    pdf::rasterize_range(
+        pdftoppm,
+        pdf,
+        &dir,
+        dpi,
+        Some((page, Some(page))),
+        None,
+        password,
+    )?;
     pdf::collect_pages(&dir)
         .into_iter()
         .find(|p| pdf::trailing_number(p) == Some(want))

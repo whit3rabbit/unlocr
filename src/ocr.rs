@@ -49,6 +49,7 @@ pub fn run_pdf<S: ImageOcr>(backend: &S, pdftoppm: &Path, input: &Path, args: &A
         dry_penalty_last_n: args.dry_penalty_last_n,
         temperature: args.temperature,
         pages: args.resolved_pages()?,
+        passwords: args.resolved_passwords()?,
     };
 
     let input_display = input.display().to_string();

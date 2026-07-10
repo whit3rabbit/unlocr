@@ -20,6 +20,7 @@ pub(crate) fn validate_and_prepare_options(
     first_page: Option<u32>,
     last_page: Option<u32>,
     output_mode: Option<&str>,
+    passwords: Option<Vec<String>>,
 ) -> Result<(OcrOptions, OutputMode), String> {
     let mut opts = OcrOptions::default();
     if let Some(t) = max_tokens {
@@ -44,6 +45,9 @@ pub(crate) fn validate_and_prepare_options(
         (None, None) => None,
         (f, l) => Some((f.unwrap_or(1), l)),
     };
+    // Candidate PDF passwords (session-only, never persisted). Empty = none, which
+    // pdf::select_password treats as "no password". No numeric guard needed.
+    opts.passwords = passwords.unwrap_or_default();
 
     // Single shared numeric/range guard: the same `OcrOptions::validate` the CLI
     // runs in main.rs, so the checks (and their wording) live in one place

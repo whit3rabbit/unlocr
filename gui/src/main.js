@@ -31,6 +31,7 @@ import {
 import { initNotifications } from "./toasts.js";
 import { wireQuickSettingsPopup } from "./quick_settings.js";
 import { wireInputFolderDialog } from "./input_folder.js";
+import { wirePasswordFilePicker } from "./pdf_password.js";
 import { wirePageSelection, renderEffectiveSummary } from "./options.js";
 import { preflightOnLoad } from "./ocr-events.js";
 import { parentDirOf, splitPath } from "./paths.js";
@@ -139,6 +140,7 @@ window.addEventListener("DOMContentLoaded", () => {
   wireSystemRequirements();
   wireDependencies();
   wireQuickSettingsPopup();
+  wirePasswordFilePicker();
   refreshModelStatus(ui);
   // The backend idle-unload watcher drops the warm model after N idle minutes and
   // emits model://unloaded; refresh the badge + Run gate so the UI reflects it.

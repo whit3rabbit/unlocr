@@ -34,6 +34,23 @@ pub struct Args {
     #[arg(long)]
     pub from_list: Option<PathBuf>,
 
+    /// User/open password for encrypted PDF input. Prefer the UNLOCR_PDF_PASSWORD
+    /// env var or --password-file so the secret stays out of your shell history and
+    /// unlocr's own argv. Note: poppler (pdfinfo/pdftoppm) is still invoked with the
+    /// password as `-upw`, so it appears in the process list while those child
+    /// processes run, whichever source you use. Ignored for unencrypted PDFs and
+    /// image inputs.
+    #[arg(long)]
+    pub password: Option<String>,
+
+    /// Read candidate PDF passwords from a text file (one per line; blank lines and
+    /// lines starting with # are skipped). Each PDF is tried against every password
+    /// until one unlocks it, so a batch of PDFs with different passwords works from
+    /// one file. Keeps the secrets out of your shell history and unlocr's argv (but
+    /// not out of poppler's `-upw` argv while it runs; see --password).
+    #[arg(long)]
+    pub password_file: Option<PathBuf>,
+
     /// Output directory for the .md files (default: current dir)
     #[arg(long, default_value = ".")]
     pub out: PathBuf,
@@ -337,6 +354,37 @@ impl Args {
             None => None,
             Some(s) => Some(parse_pages(s)?),
         })
+    }
+
+    /// Collect candidate PDF passwords. `--password` overrides the
+    /// `UNLOCR_PDF_PASSWORD` env var (the env is the *default* for that slot, per the
+    /// README), so at most one of the two is used; then each line of
+    /// `--password-file` (trimmed; blank and `#`-prefixed lines skipped, mirroring
+    /// `--from-list`) is appended as an additional candidate. Empty when none are
+    /// given (the common case), which `pdf::select_password` treats as "no
+    /// password". Duplicates are kept as-is: the extra probe is cheap and dropping
+    /// them would need an allocation for no real gain.
+    pub fn resolved_passwords(&self) -> Res<Vec<String>> {
+        let mut out = Vec::new();
+        if let Some(pw) = &self.password {
+            out.push(pw.clone());
+        } else if let Ok(pw) = std::env::var("UNLOCR_PDF_PASSWORD") {
+            if !pw.is_empty() {
+                out.push(pw);
+            }
+        }
+        if let Some(file) = &self.password_file {
+            let text = std::fs::read_to_string(file)
+                .map_err(|e| format!("--password-file {}: {e}", file.display()))?;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                out.push(line.to_string());
+            }
+        }
+        Ok(out)
     }
 }
 

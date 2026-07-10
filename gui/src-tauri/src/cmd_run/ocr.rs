@@ -37,6 +37,7 @@ pub(crate) async fn run_ocr(
     last_page: Option<u32>,
     quant: Option<String>,
     output_mode: Option<String>,
+    passwords: Option<Vec<String>>,
 ) -> Result<RunResult, String> {
     let (mut opts, mode) = validation::validate_and_prepare_options(
         &inputs,
@@ -54,6 +55,7 @@ pub(crate) async fn run_ocr(
         first_page,
         last_page,
         output_mode.as_deref(),
+        passwords,
     )?;
 
     let out_dir = PathBuf::from(out_dir);

@@ -59,6 +59,11 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
   `brew_available`, else copyable Homebrew guidance.
 - Job-store commands (`list_jobs`, `jobs_store_path`, `record_job`) wrap `src/store/mod.rs`;
   `record_job` fires after each run_ocr completes/fails. Defaults mirror `OcrOptions::default()`.
+- Native file pickers feeding a backend read open the dialog SERVER-SIDE
+  (`app.dialog().file().blocking_pick_file()`; see `pick_password_file` in
+  `cmd_run/render.rs`) so the renderer never supplies an arbitrary path -- same
+  "renderer can't widen the read scope" invariant as `read_text_file`. Backend
+  `DialogExt` calls bypass the capability ACL (no `dialog:` permission needed).
 
 ## PDF preview + page-image cache
 - Core fn `unlocr::render_pages(pdftoppm, pdf, dpi, cache_root)` rasterizes to

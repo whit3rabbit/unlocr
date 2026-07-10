@@ -119,6 +119,14 @@ Thin wrapper. Full usage/benchmarks in README.md.
 - `cargo clippy --workspace --all-targets -- -D warnings` is GREEN; the old
   pre-existing debt was cleared. It is a real release gate (docs/RELEASE.md), so
   keep it green: your diff must add no new lints.
+- PDF password probes (`src/pdf.rs`): `select_password`/`can_open`/`needs_user_password`
+  are the fallback-aware openers (bare-name pdftoppm with no sibling `pdfinfo` -> probe by
+  rendering page 1). Any "can this PDF open / does it need a password" check MUST route
+  through these, NOT `pdf::info` directly: `info` has no fallback, so it Errs on bare-name
+  pdftoppm and misclassifies EVERY PDF as "needs password". Poppler gets the password as
+  `-upw` argv (visible in `ps`) regardless of source (`--password`/env/`--password-file`);
+  only shell history + unlocr's own argv are protected, so don't claim more. Encrypted-PDF
+  tests need `qpdf` (poppler can't create one) and skip when it/pdftoppm/pdfinfo are absent.
 - Public lib API (consumed by gui crate): `run_ocr_job` + `OcrOptions` + `Progress`
   + `render_pages`/`render_page` (cached PDF->PNG for previews; the GUI preview pane
   calls the singular `render_page` per page) + `resolve_output_path` +

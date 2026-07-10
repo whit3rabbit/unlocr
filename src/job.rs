@@ -114,19 +114,26 @@ where
     // unforked. `page_mime` is computed once here so the per-page loop's data_uri
     // no longer hardcodes "image/png" for a real image input.
     let (pages, page_mime): (Vec<PathBuf>, &'static str) = if is_pdf(input) {
+        // Resolve which supplied password (if any) unlocks this PDF, once, before
+        // any pdfinfo/pdftoppm call. `None` = no password needed (the common case;
+        // no probe cost when opts.passwords is empty). An encrypted PDF that no
+        // candidate opens returns Err here, which the CLI batch loop / GUI surface
+        // as a per-file skip.
+        let pw = pdf::select_password(pdftoppm, input, &opts.passwords)?;
+        let pw = pw.as_deref();
         // Total for the Rasterizing progress event: an explicit `--pages a-b` range
         // already tells us the count; otherwise fall back to a best-effort `pdfinfo`
         // probe (None if pdfinfo isn't resolvable, in which case the event carries no
         // denominator).
         let raster_total = match opts.pages {
             Some((_, Some(last))) => Some(last as usize - base + 1),
-            Some((first, None)) => pdf::total_pages(pdftoppm, input)
+            Some((first, None)) => pdf::total_pages(pdftoppm, input, pw)
                 // `first` can exceed the real page count (e.g. `--pages 50-` on a
                 // shorter PDF); rasterize_range then renders nothing and the empty-
                 // pages check below errors out. saturating_sub avoids an underflow
                 // panic (debug) / wraparound (release) computing this progress total.
                 .map(|n| (n as usize).saturating_sub(first as usize) + 1),
-            None => pdf::total_pages(pdftoppm, input).map(|n| n as usize),
+            None => pdf::total_pages(pdftoppm, input, pw).map(|n| n as usize),
         };
         let pages = pdf::rasterize_range(
             pdftoppm,
@@ -140,6 +147,7 @@ where
                     total: raster_total,
                 });
             }),
+            pw,
         )?;
         (pages, "image/png") // pdftoppm always emits PNG
     } else if is_image(input) {

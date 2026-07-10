@@ -20,6 +20,12 @@ GUI/CLI for unlimited-ocr
   <b>English</b> | <a href="README_zh.md">简体中文</a>
 </p>
 
+<p align="center">
+  <a href="assets/unlocr-screenshot.png" target="_blank">
+    <img src="assets/unlocr-screenshot.png" alt="unlocr screenshot" width="600" style="max-width: 100%; border: 1px solid #eaecef; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" />
+  </a>
+</p>
+
 **Not affiliated with Unlimited OCR but a wrapper/GUI around Unlimited OCR**
 
 A fast, lightweight tool to OCR PDFs into clean Markdown. It is powered by the **[Unlimited-OCR](https://huggingface.co/sahilchachra/Unlimited-OCR-GGUF)** model (DeepSeek-OCR 3B VLM) running locally via **`llama.cpp`** (GGUF).
@@ -151,6 +157,8 @@ unlocr report.pdf --out ./out --quality best
 
 ## Developer Reference & CLI Arguments
 
+For a complete, in-depth guide on all CLI arguments, sampling configurations, and advanced setups, see [docs/CLI.md](docs/CLI.md).
+
 ### CLI Arguments & Options
 
 | Option | Default | Description |
@@ -159,6 +167,8 @@ unlocr report.pdf --out ./out --quality best
 | `-o, --output FILE` | *(from input name)* | Single output file path (single-input only). `.md` appended when no extension; joined under `--out` when relative. |
 | `--recursive` | `false` | Recurse into subdirectories when an input is a folder. |
 | `--from-list FILE` | *(none)* | Read extra PDF paths from a text file (one per line; `#` comments and blank lines skipped). |
+| `--password PW` | `UNLOCR_PDF_PASSWORD` | User/open password for encrypted PDFs. `--password` overrides the env var. Prefer the `UNLOCR_PDF_PASSWORD` env var or `--password-file` to keep the secret out of your shell history and unlocr's own argv. (Poppler still receives it as `-upw`, so it appears in the process list while `pdfinfo`/`pdftoppm` run, whichever source you use.) |
+| `--password-file FILE` | *(none)* | Text file of candidate PDF passwords (one per line; `#` comments and blank lines skipped). Each PDF is tried against every password until one unlocks it, so a batch with different passwords works. A PDF no password unlocks is skipped (reported), and the rest of the batch continues. |
 | `--quality TIER` | `good` | Quality preset. Options: `best` (BF16), `good` (Q8_0), `less` (Q4_K_M). |
 | `--quant TAG` | *(from quality)* | Exact Hugging Face model quant tag (e.g. `Q6_K`, `IQ4_XS`). Overrides `--quality`. |
 | `--model PATH` | *(HF download)* | Use this GGUF directly, skipping the HF download and naming convention. Disables `--quant`/`--quality`/`--model-dir` selection. |
