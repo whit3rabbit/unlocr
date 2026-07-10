@@ -71,8 +71,12 @@ jobs:
 
       - name: Generate SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        # SBOM is best-effort: never let it skip the binary upload (steps below).
+        # `path:` makes syft treat the tarball as a dir/OCI source and error out;
+        # `file:` scans the single archive file, which is what we want here.
+        continue-on-error: true
         with:
-          path: ${{ env.ASSET }}
+          file: ${{ env.ASSET }}
           format: spdx-json
           output-file: ${{ env.ASSET }}.spdx.json
 

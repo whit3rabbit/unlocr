@@ -35,7 +35,7 @@ members = ["gui/src-tauri"]
 # `version`, so it falls back to the gui crate's Cargo.toml) all derive from this.
 # release.sh + Makefile read this line via sed.
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
