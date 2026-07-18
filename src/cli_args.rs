@@ -8,6 +8,9 @@ use std::path::PathBuf;
 pub const UNLIMITED_OCR_REPO: &str = "baidu/Unlimited-OCR";
 /// Default base URL of a local `vllm serve` OpenAI server (`--gpu` shortcut).
 pub const VLLM_LOCAL_URL: &str = "http://localhost:8000";
+/// Default `--mlx-model` HF repo id when `--mlx` is set without one. Shared
+/// with the GUI via `unlocr::server::MLX_DEFAULT_MODEL`.
+pub use unlocr::server::MLX_DEFAULT_MODEL;
 
 /// Command-line arguments for the unlocr application.
 #[derive(Parser, Debug)]
@@ -210,6 +213,24 @@ pub struct Args {
     /// baidu/Unlimited-OCR. A Colab notebook (colab/) wires this end to end.
     #[arg(long)]
     pub gpu: bool,
+
+    /// Run OCR locally via `mlxcel-server` (github.com/lablup/mlxcel), a native
+    /// Rust MLX runtime with built-in Unlimited-OCR support (incl. the R-SWA
+    /// sliding-window decode cache, no unmerged-patch dependency). Apple Silicon
+    /// only. Auto-downloads the mlxcel-server binary; the model itself is
+    /// resolved/cached by mlxcel from Hugging Face on first run. Mutually
+    /// exclusive with --endpoint/--gpu/--model/--mmproj.
+    #[arg(long)]
+    pub mlx: bool,
+
+    /// Hugging Face repo id of the MLX-quantized model to serve (only with
+    /// --mlx). Defaults to the 8bit quant; other published variants are 4bit
+    /// (fastest/smallest), mxfp4, and mxfp8 (best accuracy among the sub-fp16
+    /// set), all under the sahilchachra/unlimited-ocr-*-mlx namespace.
+    /// `requires = "mlx"` so it errors instead of silently no-op'ing on the
+    /// GGUF path when passed without --mlx.
+    #[arg(long, requires = "mlx")]
+    pub mlx_model: Option<String>,
 }
 
 /// Subcommands available in the unlocr CLI.
@@ -343,6 +364,13 @@ impl Args {
         if self.endpoint_model.is_none() {
             self.endpoint_model = Some(UNLIMITED_OCR_REPO.to_string());
         }
+    }
+
+    /// Resolve `--mlx-model`, falling back to `MLX_DEFAULT_MODEL` when unset.
+    pub fn resolved_mlx_model(&self) -> String {
+        self.mlx_model
+            .clone()
+            .unwrap_or_else(|| MLX_DEFAULT_MODEL.to_string())
     }
 
     /// Parse `--pages` into a 1-based inclusive `(first, last)` range, or None when

@@ -155,7 +155,7 @@ Thin wrapper. Full usage/benchmarks in README.md.
   Install hints in `src/preflight/hints.rs` are cross-platform (supporting macOS, Windows, and Linux via various package managers).
 - Model GGUFs download from HF on first run, cached at per-OS dir + `/unlocr`
   (`src/model/mod.rs`). Renaming the binary changed this path: old `uocr` caches are orphaned.
-- TWO distinct model repos, do not conflate them:
+- Distinct model repos (GGUF / remote-GPU / MLX), do not conflate them:
   - Local llama.cpp (managed-local path): the quantized GGUF build
     `sahilchachra/Unlimited-OCR-GGUF` (`REPO` in `src/model/mod.rs`). Downloaded + cached;
     this is what `--quant`/the GUI quality tiers select.
@@ -173,6 +173,18 @@ Thin wrapper. Full usage/benchmarks in README.md.
     prompt (ngram_size/window_size via extra_body) or output is empty. Colab has no
     Docker daemon, so `colab/` uses the llama.cpp managed-local path on GPU, NOT
     `--gpu`/vLLM.
+  - THIRD source (MLX, `--mlx`): `sahilchachra/unlimited-ocr-*-mlx` quants, served +
+    cached by mlxcel in its OWN `~/.cache/mlxcel`, not our cache. `DEFAULT_MODEL` /
+    `recommend_model` live in `src/server/mlx.rs`.
+- MLX backend (`--mlx`, Apple Silicon only): `src/server/mlx.rs` spawns lablup/mlxcel
+  `mlxcel-server` (own `ToolPin`, auto-downloaded). mlxcel resolves + downloads the HF
+  model ITSELF at startup (unlocr never sees the files, no managed GGUF download), so it
+  uses `MLX_HEALTH_TIMEOUT` (30 min) NOT the 180s `HEALTH_TIMEOUT` -- the first-run
+  multi-GB download happens inside the health window. The anti-loop sampling defaults
+  (repeat_penalty 1.3 / dry_multiplier 1.0) in `main.rs::run` are scoped to the
+  llama-server GGUF path only; `run_mlx` returns BEFORE them and mlxcel is not known to
+  accept llama.cpp DRY fields, so do NOT inject them blind. `--mlx-model` is
+  `requires = "mlx"`; `--mlx` vs `--endpoint/--gpu/--model/--mmproj` rejected in `main.rs`.
 - `server::local::server_args` passes NO `-ngl`, so the managed-local llama-server runs
   CPU-only. For GPU (e.g. Colab) set env `LLAMA_ARG_N_GPU_LAYERS=99` before unlocr
   spawns it (llama-server reads `LLAMA_ARG_*` env vars); no CLI flag, no Rust change.

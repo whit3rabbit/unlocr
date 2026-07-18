@@ -7,13 +7,15 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 
-use unlocr::server::{RemoteEndpoint, Server};
+use unlocr::server::{MlxServer, RemoteEndpoint, Server};
 
-/// A loaded inference backend: a long-lived local llama-server (held so its model
-/// stays warm in RAM until unloaded) or a remote OpenAI-compatible endpoint.
-/// `Backend` is the litellm-style "loaded model" the Run gate checks for.
+/// A loaded inference backend: a long-lived local llama-server or mlxcel-server
+/// (held so its model stays warm in RAM until unloaded), or a remote
+/// OpenAI-compatible endpoint. `Backend` is the litellm-style "loaded model"
+/// the Run gate checks for.
 pub(crate) enum Backend {
     Local(Server),
+    Mlx(MlxServer),
     Remote(RemoteEndpoint),
 }
 
@@ -35,6 +37,12 @@ pub(crate) struct AppState {
     // ponytail: one Mutex held across a whole run serializes runs. Fine for a
     // single-user desktop app; split into a server pool if concurrent runs matter.
     pub(crate) model: Mutex<Option<LoadedModel>>,
+    // In-flight load guard. `load_model` CAS-flips this false->true at entry and
+    // refuses a second load while it is set, so a double-click / direct invoke /
+    // race cannot spawn two servers at once (the reason orphaned mlxcel-server
+    // processes piled up). Cleared when the load future resolves. Also read by
+    // `unload_model` to decide whether a stuck in-flight server must be reaped.
+    pub(crate) loading: AtomicBool,
     pub(crate) pdftoppm: Mutex<Option<PathBuf>>,
     // Set true by `stop_ocr` to abort an in-flight run; reset at the start of each
     // run (and at load). The run loop checks it at page boundaries; `stop_ocr` also

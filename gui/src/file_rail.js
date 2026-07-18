@@ -66,10 +66,18 @@ export function makeFileRail() {
     // R-SWA vision patch (PR #24975) and is the usual cause of the ocr-ocr
     // repetition loops; flag it. "managed" = unlocr's patched build (trusted).
     const external = !!(report && report.provenance === "external");
+    // MLX uses mlxcel-server + an HF repo, no GGUF/mmproj. Relabel the stages and
+    // hide the projector row so the panel matches the selected engine.
+    const mlx = !!(report && report.mode === "mlx");
+    // Remote endpoint: rasterize is still local (pdftoppm) but there is no local
+    // llama-server / GGUF / projector. The backend report zeroes those fields, so
+    // without a remote branch the normal path below would paint Tools + Model red
+    // on a perfectly healthy remote (report.ok === true).
+    const remote = !!(report && report.mode === "remote");
     const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
     if (engineLabel) {
       const quant = (report && report.quant) || "Q8_0";
-      let label = "Unlimited-OCR · " + quant;
+      let label = (mlx ? "Unlimited-OCR MLX · " : "Unlimited-OCR · ") + quant;
       if (external) label += " · " + tr("pipeline.externalLlama");
       engineLabel.textContent = label;
       engineLabel.title = external ? tr("pipeline.externalLlamaHint") : "";
@@ -82,6 +90,43 @@ export function makeFileRail() {
       li.classList.remove("is-ok", "is-warn", "is-bad");
       if (state) li.classList.add("is-" + state);
     };
+    // Swap a stage's label by rewriting BOTH its data-i18n key and textContent, so
+    // applyText() re-resolves the correct string on a locale switch (which also
+    // re-runs renderPipeline via onLocaleChange below) regardless of handler order.
+    const setStageLabel = (key, i18nKey) => {
+      const el = stages.querySelector('.stage[data-stage="' + key + '"] .stage__name');
+      if (!el) return;
+      el.setAttribute("data-i18n", i18nKey);
+      el.textContent = tr(i18nKey);
+    };
+    // Projector applies only to the local GGUF path; hide it for mlx AND remote.
+    // The Model row applies to local + mlx (mlxcel-managed); a remote endpoint has
+    // no local model stage, so hide it too. Set unconditionally each render so a
+    // switch back to llamacpp re-shows both rows.
+    const mmprojLi = stages.querySelector('.stage[data-stage="mmproj"]');
+    if (mmprojLi) mmprojLi.hidden = mlx || remote;
+    const modelLi = stages.querySelector('.stage[data-stage="model"]');
+    if (modelLi) modelLi.hidden = remote;
+
+    setStageLabel("tools", mlx ? "pipeline.toolsMlx" : remote ? "pipeline.toolsRemote" : "pipeline.tools");
+    setStageLabel("model", mlx ? "pipeline.modelMlx" : "pipeline.model");
+
+    if (remote) {
+      // Only pdftoppm is a local dependency for a remote backend; report.ok already
+      // reflects its presence. No llama-server / GGUF / provenance concept here.
+      setStage("tools", !report ? "" : ok ? "ok" : "bad");
+      return;
+    }
+
+    if (mlx) {
+      // mlxcel-server + pdftoppm; no external-provenance concept (mlxcel is an
+      // official signed release, not the unmerged R-SWA patch).
+      setStage("tools", !report ? "" : ok ? "ok" : "bad");
+      // mlxcel owns its HF cache; the backend reports modelPresent=true as an
+      // informational "handled by mlxcel" rather than a real disk probe.
+      setStage("model", report ? "ok" : "");
+      return;
+    }
 
     // Tools: both llama-server and pdftoppm resolved on a successful report. An
     // external llama-server still resolves, but is amber (unverified R-SWA patch),

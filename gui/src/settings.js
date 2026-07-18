@@ -574,6 +574,30 @@ export async function wireSystemRequirements() {
       if (verdictText === verdictKey) verdictText = report.verdictLabel || "System Requirements";
       verdict.textContent = verdictText;
     }
+
+    // Recommended engine/quant callout: only shown when the live preset differs
+    // from the backend's recommendation, so an existing explicit choice is not
+    // nagged at on every panel open. Never switches the selection itself.
+    const rec = document.getElementById("sysreqRecommendation");
+    if (rec) {
+      const sel = document.getElementById("enginePreset");
+      const current = sel ? sel.value : "llamacpp";
+      const wantsMlx = report.appleSilicon && report.recommendedEngine === "mlx";
+      if (wantsMlx && current !== "mlx") {
+        rec.hidden = false;
+        rec.textContent = tr("sysreq.recommendMlx", { quant: report.recommendedMlxModel });
+      } else if (
+        !report.appleSilicon &&
+        current === "llamacpp" &&
+        report.recommendedQuant &&
+        (document.getElementById("optQuant") || {}).value !== report.recommendedQuant
+      ) {
+        rec.hidden = false;
+        rec.textContent = tr("sysreq.recommendQuant", { quant: report.recommendedQuant });
+      } else {
+        rec.hidden = true;
+      }
+    }
   }
 
   if (refresh) refresh.addEventListener("click", render);

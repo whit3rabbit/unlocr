@@ -19,6 +19,10 @@ pub(crate) struct PreflightReport {
     model_present: bool,
     mmproj_present: bool,
     quant: String,
+    /// The engine this report describes: "local" (GGUF + llama-server), "mlx"
+    /// (mlxcel-server + an HF MLX repo), or "remote". The frontend pipeline panel
+    /// branches on this so it does not show GGUF/llama-server stages for MLX.
+    mode: String,
     error: Option<String>,
 }
 
@@ -38,8 +42,12 @@ pub(crate) struct CacheInfo {
 pub(crate) fn preflight(
     llama_bin: Option<String>,
     quant: Option<String>,
+    mode: Option<String>,
 ) -> Result<PreflightReport, String> {
     let llama_override = llama_bin.map(PathBuf::from);
+    let mode = mode
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "local".to_string());
     let quant = quant
         .map(|q| {
             if q.trim().is_empty() {
@@ -49,6 +57,31 @@ pub(crate) fn preflight(
             }
         })
         .unwrap_or_else(|| OcrOptions::default().quant);
+
+    // MLX and remote backends do not use a GGUF quant or llama-server. `quant`
+    // for mlx holds the HF repo id (contains `/`), which would fail
+    // validate_quant, and neither needs the GGUF/llama-server probes below.
+    // Both only require pdftoppm (poppler) to rasterize pages.
+    if mode == "mlx" {
+        return Ok(preflight_mlx(&quant));
+    }
+    if mode == "remote" {
+        let pdftoppm = unlocr::preflight::locate("pdftoppm");
+        return Ok(PreflightReport {
+            ok: pdftoppm.is_some(),
+            build_number: None,
+            llama_server: None,
+            provenance: None,
+            pdftoppm: pdftoppm.as_ref().map(|p| p.display().to_string()),
+            model_present: false,
+            mmproj_present: false,
+            quant,
+            mode,
+            error: pdftoppm
+                .is_none()
+                .then(|| "missing dependencies: pdftoppm".to_string()),
+        });
+    }
 
     if let Err(e) = unlocr::model::validate_quant(&quant) {
         return Ok(PreflightReport {
@@ -60,6 +93,7 @@ pub(crate) fn preflight(
             model_present: false,
             mmproj_present: false,
             quant,
+            mode,
             error: Some(e.to_string()),
         });
     }
@@ -76,6 +110,7 @@ pub(crate) fn preflight(
                 model_present: false,
                 mmproj_present: false,
                 quant,
+                mode,
                 error: Some(format!("could not resolve model cache dir: {e}")),
             });
         }
@@ -123,6 +158,7 @@ pub(crate) fn preflight(
                 model_present,
                 mmproj_present,
                 quant,
+                mode,
                 error: Some(format!("missing dependencies: {}", missing.join(", "))),
             });
         }
@@ -141,8 +177,51 @@ pub(crate) fn preflight(
         model_present,
         mmproj_present,
         quant,
+        mode,
         error: None,
     })
+}
+
+/// Passive MLX preflight: MLX uses mlxcel-server + an HF repo (mlxcel manages its
+/// own model cache), not a GGUF/llama-server. `repo` is the selected MLX HF repo
+/// id (contains `/`); it is echoed back for the panel label only, NOT validated as
+/// a quant tag. `ok` requires pdftoppm on this Apple-Silicon-only backend; a
+/// missing managed mlxcel-server is informational (load_model auto-downloads it),
+/// so it does not fail the report. No download is triggered here (find only).
+fn preflight_mlx(repo: &str) -> PreflightReport {
+    let platform_ok = unlocr::server::mlx_platform_supported();
+    let pdftoppm = unlocr::preflight::locate("pdftoppm");
+    // Non-downloading lookup of the managed mlxcel-server, mirroring the managed
+    // branch of resolve_mlxcel_server (src/preflight.rs). None = not yet cached,
+    // which is fine: load_model downloads it on demand.
+    let mlxcel = unlocr::model::cache_dir(None).ok().and_then(|cache| {
+        let dir = unlocr::tools::tools_dir(&cache).join("mlxcel-server");
+        unlocr::tools::find_exe(&dir, "mlxcel-server")
+    });
+    let mut missing = Vec::new();
+    if !platform_ok {
+        missing.push("mlxcel-server (unsupported platform)");
+    }
+    if pdftoppm.is_none() {
+        missing.push("pdftoppm");
+    }
+    PreflightReport {
+        ok: platform_ok && pdftoppm.is_some(),
+        build_number: None,
+        // Reuse llama_server as the "tools" binary field the frontend already
+        // reads for the tools-stage dot; here it carries mlxcel-server's path.
+        llama_server: mlxcel.map(|p| p.display().to_string()),
+        provenance: None,
+        pdftoppm: pdftoppm.map(|p| p.display().to_string()),
+        // mlxcel owns its HF cache; unlocr can't probe presence. Report the model
+        // stage as present (informational) rather than a false "missing" red dot.
+        model_present: true,
+        mmproj_present: false,
+        quant: repo.to_string(),
+        mode: "mlx".to_string(),
+        error: (!missing.is_empty())
+            .then(|| format!("missing dependencies: {}", missing.join(", "))),
+    }
 }
 
 /// Quant tags already downloaded to the model cache, for the model picker.
@@ -376,6 +455,35 @@ mod tests {
         let q6k = quants.iter().find(|q| q.name == "Q6_K").unwrap();
         assert!(!q6k.cached);
         assert_eq!(q6k.tier, None);
+    }
+
+    /// The MLX preflight branch must NOT reject an HF repo id containing `/`
+    /// (the bug this fixes: `validate_quant`'s charset check flagged the repo).
+    /// It echoes the repo back and, whatever the host env, never emits an
+    /// "invalid quant" error. `mode` is stamped "mlx" so the panel can branch.
+    #[test]
+    fn preflight_mlx_does_not_reject_repo_with_slash() {
+        let report = preflight_mlx("sahilchachra/unlimited-ocr-8bit-mlx");
+        assert_eq!(report.quant, "sahilchachra/unlimited-ocr-8bit-mlx");
+        assert_eq!(report.mode, "mlx");
+        // MLX carries no llama-server provenance (unconditionally None), and the
+        // `llama_server` field, when populated, is the mlxcel-server path (not a
+        // llama-server). On a CI host with no cached mlxcel it is None, which is
+        // also fine. (The old `is_none() || provenance.is_none()` was tautological:
+        // provenance is always None here, so it could never fail.)
+        assert!(report.provenance.is_none());
+        if let Some(bin) = &report.llama_server {
+            assert!(
+                bin.contains("mlxcel-server"),
+                "mlx tools field must carry the mlxcel-server path, got: {bin}"
+            );
+        }
+        if let Some(err) = &report.error {
+            assert!(
+                !err.contains("invalid quant"),
+                "mlx preflight must not run quant validation, got: {err}"
+            );
+        }
     }
 
     /// `is_safe_cache_filename` rejects any path-traversal shape and requires

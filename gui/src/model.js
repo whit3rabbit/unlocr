@@ -4,7 +4,7 @@
 // listeners, and the quant tier labels / cached markers.
 
 import { requireTauri } from "./tauri.js";
-import { showToast, removeToast } from "./toasts.js";
+import { showToast, removeToast, addNotification } from "./toasts.js";
 
 // EH-0013 bite 2: i18n hook. Named `tr` -- `t` is the Tauri handle in every fn.
 const tr = (window.unlocrI18n && window.unlocrI18n.t) || ((k) => k);
@@ -31,6 +31,9 @@ let loadHeartbeat = null;
 let loadHeartbeatBase = "";
 let loadHeartbeatStart = 0;
 const LOAD_TOAST_ID = "load:memory";
+// Persistent (not heartbeat) toast for a load FAILURE. Separate id so
+// stopLoadFeedback (which only removes LOAD_TOAST_ID) leaves the error visible.
+const LOAD_ERROR_TOAST_ID = "load:error";
 
 /** Stop the load heartbeat and clear its toast. Idempotent. */
 function stopLoadFeedback() {
@@ -123,7 +126,11 @@ export async function refreshModelStatus(ui) {
 /** When no model is loaded, label the Load button "Download & load model" if the
  *  selected local quant is not cached on disk, else "Load model". Remote backends
  *  and a custom GGUF override never download a quant, so they stay "Load model".
- *  Best-effort: silent outside the webview or if list_local_models fails. */
+ *  MLX also stays "Load model": mlxcel owns its own HF cache (~/.cache/mlxcel),
+ *  which unlocr can't probe, so we can't tell a first-run download from a warm
+ *  cache -- "Load model" is the least-wrong label (the #mlxHint already warns the
+ *  first run downloads the model). Best-effort: silent outside the webview or if
+ *  list_local_models fails. */
 async function updateLoadLabel() {
   const loadBtn = document.getElementById("loadModelBtn");
   if (!loadBtn || modelLoaded) return; // a model is loaded: leave the "Reload" label
@@ -163,18 +170,70 @@ export const ENGINE_PRESETS = {
   // (preserves a value restored from saved settings).
   vllm: { mode: "remote", url: "http://127.0.0.1:8000", model: "" },
   sglang: { mode: "remote", url: "http://127.0.0.1:30000", model: "" },
+  // Local mlxcel-server (Apple Silicon only, github.com/lablup/mlxcel). Not a
+  // remote endpoint: no URL/key needed. The model repo is picked via the same
+  // #optQuant control local mode uses (see MLX_QUANTS/applyPreset below), not
+  // the remote-model field.
+  mlx: { mode: "mlx", url: null },
   custom: { mode: "remote", url: null },
 };
 
+// The 4 published MLX quants (sahilchachra/unlimited-ocr-*-mlx on Hugging
+// Face). Hand-mirrored here (no backend "list mlx quants" command -- mlxcel
+// manages its own HF cache, unlocr never sees the files) the same way
+// options.js's TASK_PROMPTS mirrors cli_args::Task::prompt(); keep in sync
+// with `recommend_model`'s tiers in src/server/mlx.rs if the lineup changes.
+// tier aliases mirror the GGUF best/good/less convention: mxfp8 has the best
+// CER among the quantized set, 8bit is the balanced default, 4bit is
+// smallest/fastest; mxfp4 has no alias (a close cousin of 4bit, similar
+// tradeoffs, shown as a plain extra option like the 10 alias-less GGUF quants).
+const MLX_QUANTS = [
+  { name: "sahilchachra/unlimited-ocr-mxfp8-mlx", tier: "best", cached: false },
+  { name: "sahilchachra/unlimited-ocr-8bit-mlx", tier: "good", cached: false },
+  { name: "sahilchachra/unlimited-ocr-mxfp4-mlx", tier: null, cached: false },
+  { name: "sahilchachra/unlimited-ocr-4bit-mlx", tier: "less", cached: false },
+];
+// Mirrors unlocr::server::MLX_DEFAULT_MODEL (src/server/mlx.rs) -- keep in sync.
+const MLX_DEFAULT_MODEL = "sahilchachra/unlimited-ocr-8bit-mlx";
+
+// Last GGUF lineup fetched by populateQuantSelects, cached so applyPreset can
+// restore it when switching back from mlx to llamacpp without a re-fetch (and
+// so a preset switch that happens before the first fetch resolves doesn't
+// leave the select empty -- see populateQuantSelects' mlx guard below).
+let ggufQuantsCache = [];
+
+/** Rebuild `ids`' `<option>` lists from `quants` ({name, tier, cached}[]),
+ *  preserving each select's current selection when it is still present, else
+ *  falling back to `fallbackName`. Shared by populateQuantSelects (GGUF,
+ *  backend-fetched) and applyPreset's mlx branch (static MLX_QUANTS). */
+function renderQuantOptions(ids, quants, fallbackName) {
+  const names = new Set(quants.map((q) => q.name));
+  ids.forEach((id) => {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    const prevValue = sel.value;
+    sel.innerHTML = "";
+    quants.forEach((q) => {
+      const opt = document.createElement("option");
+      opt.value = q.name;
+      const label = quantTierLabel(q.name, q.tier);
+      opt.textContent = q.cached ? label + tr("model.cached") : label;
+      sel.appendChild(opt);
+    });
+    sel.value = names.has(prevValue) ? prevValue : names.has(fallbackName) ? fallbackName : sel.value;
+  });
+}
+
 /** Apply a backend preset: toggle the remote field visibility (editable only for
- *  Custom), prefill the URL for vllm/sglang, and hide the Quant control for any
- *  remote backend (quant only applies to the managed-local spawn). */
+ *  Custom), prefill the URL for vllm/sglang, and repopulate the Quant control --
+ *  GGUF quants for llamacpp, the 4 MLX quants for mlx, hidden for a true remote
+ *  endpoint (quant/MLX-repo selection only applies to a managed-local spawn). */
 export function applyPreset(name) {
   const p = ENGINE_PRESETS[name] || ENGINE_PRESETS.llamacpp;
   const remoteFields = document.getElementById("remoteFields");
   if (remoteFields) remoteFields.hidden = name !== "custom";
-  // Custom-GGUF pickers apply only to the managed-local spawn (they replace the
-  // download + quant naming); hide them for any remote backend.
+  // Custom-GGUF pickers apply only to the managed-local llama.cpp spawn (they
+  // replace the download + quant naming); hide them for any other backend.
   const localFields = document.getElementById("localFields");
   if (localFields) localFields.hidden = p.mode !== "local";
   if (p.url) {
@@ -190,10 +249,23 @@ export function applyPreset(name) {
   }
   const quantEl = document.getElementById("optQuant");
   const quantField = quantEl && quantEl.closest(".opts__field");
-  if (quantField) quantField.hidden = p.mode !== "local";
+  // Shown for local (GGUF quant) and mlx (MLX quant repo); hidden only for a
+  // true remote endpoint, which has no quant/repo concept of its own.
+  if (quantField) quantField.hidden = p.mode === "remote";
+  if (name === "mlx") {
+    renderQuantOptions(["optQuant", "setQuant", "qsQuant"], MLX_QUANTS, MLX_DEFAULT_MODEL);
+  } else if (p.mode === "local" && ggufQuantsCache.length) {
+    // Only re-render when the GGUF lineup is actually known. If applyPreset fires
+    // before populateQuantSelects has resolved (empty cache), rendering [] would
+    // wipe the selects to zero options; leave the DOM as-is and let the pending
+    // populateQuantSelects fill them (it re-renders for the live llamacpp preset).
+    renderQuantOptions(["optQuant", "setQuant", "qsQuant"], ggufQuantsCache, "Q8_0");
+  }
   // Show the GPU prerequisites hint only for the GPU preset.
   const gpuHint = document.getElementById("gpuHint");
   if (gpuHint) gpuHint.hidden = name !== "gpu";
+  const mlxHint = document.getElementById("mlxHint");
+  if (mlxHint) mlxHint.hidden = name !== "mlx";
 }
 
 /** Wire the OCR engine backend preset dropdown. Changing it re-applies the preset
@@ -220,7 +292,7 @@ export function wireEngineDialog() {
   btn.addEventListener("click", () => dlg.showModal());
 }
 
-/** Return the active backend's mode ("local" | "remote"). */
+/** Return the active backend's mode ("local" | "mlx" | "remote"). */
 export function activeEngineMode() {
   const sel = document.getElementById("enginePreset");
   const name = sel ? sel.value : "llamacpp";
@@ -326,14 +398,20 @@ export function wireModelBar(ui) {
       loadBtn.disabled = true;
       if (unloadBtn) unloadBtn.disabled = true;
       if (statusText) statusText.textContent = tr("model.loading");
+      // Drop any error toast from a previous failed attempt so a retry doesn't
+      // stack a stale reason next to the new one.
+      removeToast(LOAD_ERROR_TOAST_ID);
       loadingModel = true;
       try {
         const status = await t.core.invoke("load_model", {
           mode,
-          quant: quantEl ? quantEl.value : null,
+          // #optQuant doubles as the MLX quant/model-repo picker when mode is
+          // "mlx" (see applyPreset); send it as `model` (the field load_model's
+          // "mlx" arm reads), not `quant` (GGUF-only, ignored for mlx/remote).
+          quant: mode === "local" && quantEl ? quantEl.value : null,
           baseUrl: urlEl ? urlEl.value : null,
           apiKey: keyEl ? keyEl.value : null,
-          model: modelEl ? modelEl.value : null,
+          model: mode === "mlx" ? (quantEl ? quantEl.value : null) : modelEl ? modelEl.value : null,
           // Explicit llama-server override from Settings (#setLlamaBin). Empty =
           // null so the backend auto-resolves (managed cached -> download -> PATH).
           // A set path is flagged External in the preflight/pipeline provenance.
@@ -352,7 +430,15 @@ export function wireModelBar(ui) {
         updateModeBadge(status);
         if (statusText) statusText.textContent = tr("model.loadedLabel", { label: status.label });
       } catch (err) {
-        if (statusText) statusText.textContent = tr("model.loadFailed", { error: String(err) });
+        const msg = tr("model.loadFailed", { error: String(err) });
+        if (statusText) statusText.textContent = msg;
+        // The load heartbeat toast is removed in `finally`; without a separate,
+        // PERSISTENT error toast the failure only lands in the small model-bar
+        // status line and reads as "the toast just vanished" (esp. on a fast MLX
+        // failure). Distinct id => stopLoadFeedback (removes LOAD_TOAST_ID only)
+        // does not tear it down. Also persist to the bell so it survives scroll.
+        showToast(LOAD_ERROR_TOAST_ID, { kind: "error", title: msg });
+        addNotification("error", tr("model.load"), msg);
       } finally {
         // Load resolved (success line above / catch). Kill the heartbeat + its
         // toast now so a pending tick cannot overwrite the final "Loaded: ..."
@@ -433,11 +519,16 @@ export function quantTierLabel(name, tier) {
 }
 
 /** Rebuild the 3 quant `<select>`s (`#optQuant`, `#setQuant`, `#qsQuant`) from
- *  the backend's full published lineup (list_available_quants: all 13 quants,
- *  not just the 3 CLI Quality tiers), marking each already-cached option.
- *  Replaces the previously-static `<option>` lists in index.html. Preserves
- *  each select's current selection when it's still an available quant, else
- *  falls back to Q8_0 (OcrOptions::default().quant). Best-effort; never throws. */
+ *  the backend's full published GGUF lineup (list_available_quants: all 13
+ *  quants, not just the 3 CLI Quality tiers), marking each already-cached
+ *  option. Replaces the previously-static `<option>` lists in index.html.
+ *  Preserves each select's current selection when it's still an available
+ *  quant, else falls back to Q8_0 (OcrOptions::default().quant). Caches the
+ *  fetched lineup in `ggufQuantsCache` so applyPreset can restore it on an
+ *  mlx->llamacpp switch without re-fetching. If mlx is the LIVE preset when
+ *  this resolves, the DOM is left alone (its MLX options stay visible); the
+ *  cache still updates, so switching back to llamacpp picks up the fresh
+ *  list immediately. Best-effort; never throws. */
 export async function populateQuantSelects() {
   let t;
   try {
@@ -451,21 +542,15 @@ export async function populateQuantSelects() {
   } catch (err) {
     return;
   }
-  const names = new Set(quants.map((q) => q.name));
-  ["optQuant", "setQuant", "qsQuant"].forEach((id) => {
-    const sel = document.getElementById(id);
-    if (!sel) return;
-    const prevValue = sel.value;
-    sel.innerHTML = "";
-    quants.forEach((q) => {
-      const opt = document.createElement("option");
-      opt.value = q.name;
-      const label = quantTierLabel(q.name, q.tier);
-      opt.textContent = q.cached ? label + tr("model.cached") : label;
-      sel.appendChild(opt);
-    });
-    sel.value = names.has(prevValue) ? prevValue : names.has("Q8_0") ? "Q8_0" : sel.value;
-  });
+  ggufQuantsCache = quants;
+  // mlx owns #optQuant with its static MLX_QUANTS; don't overwrite those with
+  // the GGUF lineup. Still re-render MLX_QUANTS so a locale switch (this runs
+  // via markCachedQuants on onLocaleChange) re-translates the tier labels.
+  if (activeEngineMode() === "mlx") {
+    renderQuantOptions(["optQuant", "setQuant", "qsQuant"], MLX_QUANTS, MLX_DEFAULT_MODEL);
+    return;
+  }
+  renderQuantOptions(["optQuant", "setQuant", "qsQuant"], quants, "Q8_0");
 }
 
 /** Alias kept for existing call sites (main.js, settings.js): a single

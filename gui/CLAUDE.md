@@ -109,6 +109,15 @@ Desktop front end for `unlocr`. Wraps the core OCR pipeline; no OCR logic lives 
   URL/key/model + custom GGUF/projector fields live in `#engineDialog` (native
   `<dialog>`, opened by the Modify button via `wireEngineDialog`), NOT inline in
   `.model-bar`; their ids are unchanged so `load_model` reads them the same.
+  (mlx = local mlxcel, Apple Silicon only; picks its model repo via `#optQuant`, below.)
+- `#optQuant` (+ `#setQuant`/`#qsQuant`) is SHARED by both LOCAL engines: `applyPreset`
+  fills it with GGUF quants (`list_available_quants`) for llamacpp, static `MLX_QUANTS`
+  repo ids for mlx; hidden only for a true remote endpoint. `populateQuantSelects` MUST
+  guard `activeEngineMode()==='mlx'` (re-render MLX_QUANTS, don't fall through) or a GGUF
+  refetch / locale switch clobbers the MLX options. mlx load reads the model repo from
+  `#optQuant` (sent as `model`), NOT `#remoteModel`. `MLX_QUANTS`/`MLX_DEFAULT_MODEL` in
+  model.js are hand-mirrored from `src/server/mlx.rs` `recommend_model`/`DEFAULT_MODEL` --
+  keep in sync (like `TASK_PROMPTS`).
 - `frontendDist` is `../src` (static files served as-is).
 - Native file picker: `tauri-plugin-dialog` (added). Init'd in `run()`,
   permission `dialog:default` in `capabilities/default.json`. The Import button

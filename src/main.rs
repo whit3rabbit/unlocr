@@ -95,6 +95,20 @@ fn run() -> Res<()> {
         return Err("--model/--mmproj are local-only; remove them when using --endpoint".into());
     }
 
+    // --mlx is its own local backend (mlxcel-server, not llama-server); reject it
+    // alongside the GGUF-only and remote-only flags before any spawn.
+    if args.mlx {
+        if args.endpoint.is_some() || args.gpu {
+            return Err("--mlx cannot be combined with --endpoint/--gpu".into());
+        }
+        if args.model.is_some() || args.mmproj.is_some() {
+            return Err(
+                "--model/--mmproj are for the GGUF path; use --mlx-model with --mlx".into(),
+            );
+        }
+        return run_mlx(&inputs, &args);
+    }
+
     // Remote endpoint mode: rasterize locally, OCR against a remote
     // OpenAI-compatible server. No local llama-server spawn, no model download.
     if let Some(base_url) = args.endpoint.clone() {
@@ -266,6 +280,74 @@ fn run_remote(base_url: String, inputs: &[PathBuf], args: &Args) -> Res<()> {
             failures += 1;
         }
     }
+    if failures > 0 {
+        return Err(format!("{failures} input(s) failed").into());
+    }
+    Ok(())
+}
+
+/// OCR every input against a local mlxcel-server (MLX, Apple Silicon only).
+/// Pages are rasterized locally (pdftoppm); mlxcel resolves/caches the model
+/// itself from Hugging Face on first run, so there is no unlocr-managed GGUF
+/// download here. --quant/--quality/--llama-bin/--image-max-tokens/
+/// --chat-template are inert (GGUF/llama-server-only knobs).
+fn run_mlx(inputs: &[PathBuf], args: &Args) -> Res<()> {
+    let pdftoppm = preflight::pdftoppm()?;
+
+    let mut on_dl = |p: unlocr::Progress| {
+        if let unlocr::Progress::Download {
+            pct, done, total, ..
+        } = p
+        {
+            use std::io::Write;
+            print!(
+                "\r  mlxcel-server {pct:>3}%  ({} / {} MiB)",
+                done >> 20,
+                total >> 20
+            );
+            if pct >= 100 {
+                println!();
+            }
+            let _ = std::io::stdout().flush();
+        }
+    };
+    let bin = preflight::resolve_mlxcel_server(None, args.model_dir.clone(), &mut on_dl)?;
+
+    let model_repo = args.resolved_mlx_model();
+    println!("starting mlxcel-server for {model_repo} (first run downloads the model)...");
+    let mut on_tick = |elapsed: std::time::Duration, stderr_tail: &str| {
+        print!("\r  still starting... {}s elapsed", elapsed.as_secs());
+        if let Some(last) = stderr_tail.lines().next_back() {
+            if !last.trim().is_empty() {
+                print!(" -- {last}");
+            }
+        }
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+    };
+    let srv = server::MlxServer::start(&bin, &model_repo, args.port, &mut on_tick)?;
+    println!();
+    let port = srv.port;
+    println!("mlxcel-server ready on 127.0.0.1:{port}");
+
+    std::fs::create_dir_all(&args.out)?;
+
+    for stem in unlocr::duplicate_stems(inputs) {
+        eprintln!(
+            "warning: multiple inputs share the stem '{stem}'; their outputs overwrite \
+             each other in {}",
+            args.out.display()
+        );
+    }
+    let mut failures = 0;
+    for input in inputs {
+        if let Err(e) = ocr::run_pdf(&srv, &pdftoppm, input, args) {
+            eprintln!("error: {}: {e}", input.display());
+            failures += 1;
+        }
+    }
+
+    drop(srv); // explicit: kill mlxcel-server before returning
     if failures > 0 {
         return Err(format!("{failures} input(s) failed").into());
     }

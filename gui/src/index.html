@@ -235,6 +235,7 @@
                       <option value="gpu" data-i18n="engine.gpu">GPU full model (vLLM · Unlimited-OCR)</option>
                       <option value="vllm" data-i18n="engine.vllm">vLLM (http://127.0.0.1:8000)</option>
                       <option value="sglang" data-i18n="engine.sglang">SGLang (http://127.0.0.1:30000)</option>
+                      <option value="mlx" data-i18n="engine.mlx">MLX (mlxcel, Apple Silicon only)</option>
                       <option value="custom" data-i18n="engine.custom">Custom endpoint</option>
                     </select>
                     <button class="model-btn model-btn--ghost" id="engineModifyBtn" type="button" data-i18n="engine.modify">Modify…</button>
@@ -246,6 +247,15 @@
                   <span class="opts__hint" id="gpuHint" hidden>
                     Needs a local <code>vllm serve baidu/Unlimited-OCR</code> (16GB+ VRAM).
                     See the README "Run the full model on GPU" section and the Colab notebook.
+                  </span>
+                  <!-- MLX (mlxcel) runs only on Apple Silicon; auto-downloads
+                       mlxcel-server, then mlxcel itself resolves/caches the model
+                       repo from Hugging Face on first run. -->
+                  <span class="opts__hint" id="mlxHint" data-i18n="engine.mlxHint" hidden>
+                    Experimental. Apple Silicon only. mlxcel's Unlimited-OCR loader is new and
+                    may fail to load the current MLX quants (crash or silent hang); use the GGUF
+                    (llamacpp) engine if a model will not load. The mlxcel-server binary
+                    auto-downloads; the model repo (below) is fetched from Hugging Face on first run.
                   </span>
                 </div>
                 <!-- Model load bar (litellm-style). A model must be loaded before
@@ -713,6 +723,11 @@
                 <div class="settings__deps-list" id="sysreqList" aria-live="polite">
                   <p class="placeholder" id="sysreqEmpty">Checking…</p>
                 </div>
+                <!-- Recommended engine/quant callout, shown only when the live
+                     OCR engine preset differs from the backend's recommendation
+                     (settings.js wireSystemRequirements). Informational: never
+                     auto-switches a live selection. -->
+                <p class="opts__hint" id="sysreqRecommendation" hidden></p>
               </div>
               <!-- External tools: pdftoppm (OCR), llama-server (engine), pandoc (export).
                    Populated by main.js wireDependencies() via list_tools. On Windows each

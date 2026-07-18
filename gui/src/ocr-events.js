@@ -4,6 +4,7 @@
 // the result to the ui (Run gate) and the file-rail pipeline stages.
 
 import { requireTauri } from "./tauri.js";
+import { activeEngineMode } from "./model.js";
 
 /** Run preflight on load. EH-0004 turns this into a GATE: if a required tool
  *  (llama-server or pdftoppm) is missing (report.ok === false), the Run button
@@ -18,7 +19,12 @@ export async function preflightOnLoad(ui, rail) {
     // default (Q8_0). Without this the pipeline "Model GGUF" dot always reflects
     // the default quant's disk presence and disagrees with the loaded model.
     const quant = document.getElementById("optQuant")?.value || undefined;
-    const report = await t.core.invoke("preflight", quant ? { quant } : {});
+    // Pass the active engine mode so the backend skips GGUF/llama-server probes
+    // (and quant charset validation) for mlx/remote: in mlx mode #optQuant holds
+    // the HF repo id, not a GGUF quant tag. The report carries `mode` back so
+    // renderPipeline can show the right pipeline stages.
+    const mode = activeEngineMode();
+    const report = await t.core.invoke("preflight", { mode, ...(quant ? { quant } : {}) });
     // eslint-disable-next-line no-console
     console.log("[preflight]", report);
 

@@ -10,6 +10,9 @@ use super::system;
 const RAM_GOOD: u64 = 8 * 1024 * 1024 * 1024; // 8 GiB
 /// Minimum total RAM (bytes) for a "Marginal" rating.
 const RAM_MARGINAL: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
+/// RAM threshold above which `recommend_quant` suggests the BF16 tier instead
+/// of Q8_0 (headroom for the full 5.47GB GGUF + KV cache + OS overhead).
+const RAM_HIGH: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
 
 /// Minimum logical CPU cores for "Good".
 const CPU_GOOD: u32 = 4;
@@ -54,6 +57,20 @@ pub struct SystemInfo {
     pub metrics: Vec<Metric>,
     pub verdict: Status,
     pub verdict_label: String,
+    /// True when this build targets macOS on Apple Silicon (mlxcel-server is
+    /// available). Compile-time (see `server::mlx_platform_supported`).
+    pub apple_silicon: bool,
+    /// "mlx" | "llamacpp": the backend `Settings::default()` picks on a fresh
+    /// install, and what the GUI's System Requirements panel recommends to an
+    /// existing install still on the non-recommended engine.
+    pub recommended_engine: String,
+    /// GGUF quant tag (`cli_args::Quality::quant()`-shaped) recommended by RAM.
+    pub recommended_quant: String,
+    /// MLX model repo id recommended by RAM. Always populated (even on a
+    /// non-Apple-Silicon build) so the frontend can show it as an informational
+    /// "if you had an Apple Silicon Mac" value; only `apple_silicon` gates
+    /// whether the mlx preset is actually usable.
+    pub recommended_mlx_model: String,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -138,6 +155,19 @@ fn rate_disk(bytes: Option<u64>) -> (Status, String, Option<String>) {
             Some("5 GB+ free recommended for model downloads".into()),
         ),
         None => (Status::Unknown, "Unknown".into(), None),
+    }
+}
+
+/// Recommend a GGUF quant tag by available RAM, matching the tiers surfaced
+/// under Settings > Engine options (`cli_args::Quality`: Best=BF16, Good=Q8_0,
+/// Less=Q4_K_M). Below `RAM_MARGINAL` still returns Q4_K_M (the smallest
+/// tier) rather than erroring -- an underpowered machine gets the best
+/// available advice, not no advice.
+pub fn recommend_quant(ram_bytes: Option<u64>) -> &'static str {
+    match ram_bytes {
+        Some(b) if b >= RAM_HIGH => "BF16",
+        Some(b) if b >= RAM_GOOD => "Q8_0",
+        _ => "Q4_K_M",
     }
 }
 
@@ -249,10 +279,16 @@ pub fn check_system_requirements(cache_dir: &Path) -> SystemInfo {
         },
     ];
 
+    let apple_silicon = crate::server::mlx_platform_supported();
+
     SystemInfo {
         metrics,
         verdict,
         verdict_label: fmt_verdict_label(verdict).into(),
+        apple_silicon,
+        recommended_engine: if apple_silicon { "mlx" } else { "llamacpp" }.into(),
+        recommended_quant: recommend_quant(p.ram).into(),
+        recommended_mlx_model: crate::server::recommend_mlx_model(p.ram).into(),
     }
 }
 
@@ -362,6 +398,14 @@ mod tests {
             worst_status(&[Status::Unknown, Status::Unknown, Status::Unknown]),
             Status::Unknown
         );
+    }
+
+    #[test]
+    fn recommend_quant_tiers_by_ram() {
+        assert_eq!(recommend_quant(Some(16 * 1024 * 1024 * 1024)), "BF16");
+        assert_eq!(recommend_quant(Some(8 * 1024 * 1024 * 1024)), "Q8_0");
+        assert_eq!(recommend_quant(Some(4 * 1024 * 1024 * 1024)), "Q4_K_M");
+        assert_eq!(recommend_quant(None), "Q4_K_M");
     }
 
     #[test]

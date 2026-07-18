@@ -2,11 +2,16 @@ use crate::Res;
 use std::time::Duration;
 
 mod local;
+mod mlx;
 mod remote;
 #[cfg(test)]
 mod tests;
 
 pub use local::Server;
+pub use mlx::{
+    platform_supported as mlx_platform_supported, recommend_model as recommend_mlx_model,
+    MlxServer, DEFAULT_MODEL as MLX_DEFAULT_MODEL,
+};
 pub use remote::RemoteEndpoint;
 
 // First model load (incl. mmproj) can be slow; give it room.

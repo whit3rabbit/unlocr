@@ -100,10 +100,10 @@ pub(crate) fn process_single_input(
     // Run metadata for the Library run-detail dialog: which engine ran it, the
     // output layout, and wall-clock duration (measured from just before OCR, so it
     // covers rasterize + inference). page_count is filled at finish from out.pages.
-    let backend_label = if matches!(lm.backend, Backend::Local(_)) {
-        "local"
-    } else {
-        "remote"
+    let backend_label = match &lm.backend {
+        Backend::Local(_) => "local",
+        Backend::Mlx(_) => "mlx",
+        Backend::Remote(_) => "remote",
     };
     let output_mode_label = match mode {
         OutputMode::Single => "single",
@@ -121,6 +121,14 @@ pub(crate) fn process_single_input(
     let should_cancel = || state.cancel.load(Ordering::SeqCst);
     let outcome = match &lm.backend {
         Backend::Local(srv) => unlocr::ocr_pages(
+            srv,
+            pdftoppm,
+            &input_path,
+            opts,
+            &mut on_progress,
+            &should_cancel,
+        ),
+        Backend::Mlx(srv) => unlocr::ocr_pages(
             srv,
             pdftoppm,
             &input_path,

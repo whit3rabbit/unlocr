@@ -119,8 +119,25 @@ fn default_mode() -> String {
 fn default_remote_base_url() -> String {
     "http://127.0.0.1:8080".to_string()
 }
+/// RAM-recommended default for `#optQuant`, the control BOTH engines share
+/// (see model.js's `applyPreset`/`MLX_QUANTS`): an MLX model repo id on a
+/// build that defaults to the mlx engine (`default_engine_preset`), else a
+/// GGUF quant tag (Q4_K_M/Q8_0/BF16 by available RAM), falling back to the
+/// smallest tier (Q4_K_M, `recommend_quant`'s own None case) when RAM cannot
+/// be probed. Only used as the
+/// SETTINGS ROW default (fresh install / cleared store, see `fetch`'s
+/// missing-row fallback); an existing saved row is never overwritten by this,
+/// so a user's prior explicit or implicit choice is always respected.
 fn default_quant() -> String {
-    OcrOptions::default().quant
+    let ram = unlocr::preflight::system::get_total_ram_bytes();
+    if default_engine_preset() == "mlx" {
+        unlocr::server::recommend_mlx_model(ram).to_string()
+    } else {
+        // recommend_quant handles a None probe itself (smallest tier), so no
+        // separate OcrOptions fallback -- keeps this in lockstep with the fetch
+        // test, which asserts equality against recommend_quant(ram).
+        unlocr::preflight::recommend_quant(ram).to_string()
+    }
 }
 fn default_dpi() -> u32 {
     OcrOptions::default().dpi
@@ -138,9 +155,19 @@ fn default_prompt() -> String {
 fn default_idle_unload_minutes() -> u32 {
     15
 }
+/// "mlx" on a build that ships an `mlxcel-server` binary (macOS Apple Silicon),
+/// else "llamacpp". Fresh-install-only default (see `default_quant`'s doc
+/// comment): mlx is the recommended engine on Apple Silicon (native
+/// Unlimited-OCR R-SWA support, no unmerged-patch dependency), so a first
+/// launch there defaults to it instead of the GGUF/llama.cpp path.
 fn default_engine_preset() -> String {
-    "llamacpp".to_string()
+    if unlocr::server::mlx_platform_supported() {
+        "mlx".to_string()
+    } else {
+        "llamacpp".to_string()
+    }
 }
+
 fn default_pages_mode() -> String {
     "all".to_string()
 }
@@ -357,11 +384,31 @@ mod tests {
         let s = fetch(&conn).unwrap();
         assert_eq!(s.mode, "local");
         assert_eq!(s.remote_base_url, default_remote_base_url());
-        assert_eq!(s.default_quant, OcrOptions::default().quant);
+        // RAM- and platform-recommended, not a fixed literal (see default_quant's
+        // doc comment) -- compare against the same recommendation fns rather than
+        // hardcoding a value that would break on a different CI/dev machine.
+        let ram = unlocr::preflight::system::get_total_ram_bytes();
+        let expected_quant = if unlocr::server::mlx_platform_supported() {
+            unlocr::server::recommend_mlx_model(ram).to_string()
+        } else {
+            unlocr::preflight::recommend_quant(ram).to_string()
+        };
+        assert_eq!(s.default_quant, expected_quant);
         assert_eq!(s.default_dpi, OcrOptions::default().dpi);
         assert_eq!(s.idle_unload_minutes, 15);
         assert!(s.remote_api_key.is_empty());
-        assert_eq!(s.engine_preset, "llamacpp");
+        // Platform-dependent: mlx on Apple Silicon (mlxcel-server ships there),
+        // llamacpp elsewhere -- see default_engine_preset's doc comment. This
+        // test runs on whatever CI/dev machine builds it, so assert against the
+        // same predicate rather than a fixed literal.
+        assert_eq!(
+            s.engine_preset,
+            if unlocr::server::mlx_platform_supported() {
+                "mlx"
+            } else {
+                "llamacpp"
+            }
+        );
         assert_eq!(s.image_max_tokens, None);
         assert_eq!(s.repeat_penalty, None);
         assert!(!s.keep_images);

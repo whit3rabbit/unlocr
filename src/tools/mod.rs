@@ -5,11 +5,12 @@
 //! transparently afterward: `preflight::locate` also scans the cache tools dir, so
 //! existing callers find a downloaded tool with no change.
 //!
-//! Two sources: OFFICIAL upstream releases (pandoc, poppler/pdftoppm on Windows) that
-//! we only reference by URL + sha256 (no redistribution, no GPL-bundling obligation);
-//! and unlocr's OWN patched `llama-server` (Unlimited-OCR R-SWA, llama.cpp PR #24975,
-//! unmerged upstream) hosted on a dedicated `llama-rswa-<date>` release, pinned on
-//! every platform that has one (mac arm64/x64, linux x64, win x64).
+//! Two sources: OFFICIAL upstream releases (pandoc, poppler/pdftoppm on Windows,
+//! `mlxcel-server` on mac arm64) that we only reference by URL + sha256 (no
+//! redistribution, no GPL-bundling obligation); and unlocr's OWN patched
+//! `llama-server` (Unlimited-OCR R-SWA, llama.cpp PR #24975, unmerged upstream)
+//! hosted on a dedicated `llama-rswa-<date>` release, pinned on every platform
+//! that has one (mac arm64/x64, linux x64, win x64).
 
 use crate::{Progress, Res};
 use std::fs;
@@ -81,6 +82,17 @@ const PINS: &[ToolPin] = &[
         url: "https://github.com/whit3rabbit/unlocr/releases/download/llama-rswa-20260704/llama-rswa-20260704-macos-arm64.zip",
         sha256: "f0deb0fcde61078a637086d23111699950654c2de790381cc041b8a382701a72",
         exe: "llama-server",
+    },
+    // Official upstream release (lablup/mlxcel v0.4.1). Native Rust MLX runtime with
+    // built-in "unlimited-ocr" architecture support (incl. the R-SWA sliding-window
+    // decode cache natively, no unmerged-patch dependency like the llama-server path).
+    // Zip bundles mlxcel + mlxcel-server + mlx.metallib (Metal shader lib, must stay
+    // alongside the exe). Apple Silicon only.
+    ToolPin {
+        name: "mlxcel-server",
+        url: "https://github.com/lablup/mlxcel/releases/download/v0.4.1/mlxcel-macos-aarch64.zip",
+        sha256: "77231290970c5589e064cf03cb37135f853840da6e1966d578243792a450764b",
+        exe: "mlxcel-server",
     },
 ];
 

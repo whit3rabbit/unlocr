@@ -300,6 +300,34 @@ pub fn check(
     })
 }
 
+/// Resolve `mlxcel-server` for `--mlx` mode, auto-downloading it into the managed
+/// cache if absent (like the GGUF llama-server path, minus the provenance/patch
+/// concerns: mlxcel ships an official signed release, not an unmerged patch we
+/// maintain ourselves). Apple Silicon only; errors immediately on any other
+/// target rather than pretending a download might work.
+pub fn resolve_mlxcel_server(
+    override_: Option<&Path>,
+    model_dir: Option<PathBuf>,
+    on_progress: &mut dyn FnMut(crate::Progress),
+) -> Res<PathBuf> {
+    if !crate::server::mlx_platform_supported() {
+        return Err(
+            "--mlx requires macOS on Apple Silicon (mlxcel-server has no build for this \
+             platform); use the default llama.cpp/GGUF path instead"
+                .into(),
+        );
+    }
+    if let Some(p) = override_ {
+        return Ok(p.to_path_buf());
+    }
+    let cache = crate::model::cache_dir(model_dir)?;
+    let managed = crate::tools::tools_dir(&cache).join("mlxcel-server");
+    if let Some(p) = crate::tools::find_exe(&managed, "mlxcel-server") {
+        return Ok(p);
+    }
+    crate::tools::ensure_tool(&cache, "mlxcel-server", on_progress)
+}
+
 /// Resolve pdftoppm alone. Remote inference still rasterizes locally, so the GUI's
 /// remote mode needs poppler but NOT llama-server; `check` requires both, which
 /// would wrongly block remote on a machine without llama.cpp. Same lookup +
